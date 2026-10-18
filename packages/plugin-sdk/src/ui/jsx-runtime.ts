@@ -1,5 +1,5 @@
 // Automatic JSX runtime. Produces the same `{k, p, c}` shape as `flux.ui.h`.
-// Configure with `"jsx": "react-jsx", "jsxImportSource": "@fluxdown/plugin-sdk/ui"`.
+// Configure with `"jsx": "react-jsx", "jsxImportSource": "fluxdown-plugin-sdk/ui"`.
 import type { ViewChild, ViewIntrinsicElements, ViewNode } from "../types/view";
 
 /** Node kind of a `<>…</>` result; the parent splices its children in and it never reaches the wire. */

@@ -39,6 +39,7 @@ pub mod events;
 pub mod file_exists;
 pub mod ftp_downloader;
 pub mod hls_downloader;
+pub mod intercept;
 /// 设备互联（`fluxdown_link`）的引擎数据库存储后端。仅 `link` feature 下编译。
 #[cfg(feature = "link")]
 pub mod link;
@@ -68,6 +69,8 @@ pub mod segment_coordinator;
 pub mod selection;
 /// 站点 HTTP Basic 认证凭据（per-host 保存 + 建任务时自动套用）。
 pub mod site_auth;
+/// 任务整个下载期的速度曲线与统计（持久化，任务完成后可回看）。
+pub mod speed_history;
 pub mod speed_limiter;
 /// 通用订阅 provider 接口（RSS 与插件订阅共用）。
 pub mod subscription;

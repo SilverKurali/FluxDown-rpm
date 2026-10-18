@@ -67,6 +67,23 @@ function evidenceOf(e: ElementState, key: (u: string) => string): ElementEvidenc
   return { exact, temporal };
 }
 
+/**
+ * 各元素的证据；某地址已是其它元素的 exact 证据时，从本元素的 temporal 里剔除——temporal 只按
+ * 时间窗口计数，推荐流同时预加载多个视频时会把别的元素的数据也算进来。
+ */
+function evidencesOf(es: ElementState[], key: (u: string) => string): { e: ElementState; ev: ElementEvidence }[] {
+  const out = es.map((e) => ({ e, ev: evidenceOf(e, key) }));
+  const exactOwners = new Map<string, number>();
+  for (const { ev } of out) for (const k of ev.exact) exactOwners.set(k, (exactOwners.get(k) ?? 0) + 1);
+  for (const { ev } of out) {
+    for (const k of [...ev.temporal.keys()]) {
+      const owners = exactOwners.get(k) ?? 0;
+      if (owners > (ev.exact.has(k) ? 1 : 0)) ev.temporal.delete(k);
+    }
+  }
+  return out;
+}
+
 /** 变体关联播放元素可用的视频轨 URL：下载用的轨 + 同档被合并掉的其它编码轨。 */
 function variantVideoUrls(v: MediaCandidate["variants"][number]): string[] {
   return [v.videoUrl, ...(v.alternateUrls ?? [])];
@@ -116,33 +133,35 @@ function playingVariant(
 }
 
 /**
- * 把候选绑定到元素：score = 10 × |S ∩ E| + Σ T[s]（s ∈ S）；取 score > 0 且最高者，
- * 同分取 rankElement 更高的元素；任一 E 命中则 confidence 为 exact。
+ * 把候选绑定到元素：先比 exact 命中数，再比 temporal 计数，再比 rankElement；同分保留先出现的
+ * 元素（调用方把真实元素排在历史会话前）。exact 命中必须压过任何 temporal 计数——否则另一个
+ * 元素的大量 temporal 会抢走候选，随后又因只有 temporal 证据被修剪掉，候选落进「未关联」。
  */
 export function bindCandidates(
   cands: MediaCandidate[],
   es: ElementState[],
   key: (u: string) => string,
 ): Map<string, CandidateBinding> {
-  const evidences = es.map((e) => ({ e, ev: evidenceOf(e, key) }));
+  const evidences = evidencesOf(es, key);
   const result = new Map<string, CandidateBinding>();
   const scores = new Map<string, number>();
 
   for (const c of cands) {
     const s = candidateUrlKeys(c, key);
-    let best: { e: ElementState; ev: ElementEvidence; score: number; hits: number } | null = null;
+    let best: { e: ElementState; ev: ElementEvidence; hits: number; temporal: number } | null = null;
     for (const { e, ev } of evidences) {
       let hits = 0;
-      let temporalSum = 0;
+      let temporal = 0;
       for (const k of s) {
         if (ev.exact.has(k)) hits++;
-        temporalSum += ev.temporal.get(k) ?? 0;
+        temporal += ev.temporal.get(k) ?? 0;
       }
-      const score = 10 * hits + temporalSum;
-      if (score <= 0) continue;
-      if (!best || score > best.score || (score === best.score && rankElement(e) > rankElement(best.e))) {
-        best = { e, ev, score, hits };
-      }
+      if (hits === 0 && temporal === 0) continue;
+      const better =
+        !best ||
+        hits > best.hits ||
+        (hits === best.hits && (temporal > best.temporal || (temporal === best.temporal && rankElement(e) > rankElement(best.e))));
+      if (better) best = { e, ev, hits, temporal };
     }
     if (!best) continue;
     result.set(c.id, {
@@ -150,7 +169,7 @@ export function bindCandidates(
       playingVariantId: playingVariant(c, best.ev, key),
       confidence: best.hits > 0 ? "exact" : "temporal",
     });
-    scores.set(c.id, best.score);
+    scores.set(c.id, best.temporal);
   }
 
   // 弱证据修剪：元素已有 exact 绑定的候选时，丢弃它的 temporal 绑定；

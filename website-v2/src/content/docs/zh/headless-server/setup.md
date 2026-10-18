@@ -67,6 +67,7 @@ cargo build --release -p fluxdown_agent --features web-ui   # 把 web/dist 嵌�
 | `FLUXDOWN_LANG` | 未设置(回退浏览器语言) | `/ping` 返回的回退语言(`en`/`zh`),供 Web 界面首次加载使用。在浏览器里选过语言的用户始终以本人选择为准。 |
 | `FLUXDOWN_MDNS` | 开 | 设备互联 mDNS 广播开关。设为假值可停止在局域网内广播本服务器。 |
 | `FLUXDOWN_LINK_NAME` | `FluxDown Server` | 设备互联开启时,其它 FluxDown 客户端看到的本机名称。 |
+| `FLUXDOWN_LINK_ADVERTISE_ADDR` | 未设置(自动探测) | 覆盖本服务器在配对与设备信息交换时向其它 FluxDown 设备自报的可回连地址。逗号分隔的 `host[:port]` 或 `http(s)://` URL(缺省端口取实际监听端口)。在 Docker / NAT 后 / 多网卡主机上自动探测到的往往是对端连不上的内部地址,此时用它指定对外可达地址,例如 `192.168.1.5:8080`。 |
 | `FLUXDOWN_ANALYTICS` | 开 | 匿名统计开关(仅在带 App-Key 的构建中生效,官方构建带有)。设为假值可关闭。 |
 | `FLUXDOWN_LOG_LEVEL` | 未设置——`info` | 未设置 `RUST_LOG` 时的默认 `tracing` 日志级别(`error`/`warn`/`info`/`debug`/`trace`,大小写不敏感)。`RUST_LOG` 存在时始终优先——简单场景用 `FLUXDOWN_LOG_LEVEL` 一键调级,需要按模块精细控制再用 `RUST_LOG`。启动时读取一次,修改需重启生效。 |
 

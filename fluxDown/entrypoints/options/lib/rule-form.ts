@@ -13,6 +13,7 @@ import {
 import { PackRejectedError, validatePack } from "@/rules/validate";
 import { normalizeDomain } from "@/utils/domain-exclusion";
 import type { MessageKey } from "@/utils/i18n";
+import type { RuleIssue } from "./rule-issue";
 
 export type FormStage = "response" | "normalize";
 export type FormAction = "resource" | "ignore" | "filename" | "strip-params";
@@ -31,6 +32,11 @@ export interface RuleForm {
   action: FormAction;
   resourceType: ResourceType;
   params: string[];
+  /** 空 = 不设置（引擎按 0 处理）。 */
+  priority: string;
+  /** 命中这些条件时规则不生效（每个条目独立，任一命中即排除）。 */
+  excludeHost: string[];
+  excludeUrl: string[];
 }
 
 export const RESOURCE_TYPE_OPTIONS: ResourceType[] = [
@@ -87,6 +93,9 @@ export function emptyForm(): RuleForm {
     action: "resource",
     resourceType: "video",
     params: [],
+    priority: "",
+    excludeHost: [],
+    excludeUrl: [],
   };
 }
 
@@ -108,15 +117,32 @@ export function formatMB(bytes: number | undefined): string {
   return String(Number((bytes / BYTES_PER_MB).toFixed(3)));
 }
 
+/** exclude 条目只含单个 host 或 url 列表时可用表单表示；否则返回 null。 */
+function parseExclude(exclude: MatchSpec[] | undefined): { host: string[]; url: string[] } | null {
+  const out = { host: [] as string[], url: [] as string[] };
+  for (const entry of exclude ?? []) {
+    const keys = Object.keys(entry);
+    if (keys.length !== 1) return null;
+    if (keys[0] === "host" && entry.host) out.host.push(...entry.host);
+    else if (keys[0] === "url" && entry.url) out.url.push(...entry.url);
+    else return null;
+  }
+  return out;
+}
+
 /** 规则能否用表单表示；不能则返回 null（含 exclude / pathRegex / confidence 等高级字段）。 */
 export function ruleToForm(rule: SniffRuleV1): RuleForm | null {
   if (rule.stage !== "response" && rule.stage !== "normalize") return null;
   if (rule.requires !== undefined || rule.classifyOnly !== undefined) return null;
-  if (rule.exclude && rule.exclude.length > 0) return null;
+  const excluded = parseExclude(rule.exclude);
+  if (excluded === null) return null;
   if (!Object.keys(rule.match).every((k) => FORM_MATCH_KEYS[k])) return null;
 
   const form = emptyForm();
   form.title = rule.title ?? "";
+  form.priority = rule.priority === undefined ? "" : String(rule.priority);
+  form.excludeHost = excluded.host;
+  form.excludeUrl = excluded.url;
   form.stage = rule.stage;
   const m = rule.match;
   form.host = m.host ?? [];
@@ -158,7 +184,6 @@ export interface RuleBase {
   id: string;
   version: number;
   enabled?: boolean;
-  priority?: number;
 }
 
 export type FormResult = { ok: true; rule: SniffRuleV1 } | { ok: false; errorKey: MessageKey };
@@ -173,6 +198,9 @@ function parseMBToBytes(text: string): number | undefined | null {
 }
 
 export function formToRule(form: RuleForm, base: RuleBase): FormResult {
+  const priorityText = form.priority.trim();
+  const priority = priorityText === "" ? undefined : Number(priorityText);
+  if (priority !== undefined && !Number.isInteger(priority)) return { ok: false, errorKey: "rules.form.errPriority" };
   const minSize = parseMBToBytes(form.minSizeMB);
   const maxSize = parseMBToBytes(form.maxSizeMB);
   if (minSize === null || maxSize === null) return { ok: false, errorKey: "rules.form.errSize" };
@@ -214,7 +242,11 @@ export function formToRule(form: RuleForm, base: RuleBase): FormResult {
   const title = form.title.trim();
   if (title) rule.title = title;
   if (base.enabled === false) rule.enabled = false;
-  if (base.priority !== undefined) rule.priority = base.priority;
+  if (priority !== undefined) rule.priority = priority;
+  const exclude: MatchSpec[] = [];
+  if (form.excludeHost.length) exclude.push({ host: form.excludeHost });
+  if (form.excludeUrl.length) exclude.push({ url: form.excludeUrl });
+  if (exclude.length) rule.exclude = exclude;
   return { ok: true, rule };
 }
 
@@ -232,7 +264,7 @@ export function generateRuleId(title: string, now: number): string {
 
 const LOCAL_ID_RE = /^local\.[a-z0-9][a-z0-9._-]{1,62}$/;
 
-export type CheckResult = { ok: true; rule: SniffRuleV1 } | { ok: false; errors: string[] };
+export type CheckResult = { ok: true; rule: SniffRuleV1 } | { ok: false; errors: RuleIssue[] };
 
 /** 把单条规则包进 local 包，用 validatePack 校验；逐条错误以字符串返回。 */
 export function checkLocalRule(rule: SniffRuleV1, now: number): CheckResult {
@@ -249,10 +281,12 @@ export function checkLocalRule(rule: SniffRuleV1, now: number): CheckResult {
     if (checked.rules.length === 1) return { ok: true, rule: checked.rules[0] };
     return {
       ok: false,
-      errors: rejected.length ? rejected.map((r) => `${r.id || "?"}: ${r.reason}`) : ["invalid rule"],
+      errors: rejected.length
+        ? rejected.map((r) => ({ code: r.code, param: r.param, detail: r.reason }))
+        : [{ detail: "invalid rule" }],
     };
   } catch (e) {
-    if (e instanceof PackRejectedError) return { ok: false, errors: [e.message] };
+    if (e instanceof PackRejectedError) return { ok: false, errors: [{ detail: e.message }] };
     throw e;
   }
 }
@@ -270,7 +304,7 @@ export interface FinalizeOptions {
  */
 export function finalizeLocalRule(draft: unknown, opts: FinalizeOptions): CheckResult {
   if (typeof draft !== "object" || draft === null || Array.isArray(draft)) {
-    return { ok: false, errors: ["rule must be a JSON object"] };
+    return { ok: false, errors: [{ code: "not_object", detail: "rule must be a JSON object" }] };
   }
   const raw = draft as Record<string, unknown>;
   let id: string;

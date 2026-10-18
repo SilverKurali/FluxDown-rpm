@@ -18,7 +18,7 @@ import type {
   DetectedResource,
   ResourceMessagePayload,
 } from "@/utils/resource-types";
-import type { ElementState } from "./protocol";
+import type { ElementState, HooksInfo } from "./protocol";
 import { computeConfidence, isWorthShowing } from "./resource-policy";
 import { getEngine } from "./rules-store";
 import { mergeRestoredTab } from "./tab-restore";
@@ -38,6 +38,14 @@ const MAX_HLS_PLAYLISTS_PER_TAB = 64;
 const MAX_PERSISTED_RESOURCES = 200;
 const PERSIST_DEBOUNCE_MS = 1_000;
 const SESSION_KEY_PREFIX = "fluxdown_tab_";
+/** 每 tab 保留的历史播放会话数（推荐流里看过 / 预加载过的视频）。 */
+const MAX_RETIRED_SESSIONS = 12;
+
+/** 帧里当前存活的 sensor 实例。 */
+export interface FrameSession {
+  sid: string;
+  hooks: HooksInfo | null;
+}
 
 interface TabState {
   /** 最新的页面 URL（含 replaceState 改写后的 query）。 */
@@ -59,7 +67,14 @@ interface TabState {
    */
   hlsPlaylists: Map<string, HlsPlaylistInfo>;
   elements: Map<string, ElementState>;
-  frames: Set<number>;
+  /** 帧 id → 该帧当前的 sensor 会话（同时充当已登记帧表）。 */
+  sessions: Map<number, FrameSession>;
+  /** 历史播放会话（新的在前，有界）：元素换了来源或被移除时的最后证据与标题。 */
+  retired: ElementState[];
+  /** 元素 key → 播放中时上报的标题及其会话键；归档时用作该会话的标题。 */
+  playTitles: Map<string, { session: string; title: string }>;
+  /** 已检查过的元素 exact 证据地址（见 {@link unseenEvidence}）。 */
+  evidenceSeen: Set<string>;
   /** 最近一次右键命中的媒体元素 key。 */
   contextTarget: string | null;
   version: number;
@@ -80,7 +95,10 @@ function stateOf(tabId: number): TabState {
       carriedManifests: new Set(),
       hlsPlaylists: new Map(),
       elements: new Map(),
-      frames: new Set(),
+      sessions: new Map(),
+      retired: [],
+      playTitles: new Map(),
+      evidenceSeen: new Set(),
       contextTarget: null,
       version: 0,
     };
@@ -97,6 +115,12 @@ export function onTabChanged(listener: (tabId: number) => void): void {
 function touch(tabId: number): void {
   stateOf(tabId).version++;
   schedulePersist(tabId);
+  for (const listener of changeListeners) listener(tabId);
+}
+
+/** 不需要持久化的派生状态（探测结论）变化：只让视图与徽标重建。 */
+export function markTabChanged(tabId: number): void {
+  stateOf(tabId).version++;
   for (const listener of changeListeners) listener(tabId);
 }
 
@@ -130,8 +154,11 @@ function clearTab(tabId: number, keepFrames: boolean, carryManifests: boolean): 
   if (!carryManifests) state.manifests.clear();
   state.carriedManifests = new Set(state.manifests.keys());
   state.elements.clear();
+  state.retired = [];
+  state.playTitles.clear();
+  state.evidenceSeen.clear();
   state.contextTarget = null;
-  if (!keepFrames) state.frames.clear();
+  if (!keepFrames) state.sessions.clear();
   touch(tabId);
 }
 
@@ -180,19 +207,129 @@ export function removeTab(tabId: number): void {
   void browser.storage.session?.remove(`${SESSION_KEY_PREFIX}${tabId}`).catch(() => {});
 }
 
-// ===== 帧 =====
+// ===== 帧 / sensor 会话 =====
 
-export function registerFrame(tabId: number, frameId: number): void {
-  stateOf(tabId).frames.add(frameId);
+/** 会话键：同一元素上一次具体播放（MSE 会话或直链来源）的身份；没有可用证据时为 null。 */
+function sessionKeyOf(element: ElementState): string | null {
+  if (element.msId !== undefined && element.bindings.some((b) => b.exact.length > 0)) {
+    return `ms:${element.hid ?? ""}:${element.msId}`;
+  }
+  return element.currentSrc ? `src:${element.currentSrc}` : null;
+}
+
+/** FNV-1a 32 位：把会话键（可能是很长的 URL）压成归档项 key 的短后缀。 */
+function shortHash(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+/** 把元素当前的播放会话归档（没有证据的不归档）；同帧同会话的旧归档被替换。 */
+function retire(state: TabState, element: ElementState): void {
+  const session = sessionKeyOf(element);
+  if (!session) return;
+  const played = state.playTitles.get(element.key);
+  const playedTitle = played?.session === session ? played.title : "";
+  if (played?.session === session) state.playTitles.delete(element.key);
+  const record: ElementState = {
+    ...element,
+    key: `${element.key}@${shortHash(session)}`,
+    playing: false,
+    visibleRatio: 0,
+    title: playedTitle || element.title,
+    retiredSession: session,
+  };
+  const rest = state.retired.filter((r) => !(r.frameId === element.frameId && r.retiredSession === session));
+  state.retired = [record, ...rest].slice(0, MAX_RETIRED_SESSIONS);
+}
+
+/**
+ * 登记帧的 sensor 会话；返回登记是否变化。同帧出现新 sid（重注入 / 新文档）时，旧实例的元素
+ * 不会再更新也不会再发 removed：归档后删除。
+ */
+function adoptSession(state: TabState, frameId: number, sid: string): boolean {
+  if (state.sessions.get(frameId)?.sid === sid) return false;
+  state.sessions.set(frameId, { sid, hooks: null });
+  const prefix = `${sid}:`;
+  for (const [key, element] of state.elements) {
+    if (element.frameId !== frameId || key.startsWith(prefix)) continue;
+    retire(state, element);
+    state.elements.delete(key);
+  }
+  return true;
+}
+
+export function registerSession(tabId: number, frameId: number, sid: string): void {
+  const state = stateOf(tabId);
+  if (adoptSession(state, frameId, sid)) touch(tabId);
+}
+
+/**
+ * sensor 上报的钩子状态（握手应答或超时）。钩子实例 hid 变了说明帧换了文档（同址刷新不清投影）：
+ * 上一个文档的 MSE 历史会话已无对应页面，丢弃；sensor 重注入时 hid 不变，历史会话保留。
+ */
+export function setSessionHooks(tabId: number, frameId: number, sid: string, hooks: HooksInfo | null): void {
+  const state = stateOf(tabId);
+  adoptSession(state, frameId, sid);
+  const session = state.sessions.get(frameId);
+  if (!session) return;
+  session.hooks = hooks;
+  if (hooks) {
+    state.retired = state.retired.filter((r) => r.frameId !== frameId || r.hid === undefined || r.hid === hooks.hid);
+  }
+  touch(tabId);
+}
+
+/** 已检查证据地址的上限：整体清空后最多让同一批地址各重查一次。 */
+const MAX_EVIDENCE_SEEN = 2_000;
+
+/**
+ * 元素 MSE exact 证据里、资源表还没有的地址，作为资源补报。资源表靠 webRequest 填充；扩展更新
+ * （storage.session 随之清空）或会话快照丢失后，已暂停 / 已缓冲完的播放器不再发请求，证据是这些
+ * 地址唯一的来源。exact 证据只来自页面 fetch / XHR 读出并追加进 SourceBuffer 的响应。
+ * 每个地址在本页投影内只检查一次，正常播放时的开销是一次 Set 查找。
+ */
+export function unseenEvidence(tabId: number, elements: Omit<ElementState, "frameId">[]): ResourceMessagePayload[] {
+  const state = tabs.get(tabId);
+  if (!state) return [];
+  const engine = getEngine();
+  const out: ResourceMessagePayload[] = [];
+  for (const element of elements) {
+    for (const binding of element.bindings) {
+      for (const url of binding.exact) {
+        if (state.evidenceSeen.has(url)) continue;
+        if (state.evidenceSeen.size >= MAX_EVIDENCE_SEEN) state.evidenceSeen.clear();
+        state.evidenceSeen.add(url);
+        if (!/^https?:/i.test(url) || state.resources.has(engine.dedupeKey(url, state.pageUrl))) continue;
+        const mimeType = binding.mime.split(";")[0].trim();
+        out.push({ url, type: "other", ...(mimeType ? { mimeType } : {}), detectedBy: "fetch-intercept", pageUrl: state.pageUrl });
+      }
+    }
+  }
+  return out;
+}
+
+export function getSession(tabId: number, frameId: number): FrameSession | undefined {
+  return tabs.get(tabId)?.sessions.get(frameId);
+}
+
+/** 钩子补注入晚于页面加载的帧（这些帧里已建立的 MSE 关联看不到）。 */
+export function lateHookFrames(tabId: number): Set<number> {
+  const out = new Set<number>();
+  for (const [frameId, session] of tabs.get(tabId)?.sessions ?? []) if (session.hooks?.late) out.add(frameId);
+  return out;
 }
 
 export function framesOf(tabId: number): number[] {
-  return [...(tabs.get(tabId)?.frames ?? [])];
+  return [...(tabs.get(tabId)?.sessions.keys() ?? [])];
 }
 
 /** 所有已登记帧（tabId → frameIds），供 PageConfig 失效广播。 */
 export function allFrames(): [number, number[]][] {
-  return [...tabs].map(([tabId, state]) => [tabId, [...state.frames]]);
+  return [...tabs].map(([tabId, state]) => [tabId, [...state.sessions.keys()]]);
 }
 
 /** 只清空嗅探到的资源与清单（用户点「清空」）；保留媒体元素与帧登记。 */
@@ -384,7 +521,17 @@ export function ingestResources(
       continue;
     }
 
-    const type = payload.type !== "other" ? payload.type : engine.classify(url, payload.mimeType);
+    let type = payload.type !== "other" ? payload.type : engine.classify(url, payload.mimeType);
+    // 分离的音轨常被服务端标成 video/mp4（如抖音 media-audio-*）：track 规则判为音轨的完整文件
+    // 按音频入库，不再冒充一条视频直链。分片 / 清单不在此改判，交给清单与配对逻辑。
+    if (
+      type === "video" &&
+      !SEGMENT_EXT_RE.test(url) &&
+      !isManifestUrl(url, payload.mimeType) &&
+      engine.trackKind({ url, filename: payload.filename, mime: payload.mimeType, pageUrl: effectivePageUrl }) === "audio"
+    ) {
+      type = "audio";
+    }
     const size = payload.size ?? -1;
     const resource: DetectedResource = {
       id,
@@ -486,20 +633,61 @@ export function getHlsPlaylists(tabId: number): HlsPlaylistEntry[] {
 
 // ===== 媒体元素 =====
 
+/**
+ * 应用 sensor 的元素状态；返回是否需要 sensor 补发全量（本帧登记里没有这个 sid，且这次不是全量）。
+ *
+ * 元素的播放会话变化（换 MediaSource / 换直链）或元素被移除时，上一会话归档为历史项：推荐流
+ * 播放器复用同一个 `<video>` 换片，归档让看过的视频仍能关联到自己的证据与标题。
+ */
 export function updateElements(
   tabId: number,
   frameId: number,
+  sid: string,
   elements: Omit<ElementState, "frameId">[],
   removed: string[],
-): void {
+  full: boolean,
+): boolean {
   const state = stateOf(tabId);
-  for (const key of removed) state.elements.delete(key);
-  for (const element of elements) state.elements.set(element.key, { ...element, frameId });
+  const known = state.sessions.get(frameId)?.sid === sid;
+  if (!known) adoptSession(state, frameId, sid);
+  const drop = (key: string): void => {
+    const previous = state.elements.get(key);
+    if (!previous) return;
+    retire(state, previous);
+    state.elements.delete(key);
+    state.playTitles.delete(key);
+  };
+  for (const key of removed) drop(key);
+  if (full) {
+    const incoming = new Set(elements.map((e) => e.key));
+    const prefix = `${sid}:`;
+    for (const [key, element] of state.elements) {
+      if (element.frameId === frameId && key.startsWith(prefix) && !incoming.has(key)) drop(key);
+    }
+  }
+  for (const element of elements) {
+    const next: ElementState = { ...element, frameId };
+    const previous = state.elements.get(next.key);
+    const session = sessionKeyOf(next);
+    if (previous && sessionKeyOf(previous) !== session) retire(state, previous);
+    if (session) {
+      // 当前会话又回到了元素上（重注入后重新上报、播放器切回）：它不再是历史项
+      state.retired = state.retired.filter((r) => !(r.frameId === frameId && r.retiredSession === session));
+      if (next.playing && next.title) state.playTitles.set(next.key, { session, title: next.title });
+    }
+    state.elements.set(next.key, next);
+  }
   touch(tabId);
+  return !known && !full;
 }
 
 export function getElements(tabId: number): ElementState[] {
   return [...(tabs.get(tabId)?.elements.values() ?? [])];
+}
+
+/** 历史播放会话（新的在前）。 */
+export function getRetiredElements(tabId: number): ElementState[] {
+  return tabs.get(tabId)?.retired ?? [];
 }
 
 export function setContextTarget(tabId: number, elementKey: string | null): void {
@@ -578,6 +766,8 @@ function snapshotOf(tabId: number): PersistedTab | null {
     manifests: getManifests(tabId),
     hlsPlaylists: getHlsPlaylists(tabId),
     elements: [...state.elements.values()],
+    retired: state.retired,
+    sessions: [...state.sessions].map(([frameId, s]) => ({ frameId, sid: s.sid, hooks: s.hooks })),
   };
 }
 
@@ -653,6 +843,9 @@ export async function restoreTabState(): Promise<void> {
 /** 同步注册 tab 生命周期监听；由 startBackground 调用一次。 */
 export function installTabState(): void {
   browser.tabs.onRemoved.addListener((tabId) => removeTab(tabId));
+  // 预渲染 / 即时页面换入：旧 tab id 的投影属于被替换掉的页面，新 tab 的 sensor 会自行登记
+  // （探测协调器在 onReplaced 时立即探测它，让已在运行的 sensor 全量重发）。
+  browser.tabs.onReplaced.addListener((_addedTabId, removedTabId) => removeTab(removedTabId));
   browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (!changeInfo.url) return;
     // 整页导航与同文档 pushState / replaceState 在这里都报 status:"loading"，无法区分：

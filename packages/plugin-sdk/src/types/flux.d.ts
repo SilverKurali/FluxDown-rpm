@@ -3,7 +3,7 @@
 // entry-point shapes the engine calls (resolve / hooks / authenticate / subscribe / main).
 // Mirrors native/engine/src/plugin/{quickjs.rs,quickjs_host.rs,runtime.rs}.
 //
-// Importing anything from "@fluxdown/plugin-sdk" pulls these globals in.
+// Importing anything from "fluxdown-plugin-sdk" pulls these globals in.
 
 import type { ViewChild, ViewNode } from "./view";
 
@@ -34,8 +34,10 @@ export interface FluxFetchResponse {
 /** `flux.auth` — only present when `permissions` contains `auth`. */
 export interface FluxAuth {
   get(authRef: string): Promise<unknown>;
-  save(profile: Record<string, unknown>): Promise<unknown>;
-  remove(authRef: string): Promise<unknown>;
+  /** Persists the credential profile; resolves to its `authRef`. */
+  save(profile: Record<string, unknown>): Promise<string>;
+  /** Resolves to `true` once removed. */
+  remove(authRef: string): Promise<true>;
 }
 
 export interface FluxStorage {
@@ -59,7 +61,8 @@ export interface FluxLogger {
 }
 
 export interface FluxTask {
-  requestRetry(opts?: { delayMs?: number }): Promise<unknown>;
+  /** Synchronous; only effective inside `onError` (ignored with a warning elsewhere). */
+  requestRetry(opts?: { delayMs?: number }): void;
   recordArtifact(name: string): Promise<void>;
 }
 
@@ -173,7 +176,7 @@ export type FluxEvent =
       event: "cancel";
       taskId: string;
       url: string;
-      reason?: "user_cancelled" | "variant_selection_cancelled" | "host_cancelled" | "unknown";
+      reason: "user_cancelled" | "variant_selection_cancelled";
     };
 
 export type FluxEventName = "onStart" | "onError" | "onDone" | "onMetaProbed" | "onCancel";
@@ -184,7 +187,7 @@ export interface FluxUi {
   /** Builds a node. Same shape as the JSX runtime output. */
   h(kind: string, props?: Record<string, unknown> | null, ...children: ViewChild[]): ViewNode;
   /** Fragment marker for `h`; children are spliced into the parent. */
-  Fragment: symbol | string;
+  Fragment: (props?: { children?: ViewChild } | null) => ViewNode;
   toast(level: ToastLevel, text: string): void;
 }
 
@@ -220,11 +223,50 @@ export type TaskDto = Record<string, unknown>;
 export interface FluxTasks {
   list(): Promise<TaskDto[]>;
   get(id: string): Promise<TaskDto>;
-  /** Parameters are the `daemon.task.create` wire format. Rate-limited to 20 per minute. */
-  create(params: Record<string, unknown>): Promise<TaskDto>;
-  pause(id: string): Promise<unknown>;
-  resume(id: string): Promise<unknown>;
-  remove(id: string, deleteFiles?: boolean): Promise<unknown>;
+  /** Rate-limited to 20 per minute. Resolves to the new (or, with URL dedup, existing) task id. */
+  create(params: CreateTaskParams): Promise<{ taskId: string }>;
+  pause(id: string): Promise<{ ok: true }>;
+  resume(id: string): Promise<{ ok: true }>;
+  remove(id: string, deleteFiles?: boolean): Promise<{ ok: true }>;
+}
+
+/** `daemon.task.create` request body (`CreateTaskRequest`); every field except `url` is optional. */
+export interface CreateTaskRequest {
+  url: string;
+  /** Empty = inferred from the URL / Content-Disposition. */
+  fileName?: string;
+  /** Empty = the global default save directory. */
+  saveDir?: string;
+  /** 0 = chosen automatically. */
+  segments?: number;
+  cookies?: string;
+  referrer?: string;
+  proxyUrl?: string;
+  userAgent?: string;
+  queueId?: string;
+  /** `algo=hexhash`. */
+  checksum?: string;
+  ignoreTlsErrors?: boolean;
+  headers?: Record<string, string>;
+  /** Base64 torrent bytes; `url` may then be empty. */
+  torrentB64?: string;
+  method?: string;
+  audioUrl?: string;
+  /** `true` = create paused. */
+  startPaused?: boolean;
+  httpUser?: string;
+  httpPassword?: string;
+  saveSiteAuth?: boolean;
+}
+
+/** `daemon.task.create` parameters (`DaemonCreateTaskParams`). */
+export interface CreateTaskParams {
+  request: CreateTaskRequest;
+  unattended?: boolean;
+  /** Known file size in bytes (`> 0` takes effect). */
+  hintFileSize?: number;
+  /** Original file name used to complete a missing extension of `request.fileName`. */
+  nameHint?: string;
 }
 
 export interface FluxSettingsHost {
@@ -232,26 +274,35 @@ export interface FluxSettingsHost {
   update(entries: Record<string, string>): Promise<void>;
 }
 
+/** Typed settings values; `null` = unset string/number field without a default. */
+export type FluxSettingsValues = Record<string, string | number | boolean | null>;
+
+/** The `flux` facade shared by every entry script (resolve / hooks / auth / subscribe / main). */
 export interface Flux {
   fetch(opts: FluxFetchOptions): Promise<FluxFetchResponse>;
   auth?: FluxAuth;
   storage: FluxStorage;
   fs: FluxFs;
   /** Typed settings values, keyed by `manifest.settings[].key`. */
-  settings: Record<string, string | number | boolean>;
+  settings: FluxSettingsValues;
   info: FluxInfo;
   logger: FluxLogger;
   task: FluxTask;
   ffmpeg?: FluxFfmpeg;
   ffprobe?: FluxFfprobe;
   ytdlp?: FluxYtdlp;
+}
 
-  // Only in the resident `main` script:
+/** The `flux` facade of the resident `main` script (received by `defineMain`). */
+export interface MainFlux extends Omit<Flux, "settings"> {
+  /** Values as in `Flux.settings`, plus the non-enumerable `update` method. */
+  settings: FluxSettingsValues & FluxSettingsHost;
   ui: FluxUi;
   commands: FluxCommands;
   rpc: FluxRpc;
   events: FluxEvents;
   timers: FluxTimers;
+  /** Only present when `permissions` contains `tasks`. */
   tasks?: FluxTasks;
 }
 
@@ -311,6 +362,8 @@ export interface ResolveResult {
   rangeSupported?: boolean;
   variants?: ResolveVariant[];
   defaultVariantIndex?: number;
+  /** Request overlay applied to this task's every run (same shape as the `prepare` result). */
+  request?: RequestPatch;
   /** Multi-file listing; mutually exclusive with `url` / `variants` / `audioUrl`. */
   manifest?: { name?: string; items: ManifestItem[] };
 }
@@ -329,6 +382,7 @@ export interface AuthResult {
   sessionId?: string;
   /** QR content, data URL, or any challenge to show the user. */
   challenge?: string;
+  /** How to render `challenge`, e.g. `"text"`. */
   challengeType?: string;
   message?: string;
   authRef?: string;
@@ -345,10 +399,275 @@ export interface SubscribeContext {
   userAgent: string;
 }
 
+export interface SubscribeItem {
+  /** Required, non-empty, ≤2048 bytes; the dedup key. */
+  guid: string;
+  /** ≤1024 bytes. */
+  title?: string;
+  /** At least one of `link` / `enclosureUrl` is required (http/https/ftp/magnet/ed2k, ≤8KB). */
+  link?: string;
+  enclosureUrl?: string;
+  /** Second-stage resolver id (≤2048 bytes); requires `link`. */
+  resolverItem?: string;
+  /** Bytes; must not be negative. */
+  enclosureLength?: number;
+  /** Unix timestamp (seconds). */
+  pubDate?: number;
+}
+
+export interface SubscribeResult {
+  title?: string;
+  link?: string;
+  items: SubscribeItem[];
+}
+
 export type ResolveFn = (ctx: ResolveContext) => Awaitable<ResolveResult | null | undefined>;
 export type AuthFn = (ctx: AuthContext) => Awaitable<AuthResult>;
-/** Returns the normalized subscription payload (JSON-serializable). */
-export type SubscribeFn = (ctx: SubscribeContext) => Awaitable<unknown>;
+/** Returns the normalized subscription payload (at most 1000 items). */
+export type SubscribeFn = (ctx: SubscribeContext) => Awaitable<SubscribeResult>;
+
+// ---- Interceptor plane (manifest `interceptors`; entry `globalThis.intercept(ctx)`) ----
+
+export type InterceptStage =
+  | "prepare"
+  | "probed"
+  | "refresh"
+  | "selectVariant"
+  | "selectPeriod"
+  | "segments"
+  | "liveSegments"
+  | "finalize"
+  | "failed";
+
+/** Same shape as the protocol `RequestBody`. */
+export type CapturedBody =
+  | { kind: "formData"; fields: Record<string, string[]> }
+  | { kind: "urlencoded"; raw: string }
+  | { kind: "raw"; bytesB64: string; contentType?: string | null };
+
+export interface OriginHeaders {
+  origin: string;
+  headers: Record<string, string>;
+}
+
+export interface InterceptTask {
+  id: string;
+  /** Request URL of this run (after resolver rewrite). */
+  url: string;
+  /** Original persisted URL of the task. */
+  sourceUrl: string;
+  fileName: string;
+  saveDir: string;
+  protocol: "http" | "ftp" | "hls" | "dash";
+  /** Audio/video track-pair task (has an audio URL). */
+  trackPair: boolean;
+  isResume: boolean;
+}
+
+export interface InterceptRequest {
+  url: string;
+  method: string;
+  cookies: string;
+  referrer: string;
+  /** Effective UA: the one in request headers, else the task/queue/global resolved UA. */
+  userAgent: string;
+  headers: Record<string, string>;
+  body: CapturedBody | null;
+  originHeaders: OriginHeaders[];
+  /** Read-only. */
+  proxyUrl: string;
+  /** Read-only. */
+  ignoreTlsErrors: boolean;
+}
+
+/** 0 = automatic / unlimited. */
+export interface InterceptConnections {
+  segments: number;
+  maxConnections: number;
+  autoMaxConnections: number;
+}
+
+export interface SegmentItem {
+  /** HLS: absolute media sequence; DASH: 0-based index in the track's media segment list (init excluded). */
+  id: number;
+  uri: string;
+  duration: number | null;
+  byteRange: { offset: number; length: number } | null;
+  discontinuity: boolean;
+  title: string | null;
+  /** RFC 3339. */
+  programDateTime: string | null;
+  dateRange: {
+    id: string;
+    class: string | null;
+    startDate: string;
+    endDate: string | null;
+    duration: number | null;
+    plannedDuration: number | null;
+    endOnNext: boolean;
+    attributes: Record<string, string>;
+  } | null;
+  /** Raw tags the engine does not interpret, e.g. `"#EXT-X-CUE-OUT:30"`. */
+  tags: string[];
+  key: { method: "AES-128"; uri: string; iv: string | null } | null;
+  map: { uri: string; byteRange: { offset: number; length: number } | null } | null;
+  /** DASH SegmentTemplate only. */
+  number: number | null;
+  time: number | null;
+}
+
+export interface InterceptVariant {
+  index: number;
+  bandwidth: number;
+  width: number | null;
+  height: number | null;
+  uri: string;
+  id: string | null;
+  codecs: string | null;
+}
+
+export interface InterceptPeriod {
+  index: number;
+  id: string | null;
+  startSeconds: number | null;
+  durationSeconds: number | null;
+  hasVideo: boolean;
+  hasAudio: boolean;
+}
+
+export type InterceptContext =
+  | { stage: "prepare"; task: InterceptTask; request: InterceptRequest; connections: InterceptConnections }
+  | {
+      stage: "probed";
+      task: InterceptTask;
+      request: InterceptRequest;
+      connections: InterceptConnections;
+      probe: {
+        totalBytes: number;
+        supportsRange: boolean;
+        fileName: string;
+        contentType: string;
+        etag: string;
+        lastModified: string;
+      };
+    }
+  | { stage: "selectVariant"; task: InterceptTask; format: "hls" | "dash"; variants: InterceptVariant[] }
+  | {
+      stage: "selectPeriod";
+      task: InterceptTask;
+      /** MPD text; empty when over 4 MiB (see `manifestTextOmitted`). */
+      manifestText: string;
+      manifestTextOmitted: boolean;
+      periods: InterceptPeriod[];
+    }
+  | {
+      stage: "refresh";
+      task: InterceptTask;
+      /** Identity of the rejected request (`url` is the actual request address). */
+      request: InterceptRequest;
+      /** Rejecting HTTP status (401 / 403 / 410). */
+      status: number;
+      /** Successful refreshes already done in this run. */
+      refreshCount: number;
+    }
+  | {
+      stage: "segments" | "liveSegments";
+      task: InterceptTask;
+      format: "hls" | "dash";
+      track: "video" | "audio";
+      playlistUrl: string;
+      manifestText: string;
+      manifestTextOmitted: boolean;
+      mediaSequence: number | null;
+      targetDuration: number | null;
+      periodIndex: number | null;
+      representationId: string | null;
+      segments: SegmentItem[];
+    }
+  | {
+      stage: "finalize";
+      task: InterceptTask;
+      filePath: string;
+      fileName: string;
+      saveDir: string;
+      totalBytes: number;
+      audioPath: string | null;
+    }
+  | {
+      stage: "failed";
+      task: InterceptTask;
+      errorMessage: string;
+      httpStatus: number | null;
+      autoRetryCount: number;
+    };
+
+/** `prepare` result; also the shape of a resolver result's `request` field. */
+export interface RequestPatch {
+  url?: string;
+  method?: string;
+  body?: CapturedBody;
+  clearBody?: boolean;
+  cookies?: string;
+  referrer?: string;
+  userAgent?: string;
+  setHeaders?: Record<string, string>;
+  removeHeaders?: string[];
+  originHeaders?: OriginHeaders[];
+  segments?: number;
+  maxConnections?: number;
+  /**
+   * HTTP only, same meaning as in a resolver result: skip the metadata probe for this run
+   * (use for one-time credentials a probe would burn).
+   */
+  ephemeral?: boolean;
+  /** HTTP only; requires `ephemeral: true`; must be > 0. Size hint used instead of probing. */
+  totalBytes?: number;
+  /** HTTP only; requires `ephemeral: true`. Whether the server is known to support ranges. */
+  rangeSupported?: boolean;
+  fileName?: string;
+}
+/**
+ * `refresh` result: the credential subset of `RequestPatch`. `url` is only allowed for HTTP
+ * tasks (same host, same protocol class).
+ */
+export type RefreshPatch = Pick<
+  RequestPatch,
+  "url" | "cookies" | "referrer" | "userAgent" | "setHeaders" | "removeHeaders" | "originHeaders"
+>;
+export interface ProbedResult {
+  segments?: number;
+  maxConnections?: number;
+  fail?: string;
+}
+export interface SelectResult {
+  select?: number;
+}
+export interface SegmentsResult {
+  drop?: number[];
+  /** Replace segment URIs (e.g. per-segment signed addresses); relative values resolve against `playlistUrl`. */
+  rewrite?: { id: number; uri: string }[];
+}
+export interface FinalizeResult {
+  fail?: string;
+  replaceWith?: string;
+}
+export interface FailedResult {
+  retry?: { delayMs?: number };
+}
+
+type InterceptCtx<S extends InterceptStage> = Extract<InterceptContext, { stage: S }>;
+
+export interface InterceptHandlers {
+  prepare?(ctx: InterceptCtx<"prepare">): Awaitable<RequestPatch | null | undefined>;
+  probed?(ctx: InterceptCtx<"probed">): Awaitable<ProbedResult | null | undefined>;
+  refresh?(ctx: InterceptCtx<"refresh">): Awaitable<RefreshPatch | null | undefined>;
+  selectVariant?(ctx: InterceptCtx<"selectVariant">): Awaitable<SelectResult | null | undefined>;
+  selectPeriod?(ctx: InterceptCtx<"selectPeriod">): Awaitable<SelectResult | null | undefined>;
+  segments?(ctx: InterceptCtx<"segments">): Awaitable<SegmentsResult | null | undefined>;
+  liveSegments?(ctx: InterceptCtx<"liveSegments">): Awaitable<SegmentsResult | null | undefined>;
+  finalize?(ctx: InterceptCtx<"finalize">): Awaitable<FinalizeResult | null | undefined>;
+  failed?(ctx: InterceptCtx<"failed">): Awaitable<FailedResult | null | undefined>;
+}
 
 export interface HookHandlers {
   onStart?(ev: Extract<FluxEvent, { event: "start" }>): Awaitable<void>;

@@ -87,6 +87,8 @@ impl SeedLimits {
 pub enum DownloadsCommand {
     /// 分页读取 daemon 持久活动历史。
     TaskActivity(TaskActivityQuery),
+    /// 读取 daemon 持久化的任务全生命周期速度曲线与统计（`daemon.task.speedHistory`）。
+    TaskSpeedHistory(fluxdown_protocol::TaskSpeedHistoryQuery),
     Create(Box<fluxdown_protocol::DaemonCreateTaskParams>),
     /// 批量建任务（`daemon.task.createMany`）：整块一个事务、按 `batch_id` 幂等，
     /// 结果不确定时可原样重发。
@@ -272,6 +274,8 @@ pub enum DownloadsResult {
     Unit,
     Value(serde_json::Value),
     TaskActivity(TaskActivityPage),
+    /// 无记录（从未下载或已重新下载重置）时为 `None`。
+    TaskSpeedHistory(Option<fluxdown_protocol::TaskSpeedHistoryDto>),
     Preview(fluxdown_protocol::ResolvePreviewResponse),
     /// `FileIcon` 的 PNG 字节。
     FileIcon(Vec<u8>),
@@ -564,6 +568,15 @@ impl DownloadsController {
             !self.agent_stale && self.cloud_connected,
             !self.agent_stale,
         )
+    }
+
+    /// 侧栏设备区与设备筛选的条目：只列云条目（含挂接直连的）。独立直连设备是一次性投递目标，
+    /// 没有任务视图，不进侧栏。
+    #[must_use]
+    pub(crate) fn sidebar_devices(&self) -> Vec<DeviceEntry> {
+        let mut devices = self.other_devices();
+        devices.retain(|device| !device.is_standalone_link());
+        devices
     }
 
     #[must_use]

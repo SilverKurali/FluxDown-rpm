@@ -211,6 +211,14 @@ fn on_view_event(
         ProgressWindowEvent::ShowCompletionChanged(value) => {
             Desktop::set_pref(cx, COMPLETION_WINDOW_PREF, (*value).into());
         }
+        ProgressWindowEvent::OpenMainWindow => {
+            if completion {
+                crate::completion_windows::window_closing(cx);
+            }
+            // 先显示主窗口再关本窗口：避免关掉最后一个窗口时界面退出。
+            crate::windows::main::reveal(cx);
+            window.remove_window();
+        }
     }
 }
 

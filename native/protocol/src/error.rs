@@ -125,6 +125,10 @@ pub enum ErrorReason {
     PeerNotPaired,
     /// 局域网互联：已配对设备当前不可达。
     PeerOffline,
+    /// 局域网互联：对端 FluxDown 版本过旧，数据面链路协议不兼容（两端需升级）。
+    PeerOutdated,
+    /// 局域网互联：本机直连服务未启动（初始化失败或宿主不支持）。
+    LinkUnavailable,
     /// Doctor 修复：用户取消了系统管理员授权对话框（UAC / polkit / macOS 授权），未做任何更改。
     ElevationCancelled,
     /// Doctor 修复：无法请求管理员授权（缺 `pkexec` / polkit 认证代理、无桌面会话等）。

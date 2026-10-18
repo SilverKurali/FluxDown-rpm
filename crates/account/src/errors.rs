@@ -106,6 +106,8 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         ErrorReason::PairingVersionMismatch => "errReasonPairingVersionMismatch",
         ErrorReason::PeerNotPaired => "errReasonPeerNotPaired",
         ErrorReason::PeerOffline => "errReasonPeerOffline",
+        ErrorReason::PeerOutdated => "errReasonPeerOutdated",
+        ErrorReason::LinkUnavailable => "errReasonLinkUnavailable",
         ErrorReason::TargetDeviceOffline => "errReasonTargetDeviceOffline",
         ErrorReason::TaskStateConflict => "errReasonTaskStateConflict",
         ErrorReason::TaskDeviceMismatch => "errReasonTaskDeviceMismatch",
@@ -339,6 +341,22 @@ mod tests {
     }
 
     #[test]
+    fn link_unavailable_is_not_reported_as_peer_unreachable_in_pairing() {
+        let unavailable = RpcErrorData::new(ApplicationErrorCode::Unavailable, true)
+            .with_reason(ErrorReason::LinkUnavailable);
+        assert_eq!(
+            error_key(&unavailable, ErrorContext::Pairing),
+            "errReasonLinkUnavailable"
+        );
+        let outdated =
+            error(ApplicationErrorCode::Unavailable).with_reason(ErrorReason::PeerOutdated);
+        assert_eq!(
+            error_key(&outdated, ErrorContext::General),
+            "errReasonPeerOutdated"
+        );
+    }
+
+    #[test]
     fn revoked_reasons_pick_distinct_prompts_with_expiry_as_fallback() {
         assert_eq!(
             session_revoked_key(ErrorReason::DeviceUntrusted),
@@ -394,6 +412,8 @@ mod tests {
             ErrorReason::PairingVersionMismatch,
             ErrorReason::PeerNotPaired,
             ErrorReason::PeerOffline,
+            ErrorReason::PeerOutdated,
+            ErrorReason::LinkUnavailable,
             ErrorReason::TargetDeviceOffline,
             ErrorReason::TaskStateConflict,
             ErrorReason::TaskDeviceMismatch,

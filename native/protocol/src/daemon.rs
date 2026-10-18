@@ -770,11 +770,15 @@ pub struct SettingFieldDto {
 
 /// plugin 层嗅探规则包（`daemon.plugin.sniffRules`）：`pack` 为 `null` 表示从未有过插件规则
 /// （此时 `sequence == 0`）。`pack` 的形状即浏览器扩展的 `RulePack` JSON。
+/// `epoch` 是随序号持久化的实例标识：数据库重置后序号重新计数，`epoch` 必变，
+/// 浏览器扩展据此丢弃旧序号而不是把倒退当作回滚。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PluginSniffRulesDto {
     pub sequence: u64,
+    #[serde(default)]
+    pub epoch: String,
     #[cfg_attr(feature = "openapi", schema(value_type = Option<Object>))]
     pub pack: Option<Value>,
 }
@@ -1353,6 +1357,10 @@ pub struct LinkPingInfo {
     /// 平台标识。
     #[serde(default)]
     pub platform: String,
+    /// 数据面链路协议版本（`X-FluxLink-Enc` 方案号）。旧版对端没有此字段（按 0 处理）：
+    /// 发起方在下发 / 交换信息前据此判定对端过旧并返回 `PeerOutdated`，不发送请求。
+    #[serde(default)]
+    pub link_protocol: u32,
 }
 
 /// 配对 `hello` 请求（发起方 → 响应方）。全部密钥/签名字段为 base64。
@@ -1507,11 +1515,11 @@ pub struct LinkAuth {
     pub ts: i64,
     /// 一次性随机串。
     pub nonce: String,
-    /// HMAC-SHA256 标签（hex，覆盖密文摘要，encrypt-then-MAC）。
+    /// HMAC-SHA256 标签（hex，覆盖密文摘要与收发双方指纹，encrypt-then-MAC）。
     pub tag: String,
-    /// `X-FluxLink-Enc` 头原始值：数据面 body 加密方案版本号。当前唯一
-    /// 合法值是 `"v1"`（ChaCha20-Poly1305）；缺失或其他值一律鉴权失败——
-    /// 双端同版本发布，不兼容明文旧客户端，不留降级回退路径。
+    /// `X-FluxLink-Enc` 头原始值：数据面方案版本号。当前唯一合法值是 `"v2"`
+    /// （MAC 绑定收发双方、请求 / 响应都经 ChaCha20-Poly1305 封装并以 AAD 绑定方向与请求
+    /// nonce）；缺失或其他值一律鉴权失败——双端同版本发布，不留降级回退路径。
     pub enc: String,
 }
 
@@ -1669,6 +1677,20 @@ pub struct LinkDeviceInfo {
     /// 对端自报的路径风格（旧版对端为 `None`，可按 `platform` 推断）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_style: Option<crate::agent::PathStyle>,
+    /// 本机给该设备设置的备注名（`agent.link.rename`，仅本机可见）；`name` 已是生效名
+    /// （备注名优先，否则对端自报名）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
+    /// 对端自报的客户端版本（经已认证链路获取）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
+    /// 对端已登录云账号时经已认证链路自报的云设备 id。客户端仅当本机云设备名册里存在同 id
+    /// 设备时把两者合并为同一台设备展示；直连设备本身永不注册到云端、不占云端设备名额。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_device_id: Option<String>,
+    /// 对端已解除与本机的配对（对端经已认证链路通知）：不可再下发，只能删除或重新配对。
+    #[serde(default)]
+    pub revoked: bool,
 }
 
 /// 发现快照响应（`GET /api/v1/link/discovered`）。
@@ -1844,11 +1866,17 @@ pub struct RssItemActionRequest {
     pub action: String,
 }
 
-/// 验证一个 feed 地址（`POST /api/v1/rss/validate`，只读、不落库）。
+/// 验证一个订阅地址（`POST /api/v1/rss/validate`，只读、不落库）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RssValidateRequest {
+    /// 订阅来源 provider；缺省/空为内置 RSS provider。
+    #[serde(default = "default_rss_provider_id")]
+    pub provider_id: String,
+    /// provider 专属配置 JSON；缺省为空。
+    #[serde(default)]
+    pub provider_config: String,
     pub url: String,
     #[serde(default)]
     pub cookies: String,

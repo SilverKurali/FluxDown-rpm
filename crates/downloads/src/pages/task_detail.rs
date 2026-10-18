@@ -17,6 +17,7 @@ use std::{
 use chrono::{Local, TimeZone as _};
 use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, DaemonEvent, ServiceEvent, TaskDto, TaskRuntimeDto,
+    TaskSpeedHistoryDto, TaskSpeedHistoryQuery,
 };
 use fluxdown_ui_components::{
     ControlExt as _, FluxIcon, IconControlExt as _, form, form_field, form_row, segmented_tabs,
@@ -64,8 +65,10 @@ use crate::{
     strings::DownloadStrings,
 };
 
-/// 速度曲线保留的采样点数（每秒一次）。
+/// 做种页实时上传曲线保留的采样点数（每秒一次）。
 const SPEED_HISTORY_CAPACITY: usize = 120;
+/// 速度页下载中的刷新间隔；1 s 定时器的抖动留出余量。
+const SPEED_REFRESH_INTERVAL: Duration = Duration::from_millis(1_500);
 /// 常规页信息列的折行基准宽度：可用宽度容不下「信息列 + 来源构成」时来源换行。
 const GENERAL_INFO_MIN_WIDTH: f32 = 300.;
 /// 常规页「来源构成」区块宽度（环形图 140 + 图例）。
@@ -136,7 +139,16 @@ pub struct TaskDetailView {
     /// 停靠模式由宿主经 [`Self::sync`] 提供；窗口模式来自私有 controller。
     dto: Option<TaskDto>,
     queue_names: Vec<(String, String)>,
+    /// 客户端 1 Hz 实时采样环（仅做种页上传曲线使用）。
     speed_history: VecDeque<(Instant, u64)>,
+    /// daemon 持久化的全生命周期速度曲线与统计（速度页）。
+    speed_stats: Option<TaskSpeedHistoryDto>,
+    speed_fetching: bool,
+    /// 请求在途时又出现刷新需求：返回后补拉一次。
+    speed_refetch: bool,
+    speed_generation: u64,
+    speed_was_downloading: bool,
+    speed_last_fetch: Option<Instant>,
     activity: ActivityFeed,
     runtime: Option<TaskRuntimeDto>,
     activity_stale: bool,
@@ -254,6 +266,12 @@ impl TaskDetailView {
             dto: None,
             queue_names: Vec::new(),
             speed_history: VecDeque::new(),
+            speed_stats: None,
+            speed_fetching: false,
+            speed_refetch: false,
+            speed_generation: 0,
+            speed_was_downloading: false,
+            speed_last_fetch: None,
             closed: false,
             last_error: None,
             seed_ratio,
@@ -279,7 +297,13 @@ impl TaskDetailView {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |this, cx| this.sample_speed(cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.sample_speed(cx);
+                        this.tick_speed_history(cx);
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -299,6 +323,12 @@ impl TaskDetailView {
         self.activity.switch_task(self.task_id.clone());
         self.activity_stale = false;
         self.speed_history.clear();
+        self.speed_stats = None;
+        self.speed_fetching = false;
+        self.speed_refetch = false;
+        self.speed_generation = self.speed_generation.wrapping_add(1);
+        self.speed_was_downloading = false;
+        self.speed_last_fetch = None;
         self.runtime = None;
         self.closed = false;
         self.error_copied = 0;
@@ -528,6 +558,71 @@ impl TaskDetailView {
         .detach();
     }
 
+    fn task_downloading(&self) -> bool {
+        self.store
+            .get(&RowKey::Local(self.task_id.clone()))
+            .is_some_and(|row| row.state == TaskState::Downloading)
+    }
+
+    /// 速度页的定时刷新决策（随 1 s 定时器调用）。
+    fn tick_speed_history(&mut self, cx: &mut Context<Self>) {
+        let downloading = self.task_downloading();
+        let was_downloading = std::mem::replace(&mut self.speed_was_downloading, downloading);
+        if self.tab != DetailTab::Speed {
+            return;
+        }
+        if speed_refresh_due(
+            was_downloading,
+            downloading,
+            self.speed_last_fetch.map(|at| at.elapsed()),
+        ) {
+            self.fetch_speed_history(cx);
+        }
+    }
+
+    fn fetch_speed_history(&mut self, cx: &mut Context<Self>) {
+        if self.closed || !self.activity_online || self.tab != DetailTab::Speed {
+            return;
+        }
+        if self.speed_fetching {
+            self.speed_refetch = true;
+            return;
+        }
+        self.speed_fetching = true;
+        self.speed_refetch = false;
+        self.speed_last_fetch = Some(Instant::now());
+        let generation = self.speed_generation;
+        let task_id = self.task_id.clone();
+        let future = self
+            .port
+            .execute(DownloadsCommand::TaskSpeedHistory(TaskSpeedHistoryQuery {
+                task_id: task_id.clone(),
+            }));
+        cx.spawn(async move |this, cx| {
+            let result = future.await;
+            let Ok(()) = this.update(cx, |this, cx| {
+                if this.speed_generation != generation {
+                    return;
+                }
+                this.speed_fetching = false;
+                // 失败（含旧宿主不支持该方法）保留上次成功的数据。
+                if let Ok(DownloadsResult::TaskSpeedHistory(history)) = result
+                    && history.as_ref().is_none_or(|dto| dto.task_id == task_id)
+                {
+                    this.speed_stats = history;
+                }
+                cx.notify();
+                if this.speed_refetch {
+                    this.fetch_speed_history(cx);
+                }
+            }) else {
+                // 视图已释放。
+                return;
+            };
+        })
+        .detach();
+    }
+
     fn load_older_activity(&mut self, cx: &mut Context<Self>) {
         self.activity.load_older();
         self.fetch_activity(cx);
@@ -543,6 +638,10 @@ impl TaskDetailView {
     fn select_tab(&mut self, tab: DetailTab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
+            if tab == DetailTab::Speed {
+                self.speed_was_downloading = self.task_downloading();
+                self.fetch_speed_history(cx);
+            }
             cx.notify();
         }
     }
@@ -1290,7 +1389,7 @@ impl TaskDetailView {
             .into_any_element()
     }
 
-    /// 「速度」页：当前 / 近 2 分钟平均 / 近 2 分钟峰值三块统计 + 1 Hz 面积图 + 明细行。
+    /// 「速度」页：当前 / 平均 / 峰值 / 下载时长四块统计 + 全生命周期面积图（daemon 持久化数据）+ 明细行。
     fn render_speed(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = active_theme(cx);
         let tokens = theme.tokens().clone();
@@ -1319,24 +1418,19 @@ impl TaskDetailView {
             .and_then(|runtime| runtime.connected_peers);
         drop(row);
 
-        let samples = self.speed_history.len() as u64;
-        let total: u64 = self.speed_history.iter().map(|(_, speed)| *speed).sum();
-        let average = total.checked_div(samples).unwrap_or(0);
-        let peak = self
-            .speed_history
-            .iter()
-            .map(|(_, speed)| *speed)
-            .max()
-            .unwrap_or(0);
-        let chart_points: Vec<(usize, f64)> = self
-            .speed_history
-            .iter()
-            .enumerate()
-            .map(|(index, (_, speed))| (index, *speed as f64))
-            .collect();
+        let (average, peak, active_secs, chart_points) = match &self.speed_stats {
+            Some(stats) => (
+                u64::try_from(stats.average_bps()).unwrap_or(0),
+                u64::try_from(stats.peak_bps).unwrap_or(0),
+                stats.active_secs,
+                speed_chart_points(stats),
+            ),
+            None => (0, 0, 0, Vec::new()),
+        };
         let has_chart = chart_points.len() > 1 && peak > 0;
+        let duration = self.strings.format_eta(active_secs.max(0) as u64);
 
-        let tile = |label: SharedString, value: u64, color: Hsla| {
+        let tile = |label: SharedString, value: SharedString, color: Hsla| {
             v_flex()
                 .flex_1()
                 .min_w_0()
@@ -1359,7 +1453,7 @@ impl TaskDetailView {
                         .font_weight(FontWeight::MEDIUM)
                         .font_features(tabular_numbers())
                         .text_color(color)
-                        .child(SharedString::from(format!("{}/s", format_bytes(value)))),
+                        .child(value),
                 )
         };
 
@@ -1370,32 +1464,55 @@ impl TaskDetailView {
                     .gap(tokens.spacing.sm)
                     .child(tile(
                         self.t(cx, "infoSpeed"),
-                        current,
+                        rate_text(current),
                         tokens.colors.primary,
                     ))
                     .child(tile(
-                        self.t(cx, "speedAverageRecent"),
-                        average,
+                        self.t(cx, "speedAverage"),
+                        rate_text(average),
                         tokens.colors.foreground,
                     ))
                     .child(tile(
-                        self.t(cx, "speedPeakRecent"),
-                        peak,
+                        self.t(cx, "speedPeak"),
+                        rate_text(peak),
+                        tokens.colors.foreground,
+                    ))
+                    .child(tile(
+                        self.t(cx, "speedActiveTime"),
+                        duration.clone(),
                         tokens.colors.foreground,
                     )),
             )
             .child(if has_chart {
-                div()
-                    .h(px(120.))
+                v_flex()
                     .w_full()
                     .child(
-                        AreaChart::new(chart_points)
-                            .x(|point: &(usize, f64)| SharedString::from(point.0.to_string()))
-                            .y(|point: &(usize, f64)| point.1)
-                            .stroke(tokens.colors.primary)
-                            .linear()
-                            .x_axis(false)
-                            .grid(false),
+                        div().h(px(120.)).w_full().child(
+                            AreaChart::new(chart_points)
+                                .x(|point: &(SharedString, f64)| point.0.clone())
+                                .y(|point: &(SharedString, f64)| point.1)
+                                .stroke(tokens.colors.primary)
+                                .name(self.t(cx, "infoSpeed"))
+                                .tooltip_value(|_, _, value| rate_text(value.max(0.) as u64))
+                                .y_axis(true)
+                                .y_axis_label_placement(
+                                    gpui_component::plot::AxisLabelPlacement::Inside,
+                                )
+                                .y_tick_count(3)
+                                .y_tick_format(|value| rate_text(value.max(0.) as u64))
+                                .linear()
+                                .x_axis(false)
+                                .grid(false),
+                        ),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .text_size(tokens.typography.xs.size)
+                            .line_height(tokens.typography.xs.line_height)
+                            .text_color(tokens.colors.muted_foreground)
+                            .child(self.t(cx, "speedAxisStart"))
+                            .child(duration),
                     )
                     .into_any_element()
             } else {
@@ -1655,6 +1772,9 @@ impl TaskDetailView {
                             .x(|point: &(usize, f64)| SharedString::from(point.0.to_string()))
                             .y(|point: &(usize, f64)| point.1)
                             .stroke(tokens.colors.primary)
+                            .tooltip_content(|point: &(usize, f64), _, _| {
+                                div().child(rate_text(point.1.max(0.) as u64))
+                            })
                             .linear()
                             .x_axis(false)
                             .grid(false),
@@ -2043,6 +2163,7 @@ fn activity_kind_key(kind: &str) -> &'static str {
         "nic_off" => "detailActivityKindNicOff",
         "retry" => "detailActivityKindRetry",
         "journal_overflow" => "detailActivityKindJournalOverflow",
+        "plugin" => "detailActivityKindPlugin",
         _ => "detailActivityKindUnknown",
     }
 }
@@ -2124,6 +2245,49 @@ fn seeding_status_key(code: i32) -> &'static str {
     }
 }
 
+fn rate_text(bytes_per_second: u64) -> SharedString {
+    SharedString::from(format!("{}/s", format_bytes(bytes_per_second)))
+}
+
+/// 曲线点：横坐标为该点结束时的下载用时（`m:ss` / `h:mm:ss`，悬浮提示标题），纵坐标为速率。
+fn speed_chart_points(stats: &TaskSpeedHistoryDto) -> Vec<(SharedString, f64)> {
+    let bucket = i64::from(stats.bucket_secs.max(1));
+    let mut previous = 0_i64;
+    stats
+        .samples
+        .iter()
+        .zip(1_i64..)
+        .map(|(speed, index)| {
+            // 末点可能是未满桶：按累计用时截断，但保证横坐标严格递增。
+            let elapsed = index
+                .saturating_mul(bucket)
+                .min(stats.active_secs)
+                .max(previous + 1);
+            previous = elapsed;
+            (clock_text(elapsed), (*speed).max(0) as f64)
+        })
+        .collect()
+}
+
+fn clock_text(seconds: i64) -> SharedString {
+    let (hours, minutes, secs) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    SharedString::from(if hours > 0 {
+        format!("{hours}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{minutes}:{secs:02}")
+    })
+}
+
+/// 速度页是否需要刷新：下载中按间隔轮询，离开下载态补拉一次拿到最终曲线。
+fn speed_refresh_due(
+    was_downloading: bool,
+    downloading: bool,
+    since_last_fetch: Option<Duration>,
+) -> bool {
+    (was_downloading && !downloading)
+        || (downloading && since_last_fetch.is_none_or(|elapsed| elapsed >= SPEED_REFRESH_INTERVAL))
+}
+
 fn format_duration(translator: &Translator, total_seconds: i64) -> SharedString {
     let minutes = total_seconds.max(0) / 60;
     if minutes < 60 {
@@ -2147,6 +2311,49 @@ mod tests {
         DetailTab, SEED_LIMIT_FOLLOW_GLOBAL, SeedLimits, format_activity_timestamp,
         seed_form_texts, seed_limits_from_form, visible_tabs,
     };
+
+    #[test]
+    fn speed_chart_points_label_elapsed_time_and_cap_partial_bucket() {
+        let stats = fluxdown_protocol::TaskSpeedHistoryDto {
+            bucket_secs: 2,
+            samples: vec![100, 200, 300],
+            // 末点为未满桶：只覆盖 1 秒。
+            active_secs: 5,
+            ..Default::default()
+        };
+        let labels: Vec<String> = super::speed_chart_points(&stats)
+            .into_iter()
+            .map(|(label, _)| label.to_string())
+            .collect();
+        assert_eq!(labels, ["0:02", "0:04", "0:05"]);
+
+        let long = fluxdown_protocol::TaskSpeedHistoryDto {
+            bucket_secs: 3600,
+            samples: vec![1, 2],
+            active_secs: 7265,
+            ..Default::default()
+        };
+        let labels: Vec<String> = super::speed_chart_points(&long)
+            .into_iter()
+            .map(|(label, _)| label.to_string())
+            .collect();
+        assert_eq!(labels, ["1:00:00", "2:00:00"]);
+    }
+
+    #[test]
+    fn speed_refresh_polls_while_downloading_and_once_after() {
+        use std::time::Duration;
+
+        use super::speed_refresh_due;
+
+        let recent = Some(Duration::from_secs(1));
+        let stale = Some(Duration::from_secs(2));
+        assert!(speed_refresh_due(false, true, None));
+        assert!(!speed_refresh_due(true, true, recent));
+        assert!(speed_refresh_due(true, true, stale));
+        assert!(speed_refresh_due(true, false, recent));
+        assert!(!speed_refresh_due(false, false, stale));
+    }
 
     #[test]
     fn plugin_tabs_follow_builtin_tabs() {

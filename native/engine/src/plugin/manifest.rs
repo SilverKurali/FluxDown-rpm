@@ -174,6 +174,31 @@ pub struct HooksDecl {
     pub match_decl: Option<MatchDecl>,
 }
 
+/// 拦截器失败策略。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InterceptFailure {
+    /// 记录后继续下载。
+    #[default]
+    Continue,
+    /// 使任务失败。
+    Fail,
+}
+
+/// 拦截平面声明。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InterceptorsDecl {
+    pub entry: String,
+    pub stages: Vec<String>,
+    #[serde(rename = "match")]
+    pub match_decl: MatchDecl,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub on_failure: InterceptFailure,
+}
+
 /// 平台登录入口。脚本实现 `globalThis.authenticate(ctx)`，由 daemon 以
 /// `begin`/`poll`/`cancel`/`logout`/`status` action 驱动，登录成功后脚本调用
 /// `flux.auth.save`。
@@ -343,6 +368,9 @@ pub struct PluginManifest {
     pub subscriptions: Vec<SubscriptionDecl>,
     #[serde(default)]
     pub hooks: Option<HooksDecl>,
+    /// 可选的拦截平面声明（v1 至多一个）。
+    #[serde(default)]
+    pub interceptors: Option<InterceptorsDecl>,
     /// 可选的平台特有登录入口。
     #[serde(default)]
     pub auth: Option<AuthDecl>,
@@ -377,8 +405,10 @@ pub const PERMISSION_BROWSER_RULES: &str = "browserRules";
 pub const PERMISSION_DESKTOP: &str = "desktop";
 /// 后台常驻权限名。
 pub const PERMISSION_BACKGROUND: &str = "background";
+/// 下载拦截平面权限名。
+pub const PERMISSION_INTERCEPT: &str = "intercept";
 /// 合法能力权限（manifest `permissions`）。
-pub const VALID_PERMISSIONS: [&str; 7] = [
+pub const VALID_PERMISSIONS: [&str; 8] = [
     PERMISSION_FFMPEG,
     PERMISSION_YTDLP,
     PERMISSION_AUTH,
@@ -386,6 +416,7 @@ pub const VALID_PERMISSIONS: [&str; 7] = [
     PERMISSION_BROWSER_RULES,
     PERMISSION_DESKTOP,
     PERMISSION_BACKGROUND,
+    PERMISSION_INTERCEPT,
 ];
 
 impl PluginManifest {
@@ -540,6 +571,50 @@ impl PluginManifest {
             }
         }
 
+        // interceptors：拦截平面入口。
+        if let Some(i) = &self.interceptors {
+            if !is_safe_relative_path(&i.entry) {
+                return Err(PluginError::ManifestInvalid(format!(
+                    "interceptors entry 路径 '{}' 非法",
+                    i.entry
+                )));
+            }
+            if i.stages.is_empty() {
+                return Err(PluginError::ManifestInvalid(
+                    "interceptors.stages 不可为空".to_string(),
+                ));
+            }
+            let mut seen_stages: HashSet<&str> = HashSet::new();
+            for s in &i.stages {
+                if !crate::intercept::STAGE_NAMES.contains(&s.as_str()) {
+                    return Err(PluginError::ManifestInvalid(format!(
+                        "未知拦截阶段 '{s}'，合法：{:?}",
+                        crate::intercept::STAGE_NAMES
+                    )));
+                }
+                if !seen_stages.insert(s.as_str()) {
+                    return Err(PluginError::ManifestInvalid(format!(
+                        "interceptors.stages 重复：'{s}'"
+                    )));
+                }
+            }
+            if i.match_decl.urls.is_empty() {
+                return Err(PluginError::ManifestInvalid(
+                    "interceptors match.urls 不可为空".to_string(),
+                ));
+            }
+            if i.timeout_ms == Some(0) {
+                return Err(PluginError::ManifestInvalid(
+                    "interceptors timeoutMs 不可为 0".to_string(),
+                ));
+            }
+            if !self.has_permission(PERMISSION_INTERCEPT) {
+                return Err(PluginError::ManifestInvalid(
+                    "声明 interceptors 时 permissions 必须包含 intercept".to_string(),
+                ));
+            }
+        }
+
         validate_main(self)?;
         validate_contributes(self)?;
 
@@ -597,6 +672,7 @@ impl PluginManifest {
                     | PERMISSION_TASKS
                     | PERMISSION_BROWSER_RULES
                     | PERMISSION_BACKGROUND
+                    | PERMISSION_INTERCEPT
             )
         }) {
             PluginRisk::Elevated

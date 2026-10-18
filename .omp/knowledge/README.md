@@ -141,7 +141,7 @@ FluxDown/
 ├── fluxDown/           WXT 浏览器扩展（Chrome/Firefox MV3）——见 `clients.md`「浏览器扩展与用户脚本」
 ├── userscript/         Tampermonkey 用户脚本（扩展替代）——见 `clients.md`「浏览器扩展与用户脚本」
 ├── examples/plugins/   插件示例（.fxplug 源）
-├── packaging/          NAS 包脚本（synology/qnap/openwrt）——见 `hosts-and-api.md`「Headless 服务器」
+├── packaging/          NAS 包脚本（synology/qnap/openwrt/fnos）——见 `hosts-and-api.md`「Headless 服务器」
 ├── promotion/          分发模板（unraid/casaos/awesome-selfhosted/mcp）
 ├── docker/             server.Dockerfile + docker-compose.yml
 ├── installer/windows/  Inno Setup

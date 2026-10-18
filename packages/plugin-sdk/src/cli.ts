@@ -24,7 +24,7 @@ import {
   validateSniffPack,
 } from "./manifest";
 
-const SDK_NAME = "@fluxdown/plugin-sdk";
+const SDK_NAME = "fluxdown-plugin-sdk";
 const CONFIG_FILE = "fluxdown-plugin.config.json";
 const MAX_ENTRIES = 200;
 const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
@@ -348,7 +348,7 @@ function create(dir: string, flags: Record<string, string>): void {
     identity,
     name,
     version: "0.1.0",
-    description: "A FluxDown plugin built with @fluxdown/plugin-sdk.",
+    description: "A FluxDown plugin built with fluxdown-plugin-sdk.",
     main: { entry: "main.js" },
     contributes: {
       views: [{ id: "dashboard", title: name.slice(0, 40), location: "activity" }],
@@ -386,28 +386,31 @@ function create(dir: string, flags: Record<string, string>): void {
     },
     include: ["src"],
   };
-  const mainTsx = `import type { ViewEvent } from "${SDK_NAME}";
+  const mainTsx = `import { defineMain } from "${SDK_NAME}/runtime";
+import type { ViewEvent } from "${SDK_NAME}";
 
 interface State {
   count: number;
 }
 
-flux.ui.view<State>("dashboard", {
-  init: () => ({ count: 0 }),
-  render: (state) => (
-    <stack gap="md" padding="md">
-      <heading text="Hello from FluxDown" />
-      <text text={\`Clicked \${state.count} times\`} />
-      <button key="inc" text="Click me" variant="primary" />
-    </stack>
-  ),
-  event(state, ev: ViewEvent) {
-    if (ev.type === "press" && ev.node === "root/inc") state.count += 1;
-  },
-});
+defineMain((flux) => {
+  flux.ui.view<State>("dashboard", {
+    init: () => ({ count: 0 }),
+    render: (state) => (
+      <stack gap="md" padding="md">
+        <heading text="Hello from FluxDown" />
+        <text text={\`Clicked \${state.count} times\`} />
+        <button key="inc" text="Click me" variant="primary" />
+      </stack>
+    ),
+    event(state, ev: ViewEvent) {
+      if (ev.type === "press" && ev.node === "root/inc") state.count += 1;
+    },
+  });
 
-flux.commands.register("hello", () => {
-  flux.ui.toast("success", "Hello from ${name}!");
+  flux.commands.register("hello", () => {
+    flux.ui.toast("success", "Hello from ${name}!");
+  });
 });
 `;
   const files: Record<string, string> = {
@@ -424,7 +427,14 @@ flux.commands.register("hello", () => {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, content);
   }
-  console.log(`created ${root}\n\nNext:\n  cd ${dir}\n  bun install   # or npm install\n  bun run pack   # produces ${identity}-0.1.0.fxplug`);
+  const pm = detectPackageManager();
+  console.log(`created ${root}\n\nNext:\n  cd ${dir}\n  ${pm} install\n  ${pm} run pack   # produces ${identity}-0.1.0.fxplug`);
+}
+
+/** Package manager that launched the CLI (`npm_config_user_agent`), npm by default. */
+function detectPackageManager(): "npm" | "pnpm" | "yarn" | "bun" {
+  const name = (process.env.npm_config_user_agent ?? "").split("/")[0];
+  return name === "pnpm" || name === "yarn" || name === "bun" ? name : "npm";
 }
 
 // ---------------------------------------------------------------------------

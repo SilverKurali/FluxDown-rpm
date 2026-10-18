@@ -1,5 +1,5 @@
-# 发布 @fluxdown/plugin-sdk 到 npm。只由 `plugin-sdk-v*` tag 触发，与应用发布（v* tag）互不影响。
-# 前置：npm 组织 `fluxdown` 已创建，仓库 secret `NPM_TOKEN` 为该组织的自动化令牌。
+# 发布 fluxdown-plugin-sdk 到 npm。只由 `plugin-sdk-v*` tag 触发，与应用发布（v* tag）互不影响。
+# 前置：包归属 npm 用户 `zerx-lab`（`@fluxdown` 作用域属他人），仓库 secret `NPM_TOKEN` 为该账号的发布令牌。
 name: Plugin SDK Release
 
 on:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   publish:
-    name: Publish @fluxdown/plugin-sdk
+    name: Publish fluxdown-plugin-sdk
     runs-on: ubuntu-latest
     defaults:
       run:

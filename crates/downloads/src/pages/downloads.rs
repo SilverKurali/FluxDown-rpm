@@ -934,7 +934,7 @@ impl DownloadView {
                     && id != SidebarSelection::ALL_DEVICES
                     && !self
                         .controller
-                        .other_devices()
+                        .sidebar_devices()
                         .iter()
                         .any(|device| device.id == *id) =>
             {

@@ -163,6 +163,7 @@ pub(super) fn classify(facts: &Facts) -> InstallTarget {
             | UpdateInstallKind::Synology
             | UpdateInstallKind::Qnap
             | UpdateInstallKind::Openwrt
+            | UpdateInstallKind::Fnos
     ) || third_party_package(facts, kind)
     {
         Some(UpdateManualReason::ManagedPackage)
@@ -194,6 +195,7 @@ fn classify_server(facts: &Facts) -> (UpdateInstallKind, ReleaseComponent, Vec<&
         Some("synology") => Some(UpdateInstallKind::Synology),
         Some("qnap") => Some(UpdateInstallKind::Qnap),
         Some("openwrt") => Some(UpdateInstallKind::Openwrt),
+        Some("fnos") => Some(UpdateInstallKind::Fnos),
         _ => facts.in_docker.then_some(UpdateInstallKind::Docker),
     };
     if let Some(kind) = managed {
@@ -604,6 +606,7 @@ mod tests {
             (" Synology ", UpdateInstallKind::Synology),
             ("QNAP", UpdateInstallKind::Qnap),
             ("openwrt", UpdateInstallKind::Openwrt),
+            ("fnOS", UpdateInstallKind::Fnos),
         ] {
             let mut f = facts(HostOs::Linux, Arch::X64);
             f.server_mode = true;

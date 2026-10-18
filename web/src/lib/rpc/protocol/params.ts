@@ -432,6 +432,12 @@ export interface LinkDeviceParams {
   fingerprint: string;
 }
 
+export interface LinkRenameParams {
+  fingerprint: string;
+  /** 省略 / 空白 = 清除备注名。 */
+  name?: string;
+}
+
 export interface LinkDispatchParams {
   fingerprint: string;
   url: string;

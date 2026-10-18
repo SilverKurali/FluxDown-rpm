@@ -10,8 +10,16 @@
  * cat-catch(GPL-3.0) 嗅探思路的复用：JSON 内嵌媒体 URL 深扫见 utils/media-sniff.ts 归属说明。
  * 响应体流式部分读取与 MSE 归因为 FluxDown 自研。
  */
-import { compileBundled } from "@/rules/engine";
-import { hostMatchesPattern, parseHostPattern, urlGlobMatch, type HostPattern } from "@/rules/glob";
+import { compileBundled, createClassifier } from "@/rules/engine";
+import {
+  asciiLower,
+  compileGlob,
+  hostMatchesLower,
+  parseHostPattern,
+  type GlobMatcher,
+  type HostPattern,
+} from "@/rules/glob";
+import { REGEX_INPUT_CAP } from "@/rules/regex-safety";
 import { parseDashJson, parseDashXml } from "@/utils/dash-manifest";
 import type { DashManifest } from "@/utils/dash-manifest";
 import {
@@ -28,8 +36,10 @@ import {
   EV_MEDIA,
   EV_SHADOW,
   EV_REPORT,
+  HOOKS_PROTOCOL,
   decodeDetail,
   encodeDetail,
+  type HookConfig,
   type MediaDetail,
   type PageConfig,
   type ReportDetail,
@@ -42,7 +52,22 @@ type Orig = (this: unknown, ...args: unknown[]) => unknown;
 /** 包装后的实现：参数类型由各钩子自行声明。 */
 type Impl = (...args: never[]) => unknown;
 
+/**
+ * 页面 window 上的安装标记。协议 ≥ 1 为 `{ protocol, hid }`；旧版本（协议 0）是布尔 `true`。
+ * 已有任何标记都不再安装：原型方法不能安全地二次包装（会重复计数 / 重复打标）。
+ */
 const HOOK_FLAG = "__fluxdown_hooks__";
+
+/** 每个 MediaSource 会话可重放的上限（sensor 重注入时只需要当前仍挂在元素上的那些）。 */
+const MAX_REPLAY_MS = 64;
+
+function makeHookId(): string {
+  try {
+    return crypto.randomUUID().slice(0, 8);
+  } catch {
+    return Math.random().toString(36).slice(2, 10).padEnd(8, "0");
+  }
+}
 
 // 读体预算：仅对「非媒体 CT + 非流 URL + http + 非可跳过 CT + 体积可控」的响应读体，
 // 避免大文件 / 流式响应被 clone-read 强制整体缓冲拖爆内存。
@@ -62,16 +87,21 @@ const GENERIC_BINARY_CT = new Set([
 export function start(): void {
   const w = window as unknown as Record<string, unknown>;
   if (w[HOOK_FLAG]) return;
-  w[HOOK_FLAG] = true;
+  const hid = makeHookId();
+  // document_start 注入时文档仍在 loading；之后才装上的钩子（扩展安装 / 更新后补注入）
+  // 漏掉了已建立的 MediaSource ↔ 元素关联，sensor 据此把无证据的播放元素标为「需刷新」。
+  const late = document.readyState !== "loading";
+  w[HOOK_FLAG] = Object.freeze({ protocol: HOOKS_PROTOCOL, hid });
 
-  const rules = compileBundled();
+  // 收到 PageConfig 前用随包规则；之后换成用户实际生效（含覆盖 / 吊销 / 本地与插件规则）的 classifier。
+  let classify = compileBundled().classify;
   const recent = new RecentResponses();
 
   // ===== 配置（EV_CONFIG） =====
 
   interface Watcher {
     ruleId: string;
-    urls?: string[];
+    urls?: GlobMatcher[];
     hosts?: HostPattern[];
     path?: RegExp;
   }
@@ -82,10 +112,17 @@ export function start(): void {
 
   function applyConfig(next: PageConfig): void {
     config = next;
+    if (Array.isArray(next.classify)) {
+      try {
+        classify = createClassifier(next.classify);
+      } catch {
+        /* 形状不对：沿用当前 classifier */
+      }
+    }
     const compiled: Watcher[] = [];
     for (const b of next.bodyWatch) {
       const watcher: Watcher = { ruleId: b.ruleId };
-      if (b.url?.length) watcher.urls = b.url;
+      if (b.url?.length) watcher.urls = b.url.map(compileGlob);
       if (b.host?.length) {
         watcher.hosts = b.host
           .map((h) => parseHostPattern(h))
@@ -104,17 +141,36 @@ export function start(): void {
     watchers = compiled;
   }
 
+  /** 当前 sensor 会话与其换页计数；导航代数 configEpoch 由本侧持有。 */
+  let configSid = "";
+  let configNav = 0;
+
   document.addEventListener(EV_CONFIG, (event) => {
     try {
-      const cfg = decodeDetail((event as CustomEvent).detail) as PageConfig | null;
-      if (cfg && typeof cfg === "object" && typeof cfg.sniff === "boolean") {
-        // 导航代数变化：background 已清空该页状态，去重集合需同步重置
-        if (typeof cfg.epoch === "number" && cfg.epoch !== configEpoch) {
-          configEpoch = cfg.epoch;
-          notified.clear();
-          lastHlsReport.clear();
-        }
-        applyConfig(cfg);
+      const cfg = decodeDetail((event as CustomEvent).detail) as Partial<HookConfig> | null;
+      if (!cfg || typeof cfg !== "object" || typeof cfg.sniff !== "boolean") return;
+      const sid = typeof cfg.sid === "string" ? cfg.sid : "";
+      const nav = typeof cfg.nav === "number" ? cfg.nav : 0;
+      let hello = false;
+      if (sid !== configSid) {
+        // 新的 sensor（首次加载或重注入）：只握手，不换代——SourceBuffer 证据仍属于当前页面。
+        // 已通知集合清空，让新 sensor 能收到之后再次出现的地址（下游按 dedupeKey 去重）。
+        configSid = sid;
+        configNav = nav;
+        hello = sid !== "";
+        notified.clear();
+        lastHlsReport.clear();
+      } else if (nav > configNav) {
+        // 同一 sensor 判定 SPA 换页：background 已清空该页状态，证据与去重集合换代
+        configNav = nav;
+        configEpoch++;
+        notified.clear();
+        lastHlsReport.clear();
+      }
+      applyConfig(cfg as PageConfig);
+      if (hello) {
+        dispatchReport({ t: "hooks", protocol: HOOKS_PROTOCOL, hid, late });
+        replayMedia();
       }
     } catch {
       /* 配置异常保持原状 */
@@ -164,21 +220,14 @@ export function start(): void {
     const mime = ct.split(";")[0].trim().toLowerCase();
     if (!mime) return false;
     if (GENERIC_BINARY_CT.has(mime)) return true;
-    const type = rules.classify(url, mime);
+    const type = classify(url, mime);
     return type !== "other" && type !== "image";
   }
 
+  /** 响应 CT 是否是媒体 / 流清单：交给规则判定（不在此处内置 MIME 列表）。 */
   function isMediaCt(ct: string): boolean {
-    const lower = ct.toLowerCase();
-    return (
-      lower.startsWith("video/") ||
-      lower.startsWith("audio/") ||
-      lower === "application/vnd.apple.mpegurl" ||
-      lower === "application/x-mpegurl" ||
-      lower === "application/mpegurl" ||
-      lower === "application/octet-stream-m3u8" ||
-      lower === "application/dash+xml"
-    );
+    const type = classify("", ct);
+    return type === "video" || type === "audio" || type === "stream";
   }
 
   /** DASH 清单通常是 application/dash+xml，也可能是流 URL + text/xml/JSON。 */
@@ -254,7 +303,7 @@ export function start(): void {
       if (text.length <= MAX_SNIFF_CL && looksLikeJson(ct, text)) {
         const obj: unknown = JSON.parse(text);
         emitManifest(parseDashJson(obj, url), url);
-        for (const mediaUrl of scanForMediaUrls(obj, url)) notify("json", mediaUrl);
+        for (const mediaUrl of scanForMediaUrls(obj, url, classify)) notify("json", mediaUrl);
       }
     } catch {
       /* 嗅探异常绝不冒泡 */
@@ -316,13 +365,14 @@ export function start(): void {
     } catch {
       return [];
     }
-    const full = parsed.href;
-    const host = parsed.hostname.toLowerCase();
+    const full = asciiLower(parsed.href);
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
     const ids: string[] = [];
     for (const wt of watchers) {
-      if (wt.urls && !wt.urls.some((p) => urlGlobMatch(p, full))) continue;
-      if (wt.hosts && !wt.hosts.some((p) => hostMatchesPattern(host, p))) continue;
-      if (wt.path && !wt.path.test(parsed.pathname)) continue;
+      if (wt.urls && !wt.urls.some((g) => g(full))) continue;
+      if (wt.hosts && !wt.hosts.some((p) => hostMatchesLower(host, p))) continue;
+      // 与引擎一致：超长路径视为不匹配，避免恶意正则在页面线程上回溯。
+      if (wt.path && !(parsed.pathname.length <= REGEX_INPUT_CAP && wt.path.test(parsed.pathname))) continue;
       ids.push(wt.ruleId);
     }
     return ids;
@@ -358,6 +408,8 @@ export function start(): void {
   const msOf = new WeakMap<object, MsInfo>();
   const msByObjectUrl = new Map<string, MsInfo>();
   const msOfElement = new WeakMap<object, MsInfo>();
+  /** 最近创建的 MediaSource 会话（插入序，有界）：sensor 重注入后据此重放仍在播放的会话证据。 */
+  const msRegistry = new Set<MsInfo>();
   const hookedElements = new WeakSet<object>();
   const sbInfo = new WeakMap<object, SbInfo>();
   /** fetch 流 → 来源；reader → 来源（含是否已记入 recent）。 */
@@ -385,6 +437,11 @@ export function start(): void {
     if (!info) {
       info = { id: nextMsId++, sbs: [], el: null, lastSent: 0, timer: undefined };
       msOf.set(ms, info);
+      msRegistry.add(info);
+      if (msRegistry.size > MAX_REPLAY_MS) {
+        const oldest = msRegistry.values().next().value;
+        if (oldest !== undefined) msRegistry.delete(oldest);
+      }
     }
     return info;
   }
@@ -392,6 +449,7 @@ export function start(): void {
   function buildDetail(ms: MsInfo, elementless: boolean): MediaDetail {
     const detail: MediaDetail = {
       msId: ms.id,
+      hid,
       sourceBuffers: ms.sbs.map((sb) => {
         const current = sb.epoch === configEpoch;
         return {
@@ -405,6 +463,17 @@ export function start(): void {
     };
     if (elementless) detail.elementless = true;
     return detail;
+  }
+
+  /**
+   * 新 sensor 握手后重放：只发仍是元素当前来源、且元素仍在文档里的会话。
+   * 已被替换的旧会话与无元素会话不重放——前者 sensor 不需要，后者会被误归到唯一的播放元素上。
+   */
+  function replayMedia(): void {
+    for (const ms of msRegistry) {
+      const el = ms.el?.deref();
+      if (el && el.isConnected && msOfElement.get(el) === ms) flushMedia(ms);
+    }
   }
 
   function flushMedia(ms: MsInfo): void {
@@ -712,7 +781,7 @@ export function start(): void {
           sniffTextForMedia(this.responseText, responseUrl, ct, "xhr");
         } else if (rt === "json" && this.response && typeof this.response === "object") {
           emitManifest(parseDashJson(this.response, responseUrl), responseUrl);
-          for (const mediaUrl of scanForMediaUrls(this.response, responseUrl)) notify("json", mediaUrl);
+          for (const mediaUrl of scanForMediaUrls(this.response, responseUrl, classify)) notify("json", mediaUrl);
         } else if (rt === "arraybuffer" && this.response instanceof ArrayBuffer) {
           const prefix = new Uint8Array(this.response).subarray(0, 512);
           const magic = sniffManifestMagic(new TextDecoder().decode(prefix));

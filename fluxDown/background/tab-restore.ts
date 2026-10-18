@@ -11,7 +11,7 @@ import { normalizeHlsPlaylist, type HlsPlaylistEntry, type HlsPlaylistInfo } fro
 import type { DashManifestEntry } from "@/utils/media-candidates";
 import { pageUrlKey } from "@/utils/page-nav";
 import type { DetectedResource } from "@/utils/resource-types";
-import type { ElementState } from "./protocol";
+import type { ElementState, HooksInfo } from "./protocol";
 
 /** `storage.session` 中每个 tab 的快照。 */
 export interface PersistedTab {
@@ -21,6 +21,10 @@ export interface PersistedTab {
   /** 旧版本快照没有此字段。 */
   hlsPlaylists?: HlsPlaylistEntry[];
   elements: ElementState[];
+  /** 历史播放会话；旧版本快照没有此字段。 */
+  retired?: ElementState[];
+  /** 各帧的 sensor 会话；旧版本快照没有此字段（sensor 下次上报时按 resync 补全量）。 */
+  sessions?: { frameId: number; sid: string; hooks: HooksInfo | null }[];
 }
 
 /** 恢复只关心的 tab 状态字段（TabState 的子集）。 */
@@ -31,6 +35,8 @@ export interface RestorableState {
   carriedManifests: Set<string>;
   hlsPlaylists: Map<string, HlsPlaylistInfo>;
   elements: Map<string, ElementState>;
+  sessions: Map<number, { sid: string; hooks: HooksInfo | null }>;
+  retired: ElementState[];
 }
 
 /**
@@ -63,8 +69,15 @@ export function mergeRestoredTab(
     const playlist = normalizeHlsPlaylist(entry.playlist);
     if (playlist) state.hlsPlaylists.set(entry.url, playlist);
   }
+  for (const entry of saved.sessions ?? []) {
+    if (!state.sessions.has(entry.frameId)) state.sessions.set(entry.frameId, { sid: entry.sid, hooks: entry.hooks ?? null });
+  }
   for (const element of saved.elements ?? []) {
+    // 帧里已有别的 sensor 实例（快照之后被重注入 / 换了文档）：旧实例的元素已失效
+    const live = state.sessions.get(element.frameId);
+    if (live && !element.key.startsWith(`${live.sid}:`)) continue;
     if (!state.elements.has(element.key)) state.elements.set(element.key, element);
   }
+  if (state.retired.length === 0 && saved.retired) state.retired = saved.retired;
   return true;
 }

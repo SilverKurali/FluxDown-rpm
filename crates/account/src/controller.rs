@@ -33,6 +33,7 @@ pub struct AccountController {
     discovered: Vec<LinkDiscoveredPeer>,
     pairing_requests: Vec<LinkPairingRequestDto>,
     lan_enabled: bool,
+    lan_active: bool,
     stale: bool,
     /// 已经提示过的入站配对请求，避免重连快照重复弹窗。
     seen_requests: BTreeSet<String>,
@@ -51,6 +52,7 @@ impl AccountController {
             discovered: Vec::new(),
             pairing_requests: Vec::new(),
             lan_enabled: false,
+            lan_active: false,
             stale: true,
             seen_requests: BTreeSet::new(),
         }
@@ -71,6 +73,7 @@ impl AccountController {
         self.pairing_requests
             .clone_from(&snapshot.link_pairing_requests);
         self.lan_enabled = snapshot.gateway.lan_enabled;
+        self.lan_active = snapshot.gateway.lan_active;
         self.stale = false;
         Transition {
             new_pairing_requests: self.take_new_requests(),
@@ -129,6 +132,7 @@ impl AccountController {
             AgentEvent::GatewayChanged(gateway) => {
                 transition.changed = true;
                 self.lan_enabled = gateway.lan_enabled;
+                self.lan_active = gateway.lan_active;
             }
             _ => {}
         }
@@ -231,6 +235,12 @@ impl AccountController {
     #[must_use]
     pub fn lan_enabled(&self) -> bool {
         self.lan_enabled
+    }
+
+    /// 本机网关本次运行是否实际监听非回环地址（`lan_enabled` 只是下次启动生效的持久化配置）。
+    #[must_use]
+    pub fn lan_active(&self) -> bool {
+        self.lan_active
     }
 
     #[must_use]

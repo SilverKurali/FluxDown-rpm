@@ -66,6 +66,7 @@ All configuration is read once at startup from environment variables. There is n
 | `FLUXDOWN_LANG` | unset (falls back to browser language) | Fallback language reported by `/ping` (`en`/`zh`) for the Web UI's first load. Users who pick a language in their browser always keep their own choice. |
 | `FLUXDOWN_MDNS` | on | Device-link mDNS advertisement switch. Set to a falsy value to stop announcing this server on the LAN. |
 | `FLUXDOWN_LINK_NAME` | `FluxDown Server` | Device name shown to other FluxDown clients when link discovery is on. |
+| `FLUXDOWN_LINK_ADVERTISE_ADDR` | unset (auto-detect) | Overrides the reachable address(es) this server reports to other FluxDown devices when pairing and exchanging device info. Comma-separated `host[:port]` or `http(s)://` URLs (a missing port defaults to the actual listen port). Set it when running in Docker / behind NAT / on a multi-NIC host, where the auto-detected address is an internal one other devices cannot reach — for example `192.168.1.5:8080`. |
 | `FLUXDOWN_ANALYTICS` | on | Anonymous usage statistics switch (only active in builds that carry an app key; official builds do). Set to a falsy value to disable. |
 | `FLUXDOWN_LOG_LEVEL` | unset — `info` | Default `tracing` log level (`error`/`warn`/`info`/`debug`/`trace`, case-insensitive) applied when `RUST_LOG` is not set. `RUST_LOG` always wins when present — use `FLUXDOWN_LOG_LEVEL` for a simple one-value override, `RUST_LOG` for per-module directives. Read once at startup; changing it requires a restart. |
 

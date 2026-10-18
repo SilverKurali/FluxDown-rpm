@@ -1,7 +1,8 @@
 import type { JSX } from "preact";
 import { useMemo, useState } from "preact/hooks";
 import type { RulesListEntry } from "@/background/protocol";
-import type { RuleStatus } from "@/rules/engine";
+import { matchesQuery } from "@/background/rule-view";
+import type { RuleStatus, RuleStatusReason } from "@/rules/engine";
 import type { RuleOverrides, RuleTier, SniffRuleV1 } from "@/rules/schema";
 import { Badge } from "@/ui/components/Badge";
 import { Button } from "@/ui/components/Button";
@@ -12,8 +13,14 @@ import { Select } from "@/ui/components/Select";
 import { TextInput } from "@/ui/components/TextInput";
 import { Toggle } from "@/ui/components/Toggle";
 import { useT } from "@/ui/i18n";
+import { sendAction } from "@/utils/messaging";
+import { BUILTIN_RULE_PREVIEW } from "@/utils/rule-preview";
+import { applyOverride } from "../../lib/local-rules";
 import { DEFAULT_PAGE_SIZE, type PageSize, paginate } from "../../lib/pagination";
-import { Pagination } from "../../parts";
+import { issueText } from "../../lib/rule-issue";
+import { ConfirmModal, Pagination } from "../../parts";
+import type { LocalRulesApi } from "./useLocalRules";
+import { stageLabels } from "./stage-labels";
 
 interface RuleTableProps {
   entries: RulesListEntry[];
@@ -21,15 +28,11 @@ interface RuleTableProps {
   /** 当前吊销列表的 sequence；没有时无法确认「仍然启用」。 */
   revocationSequence: number | null;
   onOverridesChange: (next: RuleOverrides) => void;
+  local: LocalRulesApi;
 }
 
 type TierFilter = RuleTier | "all";
-
-/**
- * 内置规则是否可查看原文。开发与本地构建默认可看；发布流水线（release.yml）构建时
- * 设 `WXT_HIDE_BUILTIN_RULES=1`，商店 / Release 包不展示内置规则的真实内容。
- */
-const BUILTIN_RULE_PREVIEW = import.meta.env.WXT_HIDE_BUILTIN_RULES !== "1";
+type SortMode = "default" | "eval" | "hits";
 
 const TIER_TONES: Record<RuleTier, "neutral" | "accent" | "warning" | "success"> = {
   builtin: "neutral",
@@ -42,29 +45,60 @@ const TIER_TONES: Record<RuleTier, "neutral" | "accent" | "warning" | "success">
 const STATUS_TONES: Record<RuleStatus, "neutral" | "success" | "warning" | "danger"> = {
   active: "success",
   disabled: "neutral",
+  paused: "neutral",
   "soft-revoked": "warning",
   "hard-revoked": "danger",
   expired: "warning",
   "engine-too-new": "warning",
+  rejected: "danger",
 };
 
-/** 这些状态下开关不可操作（撤回用独立按钮，其余由包本身决定）。 */
+/** 这些状态下开关不可操作（撤回用独立按钮，其余由包本身或层级开关决定）。 */
 const LOCKED_STATUSES: Record<RuleStatus, boolean> = {
   active: false,
   disabled: false,
+  paused: true,
   "soft-revoked": true,
   "hard-revoked": true,
   expired: true,
   "engine-too-new": true,
+  rejected: true,
 };
+
+/** 排序：default = 列表原序；eval = 求值顺序（未参与求值的排最后）；hits = 命中次数降序。 */
+function sortEntries(list: RulesListEntry[], mode: SortMode): RulesListEntry[] {
+  if (mode === "default") return list;
+  const keyed = list.map((entry, index) => ({ entry, index }));
+  keyed.sort((a, b) => {
+    if (mode === "eval") {
+      const x = a.entry.evalOrder ?? Number.MAX_SAFE_INTEGER;
+      const y = b.entry.evalOrder ?? Number.MAX_SAFE_INTEGER;
+      return x - y || a.index - b.index;
+    }
+    return (b.entry.hits?.count ?? 0) - (a.entry.hits?.count ?? 0) || a.index - b.index;
+  });
+  return keyed.map((k) => k.entry);
+}
+
+interface PreviewState {
+  id: string;
+  title: string;
+  tier: RuleTier;
+  /** undefined = 加载中；null = 不可读取。 */
+  rule: SniffRuleV1 | null | undefined;
+}
 
 export function RuleTable(props: RuleTableProps): JSX.Element {
   const t = useT();
+  const { local } = props;
   const [tier, setTier] = useState<TierFilter>("all");
   const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<SortMode>("default");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
-  const [previewing, setPreviewing] = useState<SniffRuleV1 | null>(null);
+  const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [disabling, setDisabling] = useState<RulesListEntry | null>(null);
+  const [resettingAll, setResettingAll] = useState(false);
 
   const tierLabels: Record<RuleTier, string> = {
     builtin: t("rules.tier.builtin"),
@@ -76,37 +110,63 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
   const statusLabels: Record<RuleStatus, string> = {
     active: t("rules.status.active"),
     disabled: t("rules.status.disabled"),
+    paused: t("rules.status.paused"),
     "soft-revoked": t("rules.status.softRevoked"),
     "hard-revoked": t("rules.status.hardRevoked"),
     expired: t("rules.status.expired"),
     "engine-too-new": t("rules.status.engineTooNew"),
+    rejected: t("rules.status.rejected"),
   };
-  const stageLabels: Record<string, string> = {
-    response: t("rules.stage.response"),
-    normalize: t("rules.stage.normalize"),
-    track: t("rules.stage.track"),
-    body: t("rules.stage.body"),
-    dom: t("rules.stage.dom"),
+  const statusHints: Record<RuleStatus, string | undefined> = {
+    active: undefined,
+    disabled: undefined,
+    paused: t("rules.statusHint.paused"),
+    "soft-revoked": t("rules.statusHint.softRevoked"),
+    "hard-revoked": t("rules.statusHint.hardRevoked"),
+    expired: undefined,
+    "engine-too-new": t("rules.statusHint.engineTooNew"),
+    rejected: undefined,
   };
+  const reasonHints: Record<RuleStatusReason, string> = {
+    "pack-expired": t("rules.statusHint.packExpired"),
+    "revocations-stale": t("rules.statusHint.revocationsStale"),
+  };
+  const stageNames: Record<string, string> = stageLabels();
 
   const needle = query.trim().toLowerCase();
   const filtered = useMemo(
     () =>
-      props.entries.filter(({ rule }) => {
-        if (tier !== "all" && rule.tier !== tier) return false;
-        if (!needle) return true;
-        return rule.id.toLowerCase().includes(needle) || (rule.title ?? "").toLowerCase().includes(needle);
-      }),
-    [props.entries, tier, needle],
+      sortEntries(
+        props.entries.filter(({ rule, searchText }) => {
+          if (tier !== "all" && rule.tier !== tier) return false;
+          return !needle || matchesQuery(searchText, needle);
+        }),
+        sort,
+      ),
+    [props.entries, tier, needle, sort],
   );
   // 规则列表重取 / 筛选变化后页码可能越界，渲染时钳到最后一页。
   const slice = paginate(filtered.length, page, pageSize);
   const visible = filtered.slice(slice.start, slice.end);
 
-  const setEnabled = (id: string, enabled: boolean) => {
-    const previous = props.overrides[id];
-    const next = { enabled, ...(previous?.ackRevocation !== undefined ? { ackRevocation: previous.ackRevocation } : {}) };
-    props.onOverridesChange({ ...props.overrides, [id]: next });
+  const overrideCount = Object.keys(props.overrides).length;
+
+  const writeEnabled = (entry: RulesListEntry, enabled: boolean) => {
+    props.onOverridesChange(applyOverride(props.overrides, entry.rule.id, enabled, entry.rule.enabled !== false));
+  };
+
+  const setEnabled = (entry: RulesListEntry, enabled: boolean) => {
+    // 关闭内置规则会让整类资源不再被识别（或放进大量噪声请求），先确认。
+    if (!enabled && entry.rule.tier === "builtin") {
+      setDisabling(entry);
+      return;
+    }
+    writeEnabled(entry, enabled);
+  };
+
+  const resetOverride = (id: string) => {
+    const { [id]: _removed, ...rest } = props.overrides;
+    props.onOverridesChange(rest);
   };
 
   const keepEnabled = (id: string) => {
@@ -115,6 +175,14 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
       ...props.overrides,
       [id]: { enabled: true, ackRevocation: props.revocationSequence },
     });
+  };
+
+  const openPreview = (entry: RulesListEntry) => {
+    const { id, title, tier: ruleTier } = entry.rule;
+    setPreview({ id, title: title || id, tier: ruleTier, rule: undefined });
+    sendAction<"ruleGet">({ action: "ruleGet", id })
+      .then((rule) => setPreview((current) => (current?.id === id ? { ...current, rule } : current)))
+      .catch(() => setPreview((current) => (current?.id === id ? { ...current, rule: null } : current)));
   };
 
   return (
@@ -138,17 +206,40 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
               { value: "local", label: tierLabels.local },
             ]}
           />
+          <Select<SortMode>
+            value={sort}
+            onChange={(v) => {
+              setSort(v);
+              setPage(1);
+            }}
+            label={t("rules.table.sort")}
+            options={[
+              { value: "default", label: t("rules.table.sortDefault") },
+              { value: "eval", label: t("rules.table.sortEval") },
+              { value: "hits", label: t("rules.table.sortHits") },
+            ]}
+          />
           <TextInput
             type="search"
             value={query}
+            label={t("rules.table.searchLabel")}
             placeholder={t("rules.table.search")}
             onInput={(v) => {
               setQuery(v);
               setPage(1);
             }}
           />
+          {overrideCount > 0 ? (
+            <Button size="sm" onClick={() => setResettingAll(true)}>
+              {t("rules.table.resetAll")}
+            </Button>
+          ) : null}
+          {local.toolbar}
         </div>
       </div>
+      <p class="opt-row-desc">{t("rules.local.desc")}</p>
+      <p class="opt-row-desc">{t("rules.local.submitHint")}</p>
+      {local.report}
 
       {filtered.length === 0 ? (
         <EmptyState icon="search" title={t("rules.table.empty")} />
@@ -161,57 +252,106 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
                 <th>{t("rules.table.colRule")}</th>
                 <th>{t("rules.table.colTier")}</th>
                 <th>{t("rules.table.colStage")}</th>
-                <th>{t("rules.table.colVersion")}</th>
+                <th title={t("rules.table.colPriorityHint")}>{t("rules.table.colPriority")}</th>
+                <th>{t("rules.table.colHits")}</th>
                 <th>{t("rules.table.colStatus")}</th>
-                {BUILTIN_RULE_PREVIEW ? <th class="opt-col-actions">{t("options.sites.colActions")}</th> : null}
+                <th class="opt-col-actions">{t("options.sites.colActions")}</th>
               </tr>
             </thead>
             <tbody>
-              {visible.map(({ rule, status, reason }) => (
-                <tr key={rule.id}>
-                  <td class="opt-col-toggle">
-                    <Toggle
-                      checked={status === "active"}
-                      disabled={LOCKED_STATUSES[status]}
-                      label={rule.title || rule.id}
-                      onChange={(v) => setEnabled(rule.id, v)}
-                    />
-                  </td>
-                  <td>
-                    <div class="opt-rule-title">{rule.title || rule.id}</div>
-                    {rule.title ? <div class="opt-cell-mono opt-rule-id">{rule.id}</div> : null}
-                  </td>
-                  <td>
-                    <Badge tone={TIER_TONES[rule.tier]}>{tierLabels[rule.tier]}</Badge>
-                  </td>
-                  <td>{stageLabels[rule.stage] ?? rule.stage}</td>
-                  <td class="opt-cell-mono">{rule.version}</td>
-                  <td>
-                    <div class="opt-status-cell">
-                      <Badge tone={STATUS_TONES[status]} title={reason}>
-                        {statusLabels[status]}
-                      </Badge>
-                      {status === "soft-revoked" ? (
-                        <Button
-                          size="sm"
-                          disabled={props.revocationSequence === null}
-                          title={reason}
-                          onClick={() => keepEnabled(rule.id)}
-                        >
-                          {t("rules.table.keepEnabled")}
-                        </Button>
-                      ) : null}
-                    </div>
-                  </td>
-                  {BUILTIN_RULE_PREVIEW ? (
-                    <td class="opt-col-actions">
-                      {rule.tier === "builtin" ? (
-                        <IconButton icon="eye" label={t("rules.table.viewRule")} onClick={() => setPreviewing(rule)} />
+              {visible.map((entry, i) => {
+                const { rule, status, reason, detail, inert } = entry;
+                const hint =
+                  status === "rejected"
+                    ? issueText(t, { code: entry.code, param: entry.param, detail: detail ?? "" })
+                    : (detail ?? (reason ? reasonHints[reason] : statusHints[status]));
+                const inertHint =
+                  inert === "requires-setting"
+                    ? t("rules.inert.requiresSettingHint")
+                    : inert === "classify-only"
+                      ? t("rules.inert.classifyOnlyHint")
+                      : undefined;
+                const localRule = rule.tier === "local" ? local.rules.find((r) => r.id === rule.id) : undefined;
+                const canView = rule.tier !== "builtin" || BUILTIN_RULE_PREVIEW;
+                return (
+                  <tr key={`${slice.start + i}:${rule.id}`}>
+                    <td class="opt-col-toggle">
+                      <Toggle
+                        checked={status === "active"}
+                        disabled={LOCKED_STATUSES[status]}
+                        label={rule.title || rule.id}
+                        onChange={(v) => setEnabled(entry, v)}
+                      />
+                    </td>
+                    <td>
+                      <div class="opt-rule-title">{rule.title || rule.id}</div>
+                      {rule.title ? <div class="opt-cell-mono opt-rule-id">{rule.id}</div> : null}
+                    </td>
+                    <td>
+                      <Badge tone={TIER_TONES[rule.tier]}>{tierLabels[rule.tier]}</Badge>
+                    </td>
+                    <td class="opt-col-nowrap">{stageNames[rule.stage] ?? rule.stage}</td>
+                    <td class="opt-cell-mono">
+                      <div>{rule.priority ?? 0}</div>
+                      {entry.evalOrder !== undefined ? (
+                        <div class="opt-rule-id" title={t("rules.table.evalOrder", { n: String(entry.evalOrder + 1) })}>
+                          #{entry.evalOrder + 1}
+                        </div>
                       ) : null}
                     </td>
-                  ) : null}
-                </tr>
-              ))}
+                    <td class="opt-cell-mono">
+                      {entry.hits ? (
+                        <span title={t("rules.table.hitsTitle", { time: new Date(entry.hits.lastAt).toLocaleString() })}>
+                          {entry.hits.count}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td>
+                      <div class="opt-status-cell">
+                        {/* 依赖设置未开启：只显示「未生效」，不与「生效」并列互相矛盾。 */}
+                        {status === "active" && inert === "requires-setting" ? null : (
+                          <Badge tone={STATUS_TONES[status]} title={hint}>
+                            {statusLabels[status]}
+                          </Badge>
+                        )}
+                        {status === "active" && inert ? (
+                          <Badge tone="warning" title={inertHint}>
+                            {inert === "requires-setting" ? t("rules.inert.requiresSetting") : t("rules.inert.classifyOnly")}
+                          </Badge>
+                        ) : null}
+                        {status === "soft-revoked" ? (
+                          <Button
+                            size="sm"
+                            disabled={props.revocationSequence === null}
+                            title={hint}
+                            onClick={() => keepEnabled(rule.id)}
+                          >
+                            {t("rules.table.keepEnabled")}
+                          </Button>
+                        ) : null}
+                      </div>
+                      {hint || (status === "active" && inertHint) ? (
+                        <div class="opt-reason-line">{hint || inertHint}</div>
+                      ) : null}
+                    </td>
+                    <td class="opt-col-actions">
+                      {rule.id in props.overrides ? (
+                        <IconButton icon="refresh" label={t("rules.table.reset")} onClick={() => resetOverride(rule.id)} />
+                      ) : null}
+                      {canView ? <IconButton icon="eye" label={t("rules.table.viewRule")} onClick={() => openPreview(entry)} /> : null}
+                      {localRule ? (
+                        <>
+                          <IconButton icon="upload" label={t("rules.local.submit")} onClick={() => local.submit(localRule)} />
+                          <IconButton icon="edit" label={t("rules.local.edit")} onClick={() => local.edit(localRule)} />
+                          <IconButton icon="trash" label={t("rules.local.remove")} onClick={() => local.remove(localRule)} />
+                        </>
+                      ) : null}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -228,11 +368,72 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
         }}
       />
 
-      {previewing ? (
-        <Modal title={previewing.title || previewing.id} width={640} onClose={() => setPreviewing(null)}>
-          <pre class="opt-json opt-json-view">{JSON.stringify(previewing, null, 2)}</pre>
+      {preview ? (
+        <Modal
+          title={preview.title}
+          width={640}
+          onClose={() => setPreview(null)}
+          footer={
+            <>
+              {preview.rule && preview.tier !== "local" ? (
+                <Button
+                  onClick={() => {
+                    const rule = preview.rule;
+                    setPreview(null);
+                    if (rule) local.copyToLocal(rule);
+                  }}
+                >
+                  {t("rules.preview.copyToLocal")}
+                </Button>
+              ) : null}
+              <Button onClick={() => setPreview(null)}>{t("rules.local.dismiss")}</Button>
+            </>
+          }
+        >
+          {preview.rule === undefined ? (
+            <div role="status">{t("rules.preview.loading")}</div>
+          ) : preview.rule === null ? (
+            <div class="opt-warn" role="alert">
+              {t("rules.preview.unavailable")}
+            </div>
+          ) : (
+            <>
+              <p class="opt-row-desc">{t("rules.preview.version", { version: String(preview.rule.version) })}</p>
+              <pre class="opt-json opt-json-view">{JSON.stringify(preview.rule, null, 2)}</pre>
+            </>
+          )}
         </Modal>
       ) : null}
+
+      {disabling ? (
+        <ConfirmModal
+          title={t("rules.table.disableBuiltinTitle")}
+          message={t("rules.table.disableBuiltinConfirm", { name: disabling.rule.title || disabling.rule.id })}
+          confirmLabel={t("rules.table.disable")}
+          danger
+          onCancel={() => setDisabling(null)}
+          onConfirm={() => {
+            writeEnabled(disabling, false);
+            setDisabling(null);
+          }}
+        />
+      ) : null}
+
+      {resettingAll ? (
+        <ConfirmModal
+          title={t("rules.table.resetAll")}
+          message={t("rules.table.resetAllConfirm", { count: String(overrideCount) })}
+          confirmLabel={t("rules.table.resetAll")}
+          danger
+          onCancel={() => setResettingAll(false)}
+          onConfirm={() => {
+            props.onOverridesChange({});
+            setResettingAll(false);
+          }}
+        />
+      ) : null}
+
+      {local.dialogs}
     </div>
   );
 }

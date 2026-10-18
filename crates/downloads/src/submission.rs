@@ -129,6 +129,8 @@ struct SubmissionPlan {
 struct RemoteInfo {
     device: String,
     offline: bool,
+    /// 经局域网直连下发（一次性投递，进度要在目标设备上看）。
+    direct: bool,
 }
 
 impl NewDownloadSubmission {
@@ -267,6 +269,7 @@ impl NewDownloadSubmission {
                     save_dir,
                     captures,
                 } = remote;
+                let direct = matches!(target, DispatchTarget::Paired(_));
                 let commands = items
                     .into_iter()
                     .filter_map(|item| match &target {
@@ -304,6 +307,7 @@ impl NewDownloadSubmission {
                     remote: Some(RemoteInfo {
                         device: device_label,
                         offline: target_offline,
+                        direct,
                     }),
                 }
             }
@@ -565,6 +569,7 @@ impl SubmissionReport {
                     summary.succeeded,
                     &remote.device,
                     remote.offline,
+                    remote.direct,
                 ),
             },
             (Some(remote), Some(reason)) => SubmitNotice {
@@ -1057,6 +1062,28 @@ mod tests {
         let notice = report.notice(&translator);
         assert!(notice.ok);
         assert!(notice.message.contains("offline"), "{}", notice.message);
+        Ok(())
+    }
+
+    #[test]
+    fn direct_dispatch_toast_says_progress_is_on_the_target_device() -> Result<(), I18nError> {
+        let catalog = std::sync::Arc::new(I18nCatalog::load_embedded()?);
+        let translator = catalog.translator("en");
+        let report = block_on(run_submission(
+            NewDownloadSubmission::Remote(remote(
+                DispatchTarget::Paired("fp1".to_owned()),
+                &["https://a/1"],
+                None,
+            )),
+            |_| Box::pin(async { Ok(DownloadsResult::Unit) }),
+            hooks(),
+        ));
+        let notice = report.notice(&translator);
+        assert!(notice.ok);
+        assert_eq!(
+            notice.message,
+            translator.text_with("linkDispatchedToDevice", &[("device", "Mac")])
+        );
         Ok(())
     }
 

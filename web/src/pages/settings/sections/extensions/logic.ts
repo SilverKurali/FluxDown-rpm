@@ -170,6 +170,8 @@ export function permissionKeys(permission: string): { name: string; desc: string
       return { name: 'pluginPermDesktopName', desc: 'pluginPermDesktopDesc' }
     case 'background':
       return { name: 'pluginPermBackgroundName', desc: 'pluginPermBackgroundDesc' }
+    case 'intercept':
+      return { name: 'pluginPermInterceptName', desc: 'pluginPermInterceptDesc' }
     default:
       return null
   }
@@ -177,7 +179,15 @@ export function permissionKeys(permission: string): { name: string; desc: string
 
 // ── 授权与风险（镜像 crates/extensions market.rs；夹具 crates/extensions/tests/fixtures/consent_cases.json）──
 
-const ELEVATED_PERMISSIONS: readonly string[] = ['ffmpeg', 'ytdlp', 'auth', 'tasks', 'browserRules', 'background']
+const ELEVATED_PERMISSIONS: readonly string[] = [
+  'ffmpeg',
+  'ytdlp',
+  'auth',
+  'tasks',
+  'browserRules',
+  'background',
+  'intercept',
+]
 
 /** 风险等级：含 `desktop` → full；含任一提权权限 → elevated；否则 standard。 */
 export function riskOf(permissions: readonly string[]): PluginRisk {

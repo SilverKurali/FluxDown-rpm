@@ -216,6 +216,8 @@ pub enum ActorOperation {
     /// 订阅列表：重读库（未读计数）并叠加内存运行态（上次检查时间等只在内存前进）。
     RssListSources,
     RssValidate {
+        provider_id: String,
+        provider_config: String,
         url: String,
         cookies: String,
         user_agent: String,
@@ -510,6 +512,11 @@ async fn run_actor(
         Ok(Err(error)) => tracing::error!(%error, "daemon task activity flush failed"),
         Err(_) => tracing::error!("daemon task activity flush timed out"),
     }
+    match tokio::time::timeout(Duration::from_secs(5), engine.db.flush_speed_history()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!(%error, "daemon speed history flush failed"),
+        Err(_) => tracing::error!("daemon speed history flush timed out"),
+    }
     selections.resolve_all_defaults();
     commands.close();
     while let Some(command) = commands.recv().await {
@@ -701,14 +708,21 @@ async fn dispatch_operation(
             reject_unsupported_maintenance(ack);
         }
         ActorOperation::RssValidate {
+            provider_id,
+            provider_config,
             url,
             cookies,
             user_agent,
             proxy_url,
         } => {
-            let future = engine
-                .manager
-                .rss_validate_future(url, cookies, user_agent, proxy_url);
+            let future = engine.manager.rss_validate_future(
+                provider_id,
+                provider_config,
+                url,
+                cookies,
+                user_agent,
+                proxy_url,
+            );
             tokio::spawn(async move {
                 if ack
                     .send(Ok(ActorResult::RssValidation(Box::new(future.await))))

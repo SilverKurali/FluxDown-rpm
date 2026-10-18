@@ -118,6 +118,10 @@ pub fn permission_label(translator: &Translator, permission: &str) -> (String, S
             translator.text("pluginPermBackgroundName").to_owned(),
             translator.text("pluginPermBackgroundDesc").to_owned(),
         ),
+        "intercept" => (
+            translator.text("pluginPermInterceptName").to_owned(),
+            translator.text("pluginPermInterceptDesc").to_owned(),
+        ),
         other => (
             other.to_owned(),
             translator.text("pluginPermUnknownDesc").to_owned(),

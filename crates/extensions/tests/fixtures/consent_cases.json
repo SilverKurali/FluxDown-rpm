@@ -8,6 +8,7 @@
     { "name": "tasks", "permissions": ["tasks"], "risk": "elevated" },
     { "name": "browserRules", "permissions": ["browserRules"], "risk": "elevated" },
     { "name": "background", "permissions": ["background"], "risk": "elevated" },
+    { "name": "intercept", "permissions": ["intercept"], "risk": "elevated" },
     { "name": "desktop alone", "permissions": ["desktop"], "risk": "full" },
     { "name": "desktop wins over elevated", "permissions": ["ffmpeg", "desktop", "tasks"], "risk": "full" }
   ],

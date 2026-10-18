@@ -71,6 +71,8 @@ export type ErrorReason =
   | 'pairingVersionMismatch'
   | 'peerNotPaired'
   | 'peerOffline'
+  | 'peerOutdated'
+  | 'linkUnavailable'
   | 'elevationCancelled'
   | 'elevationUnavailable'
   | 'runningElevated'

@@ -4,8 +4,10 @@
 // into classic scripts. The resident `main` script registers through `flux.*` instead.
 import type {
   AuthFn,
-  Flux,
   HookHandlers,
+  InterceptContext,
+  InterceptHandlers,
+  MainFlux,
   ResolveFn,
   SubscribeFn,
 } from "./types/flux";
@@ -42,11 +44,21 @@ export function defineSubscription(fn: SubscribeFn): SubscribeFn {
   return fn;
 }
 
+/** Installs `globalThis.intercept`, dispatching by `ctx.stage` (manifest `interceptors.entry`). */
+export function defineInterceptors(handlers: InterceptHandlers): InterceptHandlers {
+  install("intercept", (ctx: InterceptContext) => {
+    const h = handlers[ctx.stage] as ((c: InterceptContext) => unknown) | undefined;
+    return h ? h(ctx) : undefined;
+  });
+  return handlers;
+}
+
 /**
  * Wraps the registration code of the resident `main` script. It runs once, immediately, with the
  * `flux` facade, so views, commands, rpc handlers, events and timers are registered while the
  * script is evaluated.
  */
-export function defineMain(setup: (flux: Flux) => void): void {
-  setup(flux);
+export function defineMain(setup: (flux: MainFlux) => void): void {
+  // The global is the shared facade type; in the resident `main` script it carries the host additions.
+  setup(flux as MainFlux);
 }

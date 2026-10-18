@@ -315,6 +315,12 @@ internal fun LinkDeviceDto.toCore() = LinkDevice(
     online = online,
     defaultSaveDir = defaultSaveDir,
     pathStyle = pathStyle,
+    customName = customName,
+    appVersion = appVersion,
+    cloudDeviceId = cloudDeviceId,
+    revoked = revoked,
+    pairedAt = pairedAt,
+    lastSeenAt = lastSeenAt,
 )
 
 internal fun CategoryDto.toCore() = Category(

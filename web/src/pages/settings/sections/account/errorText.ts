@@ -41,6 +41,8 @@ export const REASON_KEYS: Partial<Record<ErrorReason, string>> = {
   pairingVersionMismatch: 'errReasonPairingVersionMismatch',
   peerNotPaired: 'errReasonPeerNotPaired',
   peerOffline: 'errReasonPeerOffline',
+  peerOutdated: 'errReasonPeerOutdated',
+  linkUnavailable: 'errReasonLinkUnavailable',
   paymentDisabled: 'accountPlanErrorPaymentDisabled',
   paymentGatewayFailed: 'accountPlanErrorGateway',
   planNotPurchasable: 'accountPlanErrorNotPurchasable',

@@ -52,6 +52,16 @@ describe("strict mode", () => {
     expect(validateManifest({ ...base, version: "v1.0.0-rc.1" }, new Set()).ok).toBe(true);
     expect(validateManifest({ ...base, version: "v1.0.0-rc.1" }, new Set(), { strict: true }).ok).toBe(false);
   });
+  test("omitted files skip existence checks; strict without files is a clear error", () => {
+    const m = { ...base, main: { entry: "main.js" }, hooks: { entry: "h.js", events: ["onDone"] } };
+    expect(validateManifest(m).ok).toBe(true);
+    expect(validateManifest(m, null).ok).toBe(true);
+    expect(validateManifest({ ...base, version: "x" }).ok).toBe(false);
+    const strict = validateManifest(m, undefined, { strict: true });
+    expect(strict.ok).toBe(false);
+    expect(strict.errors).toHaveLength(1);
+    expect(strict.errors[0]).toContain("files");
+  });
 });
 
 describe("misc rules", () => {
@@ -65,8 +75,8 @@ describe("misc rules", () => {
     const good = { ...base, settings: [{ key: "k", title: "K", type: "number", min: 1, max: 5, default: "3" }] };
     expect(validateManifest(good, new Set()).ok).toBe(true);
   });
-  test("seven permissions", () => {
-    expect(VALID_PERMISSIONS).toHaveLength(7);
+  test("eight permissions", () => {
+    expect(VALID_PERMISSIONS).toHaveLength(8);
   });
   test("ipv6 network hosts", () => {
     const m = (host: string) => ({

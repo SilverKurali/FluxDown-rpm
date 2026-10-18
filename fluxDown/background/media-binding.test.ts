@@ -53,10 +53,13 @@ function input(overrides: Partial<ViewModelInput>): ViewModelInput {
     hlsPlaylists: [],
     mirrorGroups: [],
     elements: [],
+    retiredElements: [],
     engine,
     showLowConfidence: false,
     handoff: { kind: "no-match", installed: 0 },
     site: { host: "www.bilibili.com", profileKey: null, profile: { intercept: "default", sniff: true, pageDot: true, floatButton: true, saveDir: "" } },
+    probe: "live",
+    lateFrames: new Set(),
     ...overrides,
   };
 }
@@ -405,5 +408,94 @@ describe("元素事实与推断关联", () => {
       );
       expect(view.playing.map((r) => [r.elementKey, r.binding])).toEqual([["f1:1", "exact"]]);
     });
+  });
+});
+
+describe("推荐流播放器（抖音式：多元素预加载、复用元素换片、分离音轨）", () => {
+  const PAGE = "https://www.douyin.com/jingxuan?modal_id=1";
+  function track(video: string, kind: "video" | "audio", size: number): DetectedResource {
+    const url = `https://v26-weba.douyinvod.com/${video}/media-${kind === "video" ? "video-hvc1" : "audio-und-mp4a"}/?a=1`;
+    return {
+      id: engine.dedupeKey(url, PAGE),
+      url,
+      filename: "x",
+      type: "video",
+      size,
+      mimeType: "video/mp4",
+      detectedBy: "webRequest",
+      detectedAt: 1,
+      tabId: 1,
+      pageUrl: PAGE,
+      confidence: "high",
+    };
+  }
+  const pairBindings = (v: DetectedResource, a: DetectedResource) => [
+    { sbId: 1, mime: "video/mp4", kind: "video" as const, exact: [v.url], temporal: [] },
+    { sbId: 2, mime: "audio/mp4", kind: "audio" as const, exact: [a.url], temporal: [] },
+  ];
+
+  test("exact 命中压过另一个元素的大量 temporal 计数：预加载元素的音视频对不落进未关联", () => {
+    const curV = track("cur", "video", 490_000_000);
+    const curA = track("cur", "audio", 58_000_000);
+    const nextV = track("next", "video", 28_000_000);
+    const nextA = track("next", "audio", 900_000);
+    // 当前元素在时间窗口里把预加载元素的数据也计了很多次
+    const current = element({
+      key: "s:1",
+      bindings: [
+        ...pairBindings(curV, curA),
+        { sbId: 3, mime: "video/mp4", kind: "video", exact: [], temporal: [{ url: nextV.url, count: 74 }, { url: nextA.url, count: 74 }] },
+      ],
+    });
+    const preload = element({ key: "s:2", playing: false, visibleRatio: 0, bindings: pairBindings(nextV, nextA) });
+    const view = composeTabView(input({ pageUrl: PAGE, resources: [curV, curA, nextV, nextA], elements: [current, preload] }));
+    expect(view.playing.map((r) => r.elementKey)).toEqual(["s:1"]);
+    expect(view.otherElements.map((r) => [r.elementKey, r.binding])).toEqual([["s:2", "exact"]]);
+    expect(view.unbound).toHaveLength(0);
+  });
+
+  test("元素换片后，历史会话仍关联到自己的证据与当时的标题，不会成为当前播放", () => {
+    const oldV = track("old", "video", 400_000_000);
+    const oldA = track("old", "audio", 56_000_000);
+    const newV = track("new", "video", 50_000_000);
+    const newA = track("new", "audio", 6_000_000);
+    const live = element({ key: "s:1", msId: 2, title: "第8集", bindings: pairBindings(newV, newA) });
+    const retired = element({
+      key: "s:1@abc",
+      msId: 1,
+      title: "第7集",
+      playing: false,
+      visibleRatio: 0,
+      retiredSession: "ms::1",
+      bindings: pairBindings(oldV, oldA),
+    });
+    const view = composeTabView(
+      input({ pageUrl: PAGE, resources: [oldV, oldA, newV, newA], elements: [live], retiredElements: [retired] }),
+    );
+    expect(view.activeElementKey).toBe("s:1");
+    expect(view.playing.map((r) => r.candidate.title)).toEqual(["第8集"]);
+    expect(view.otherElements.map((r) => [r.elementKey, r.candidate.title])).toEqual([["s:1@abc", "第7集"]]);
+    const pair = view.otherElements[0].candidate.variants[0];
+    expect([pair.videoUrl, pair.audioUrl]).toEqual([oldV.url, oldA.url]);
+    expect(view.unbound).toHaveLength(0);
+  });
+
+  test("被追加进音频 SourceBuffer 的完整文件（服务端标成 video/mp4）不作为视频直链单列", () => {
+    const audioOnly = track("cur", "audio", 58_000_000);
+    const el = element({ bindings: [{ sbId: 1, mime: "audio/mp4", kind: "audio", exact: [audioOnly.url], temporal: [] }] });
+    const view = composeTabView(input({ pageUrl: PAGE, resources: [audioOnly], elements: [el] }));
+    expect([...view.playing, ...view.otherElements, ...view.unbound]).toHaveLength(0);
+  });
+
+  test("钩子补装晚于页面播放、当前播放元素没有任何来源证据时，探测状态降级为需刷新", () => {
+    const bare = element({ key: "s:1", bindings: [] });
+    const late = composeTabView(input({ pageUrl: PAGE, elements: [bare], lateFrames: new Set([0]) }));
+    expect(late.probe).toBe("degraded");
+    // 钩子按时安装（Worker 里取数据等其它原因没有证据）：刷新也无济于事，不提示
+    expect(composeTabView(input({ pageUrl: PAGE, elements: [bare] })).probe).toBe("live");
+    // 新换上的来源被迟装的钩子看到了：已有证据，不再降级
+    const v = track("cur", "video", 1);
+    const seen = element({ key: "s:1", bindings: [{ sbId: 1, mime: "video/mp4", kind: "video", exact: [v.url], temporal: [] }] });
+    expect(composeTabView(input({ pageUrl: PAGE, resources: [v], elements: [seen], lateFrames: new Set([0]) })).probe).toBe("live");
   });
 });

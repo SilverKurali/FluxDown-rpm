@@ -407,6 +407,19 @@ export function ResourceList(props: Props): JSX.Element {
   }));
 
   const total = playing.length + others.length + unbound.length + files.length;
+  // 页面探测状态：恢复中 / 需刷新总是提示；不可注入只在确有媒体时提示（否则只是普通受限页）
+  const probeText =
+    view.probe === "recovering"
+      ? t("list.probe.recovering")
+      : view.probe === "degraded"
+        ? t("list.probe.degraded")
+        : view.probe === "unavailable" && view.unbound.length > 0
+          ? t("list.probe.unavailable")
+          : null;
+  const reloadPage = async () => {
+    const res = await sendAction<"reloadTab">({ action: "reloadTab", tabId: view.tabId }).catch(() => null);
+    if (!res?.ok) showToast(t("list.probe.reloadFailed"), "error");
+  };
 
   return (
     <div class={`fd-list fd-list-${density}`} ref={rootRef}>
@@ -446,6 +459,17 @@ export function ResourceList(props: Props): JSX.Element {
             <option value="size">{t("list.sortSize")}</option>
             <option value="name">{t("list.sortName")}</option>
           </select>
+        </div>
+      ) : null}
+
+      {probeText ? (
+        <div class={`fd-probe fd-probe-${view.probe}`} role="status">
+          <span class="fd-probe-text">{probeText}</span>
+          {view.probe === "degraded" ? (
+            <Button size="sm" variant="ghost" onClick={() => void reloadPage()}>
+              {t("list.probe.reload")}
+            </Button>
+          ) : null}
         </div>
       ) : null}
 

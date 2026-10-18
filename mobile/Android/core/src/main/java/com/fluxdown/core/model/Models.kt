@@ -250,7 +250,7 @@ data class CloudDevice(
     val pathStyle: String? = null,
 )
 
-/** 局域网已配对设备（`LinkDeviceInfo` 子集）。 */
+/** 局域网已配对设备（`LinkDeviceInfo`）；[name] 已是生效名（备注名优先）。 */
 data class LinkDevice(
     val fingerprint: String,
     val name: String,
@@ -260,4 +260,16 @@ data class LinkDevice(
     val defaultSaveDir: String? = null,
     /** 设备自报的路径风格 wire 名（`windows` / `posix`）；null = 未上报，按 [platform] 推断。 */
     val pathStyle: String? = null,
+    /** 本机备注名（`agent.link.rename`）；null = 未设置，[name] 即对端自报名。 */
+    val customName: String? = null,
+    /** 对端自报的客户端版本。 */
+    val appVersion: String? = null,
+    /** 对端自报的云设备 id：本机云名册里存在同 id 时与云条目合并展示。 */
+    val cloudDeviceId: String? = null,
+    /** 对端已解除与本机的配对：不可下发，只能删除或重新配对。 */
+    val revoked: Boolean = false,
+    /** 配对时间（Unix 毫秒）。 */
+    val pairedAt: Long = 0,
+    /** 最近一次确认在线的时间（Unix 毫秒，0 = 未知）。 */
+    val lastSeenAt: Long = 0,
 )

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@fluxdown/plugin-sdk",
+      "name": "fluxdown-plugin-sdk",
       "dependencies": {
         "esbuild": "^0.28.2",
         "fflate": "^0.8.3",

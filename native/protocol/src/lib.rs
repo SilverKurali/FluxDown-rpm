@@ -20,7 +20,7 @@ pub mod task_activity;
 pub mod update_prompt;
 pub use task_activity::{
     TaskActivityDto, TaskActivityPage, TaskActivityQuery, TaskRuntimeDto, TaskSegmentDto,
-    TaskSourceBytesDto,
+    TaskSourceBytesDto, TaskSpeedHistoryDto, TaskSpeedHistoryQuery,
 };
 
 pub use agent::{
@@ -35,9 +35,9 @@ pub use agent::{
     DiagnosticsReportDto, Entitlements, FILE_ICON_PER_FILE_EXTENSIONS, GatewayPatchParams,
     GatewayStatusDto, LinkAddressParams, LinkApproveParams, LinkDeviceParams, LinkDiscoveryParams,
     LinkDispatchParams, LinkDispatchResult, LinkPairBeginParams, LinkPairFinishParams,
-    LinkPairingCodeDto, LinkPairingRequestDto, LogExportParams, LogExportResult, LogPathsDto,
-    OriginIdCheckResult, PathStyle, PendingCaptureDto, PlatformFileIconDto, PlatformFileIconParams,
-    PlatformIntegrationDto, PlatformOpenPathParams, PlatformToggleParams,
+    LinkPairingCodeDto, LinkPairingRequestDto, LinkRenameParams, LogExportParams, LogExportResult,
+    LogPathsDto, OriginIdCheckResult, PathStyle, PendingCaptureDto, PlatformFileIconDto,
+    PlatformFileIconParams, PlatformIntegrationDto, PlatformOpenPathParams, PlatformToggleParams,
     PlatformUrlProtocolParams, PowerArmParams, PowerStatusDto, ReleaseNoteDto, RemoteCommandAction,
     RemoteCommandParams, RemoteDispatchParams, RemoteDispatchResult, RemoteTaskDto,
     RemoteTaskStatus, ShellStatusDto, SyncLocalOnlyParams, SyncStatusDto, TrayUnavailableReason,

@@ -10,6 +10,7 @@ import { hostOf } from "@/rules/url";
 import { isDownloadContentType, responseDownloadCache, urlHost } from "./intercept";
 import type { ResponseDownloadInfo } from "./intercept";
 import { extractAuthFromCache } from "./request-cache";
+import { recordRuleHit } from "./rule-hits";
 import { getEngine } from "./rules-store";
 import { peekCachedProfiles, peekCachedSettings } from "./settings-cache";
 import { getTabPageUrl, ingestResources } from "./tab-state";
@@ -149,6 +150,8 @@ function onSniffResponse(details: Browser.webRequest.OnHeadersReceivedDetails): 
     headers: h.all,
     attachment: isAttachment,
   });
+  // 命中统计含 ignore 决定：回答「为什么没识别到 X」，也用于清理从不命中的死规则。
+  if (decision.decision !== "none") recordRuleHit(decision.rule.id);
   if (decision.decision === "ignore") return;
   // 既非规则命中、又非附件 → 丢弃
   if (decision.decision === "none" && !isAttachment) return;

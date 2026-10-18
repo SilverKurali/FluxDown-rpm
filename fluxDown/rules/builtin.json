@@ -1,14 +1,15 @@
 {
   "format": "fluxdown-sniff-pack",
   "packId": "builtin",
-  "sequence": 1,
+  "sequence": 2,
   "engine": 1,
-  "issuedAt": "2026-10-15T00:00:00Z",
+  "issuedAt": "2026-10-18T00:00:00Z",
   "rules": [
     {
       "id": "builtin.ext.video",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "按扩展名识别视频",
       "stage": "response",
       "priority": 20,
       "match": {
@@ -20,14 +21,19 @@
           "wmv",
           "flv",
           "webm",
-          "ts",
           "m4v",
           "3gp",
           "mpg",
           "mpeg",
           "f4v",
           "vob",
-          "ogv"
+          "ogv",
+          "rmvb",
+          "rm",
+          "asf",
+          "m2ts",
+          "mts",
+          "divx"
         ]
       },
       "action": {
@@ -37,8 +43,9 @@
     },
     {
       "id": "builtin.ext.audio",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "按扩展名识别音频",
       "stage": "response",
       "priority": 20,
       "match": {
@@ -51,9 +58,11 @@
           "wma",
           "m4a",
           "opus",
-          "ape",
           "alac",
-          "aiff"
+          "aiff",
+          "mka",
+          "weba",
+          "m4b"
         ]
       },
       "action": {
@@ -65,6 +74,7 @@
       "id": "builtin.ext.document",
       "version": 1,
       "tier": "builtin",
+      "title": "按扩展名识别文档",
       "stage": "response",
       "priority": 20,
       "match": {
@@ -93,8 +103,9 @@
     },
     {
       "id": "builtin.ext.archive",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "按扩展名识别压缩包 / 镜像",
       "stage": "response",
       "priority": 20,
       "match": {
@@ -107,11 +118,13 @@
           "bz2",
           "xz",
           "iso",
-          "img",
           "zst",
-          "lz",
           "cab",
-          "z"
+          "tgz",
+          "tbz2",
+          "txz",
+          "lzma",
+          "jar"
         ]
       },
       "action": {
@@ -121,8 +134,9 @@
     },
     {
       "id": "builtin.ext.image",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "按扩展名识别图片（需开启图片嗅探）",
       "stage": "response",
       "priority": 20,
       "requires": "sniffImages",
@@ -138,7 +152,6 @@
           "ico",
           "tiff",
           "psd",
-          "raw",
           "heic",
           "avif"
         ]
@@ -150,8 +163,9 @@
     },
     {
       "id": "builtin.ext.executable",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "按扩展名识别安装包 / 可执行文件",
       "stage": "response",
       "priority": 20,
       "match": {
@@ -164,7 +178,6 @@
           "appimage",
           "apk",
           "ipa",
-          "snap",
           "flatpak"
         ]
       },
@@ -177,6 +190,7 @@
       "id": "builtin.ext.torrent",
       "version": 1,
       "tier": "builtin",
+      "title": "按扩展名识别种子文件",
       "stage": "response",
       "priority": 20,
       "match": {
@@ -193,6 +207,7 @@
       "id": "builtin.ext.stream",
       "version": 1,
       "tier": "builtin",
+      "title": "按扩展名识别流媒体清单 / 分片",
       "stage": "response",
       "priority": 20,
       "match": {
@@ -210,8 +225,9 @@
     },
     {
       "id": "builtin.ext.subtitle",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "按扩展名识别字幕",
       "stage": "response",
       "priority": 20,
       "match": {
@@ -220,8 +236,6 @@
           "srt",
           "ass",
           "ssa",
-          "sub",
-          "idx",
           "sup",
           "lrc"
         ]
@@ -233,13 +247,15 @@
     },
     {
       "id": "builtin.mime.video",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "按 MIME 识别视频",
       "stage": "response",
       "priority": 10,
       "match": {
         "mime": [
-          "video/*"
+          "video/*",
+          "application/x-matroska"
         ]
       },
       "action": {
@@ -249,13 +265,15 @@
     },
     {
       "id": "builtin.mime.audio",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "按 MIME 识别音频",
       "stage": "response",
       "priority": 10,
       "match": {
         "mime": [
-          "audio/*"
+          "audio/*",
+          "application/ogg"
         ]
       },
       "action": {
@@ -267,6 +285,7 @@
       "id": "builtin.mime.stream",
       "version": 2,
       "tier": "builtin",
+      "title": "按 MIME 识别流媒体清单 / 分片",
       "stage": "response",
       "priority": 11,
       "match": {
@@ -290,6 +309,7 @@
       "id": "builtin.mime.image",
       "version": 1,
       "tier": "builtin",
+      "title": "按 MIME 识别图片（需开启图片嗅探）",
       "stage": "response",
       "priority": 10,
       "requires": "sniffImages",
@@ -305,8 +325,9 @@
     },
     {
       "id": "builtin.mime.classify.document",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "按 MIME 归类文档（仅分类）",
       "stage": "response",
       "priority": 10,
       "classifyOnly": true,
@@ -314,15 +335,12 @@
         "mime": [
           "application/pdf",
           "application/msword",
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-          "application/vnd.ms-excel",
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          "application/vnd.ms-powerpoint",
-          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
           "application/epub+zip",
           "text/csv",
           "application/vnd.openxmlformats-officedocument.*",
-          "application/vnd.ms-*"
+          "application/vnd.ms-word*",
+          "application/vnd.ms-excel*",
+          "application/vnd.ms-powerpoint*"
         ]
       },
       "action": {
@@ -332,8 +350,9 @@
     },
     {
       "id": "builtin.mime.classify.archive",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "按 MIME 归类压缩包（仅分类）",
       "stage": "response",
       "priority": 10,
       "classifyOnly": true,
@@ -347,7 +366,9 @@
           "application/x-bzip2",
           "application/x-xz",
           "application/x-iso9660-image",
-          "application/zstd"
+          "application/zstd",
+          "application/x-zip-compressed",
+          "application/vnd.rar"
         ]
       },
       "action": {
@@ -359,6 +380,7 @@
       "id": "builtin.mime.classify.executable",
       "version": 1,
       "tier": "builtin",
+      "title": "按 MIME 归类安装包（仅分类）",
       "stage": "response",
       "priority": 10,
       "classifyOnly": true,
@@ -380,6 +402,7 @@
       "id": "builtin.mime.classify.torrent",
       "version": 1,
       "tier": "builtin",
+      "title": "按 MIME 归类种子（仅分类）",
       "stage": "response",
       "priority": 10,
       "classifyOnly": true,
@@ -397,6 +420,7 @@
       "id": "builtin.mime.classify.subtitle",
       "version": 1,
       "tier": "builtin",
+      "title": "按 MIME 归类字幕（仅分类）",
       "stage": "response",
       "priority": 10,
       "classifyOnly": true,
@@ -416,117 +440,17 @@
     },
     {
       "id": "builtin.noise.substr",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "忽略统计 / 广告域名请求",
       "stage": "response",
       "priority": 30,
       "exclude": [
         {
           "attachment": true
-        }
-      ],
-      "match": {
-        "url": [
-          "*google-analytics.com*",
-          "*googletagmanager.com*",
-          "*analytics.google.com*",
-          "*doubleclick.net*",
-          "*googlesyndication.com*",
-          "*googleadservices.com*",
-          "*google.com/pagead*",
-          "*facebook.com/tr*",
-          "*connect.facebook.net*",
-          "*fbcdn.net/signals*",
-          "*hotjar.com*",
-          "*clarity.ms*",
-          "*mixpanel.com*",
-          "*segment.io*",
-          "*segment.com*",
-          "*amplitude.com*",
-          "*sentry.io*",
-          "*bugsnag.com*",
-          "*newrelic.com*",
-          "*nr-data.net*",
-          "*adsense*",
-          "*adservice*",
-          "*ad.doubleclick*",
-          "*moat.com*",
-          "*adsrvr.org*",
-          "*advertising.com*",
-          "*criteo.com*",
-          "*outbrain.com*",
-          "*taboola.com*",
-          "*adnxs.com*",
-          "*cdn.mxpnl.com*",
-          "*stats.wp.com*",
-          "*pixel.wp.com*",
-          "*bat.bing.com*",
-          "*sb.scorecardresearch.com*",
-          "*b.scorecardresearch.com*"
-        ]
-      },
-      "action": {
-        "kind": "ignore"
-      }
-    },
-    {
-      "id": "builtin.noise.hosts",
-      "version": 1,
-      "tier": "builtin",
-      "stage": "response",
-      "priority": 30,
-      "match": {
-        "host": [
-          "=www.google-analytics.com",
-          "=ssl.google-analytics.com",
-          "=stats.g.doubleclick.net",
-          "=cm.g.doubleclick.net",
-          "=pixel.facebook.com",
-          "=www.facebook.com",
-          "=tr.snapchat.com",
-          "=analytics.tiktok.com",
-          "=analytics.twitter.com"
-        ]
-      },
-      "action": {
-        "kind": "ignore"
-      }
-    },
-    {
-      "id": "builtin.noise.paths",
-      "version": 1,
-      "tier": "builtin",
-      "stage": "response",
-      "priority": 30,
-      "exclude": [
+        },
         {
           "ext": [
-            "mp4",
-            "mkv",
-            "avi",
-            "mov",
-            "wmv",
-            "flv",
-            "webm",
-            "ts",
-            "m4v",
-            "3gp",
-            "mpg",
-            "mpeg",
-            "f4v",
-            "vob",
-            "ogv",
-            "mp3",
-            "flac",
-            "wav",
-            "aac",
-            "ogg",
-            "wma",
-            "m4a",
-            "opus",
-            "ape",
-            "alac",
-            "aiff",
             "pdf",
             "doc",
             "docx",
@@ -550,11 +474,16 @@
             "bz2",
             "xz",
             "iso",
-            "img",
             "zst",
-            "lz",
             "cab",
+            "tgz",
+            "tbz2",
+            "txz",
+            "lzma",
+            "jar",
+            "img",
             "z",
+            "lz",
             "exe",
             "msi",
             "dmg",
@@ -563,8 +492,230 @@
             "appimage",
             "apk",
             "ipa",
-            "snap",
             "flatpak",
+            "snap",
+            "torrent"
+          ]
+        },
+        {
+          "mime": [
+            "application/pdf",
+            "application/zip",
+            "application/x-bittorrent"
+          ]
+        }
+      ],
+      "match": {
+        "host": [
+          "google-analytics.com",
+          "googletagmanager.com",
+          "analytics.google.com",
+          "doubleclick.net",
+          "googlesyndication.com",
+          "googleadservices.com",
+          "adservice.google.com",
+          "connect.facebook.net",
+          "hotjar.com",
+          "clarity.ms",
+          "mixpanel.com",
+          "segment.io",
+          "segment.com",
+          "amplitude.com",
+          "sentry.io",
+          "bugsnag.com",
+          "newrelic.com",
+          "nr-data.net",
+          "moat.com",
+          "adsrvr.org",
+          "advertising.com",
+          "criteo.com",
+          "outbrain.com",
+          "taboola.com",
+          "adnxs.com",
+          "cdn.mxpnl.com",
+          "stats.wp.com",
+          "pixel.wp.com",
+          "bat.bing.com",
+          "sb.scorecardresearch.com",
+          "b.scorecardresearch.com"
+        ]
+      },
+      "action": {
+        "kind": "ignore"
+      }
+    },
+    {
+      "id": "builtin.noise.hosts",
+      "version": 2,
+      "tier": "builtin",
+      "title": "忽略追踪像素专用主机",
+      "stage": "response",
+      "priority": 30,
+      "match": {
+        "host": [
+          "=pixel.facebook.com",
+          "=www.facebook.com",
+          "=tr.snapchat.com",
+          "=analytics.tiktok.com",
+          "=analytics.twitter.com"
+        ]
+      },
+      "action": {
+        "kind": "ignore"
+      }
+    },
+    {
+      "id": "builtin.noise.google-pagead",
+      "version": 1,
+      "tier": "builtin",
+      "title": "忽略 Google 广告路径",
+      "stage": "response",
+      "priority": 30,
+      "exclude": [
+        {
+          "attachment": true
+        }
+      ],
+      "match": {
+        "host": [
+          "google.com"
+        ],
+        "pathRegex": "^/pagead(?:/|$)"
+      },
+      "action": {
+        "kind": "ignore"
+      }
+    },
+    {
+      "id": "builtin.noise.facebook-tr",
+      "version": 1,
+      "tier": "builtin",
+      "title": "忽略 Facebook 追踪像素路径",
+      "stage": "response",
+      "priority": 30,
+      "exclude": [
+        {
+          "attachment": true
+        }
+      ],
+      "match": {
+        "host": [
+          "facebook.com"
+        ],
+        "pathRegex": "^/tr(?:/|$)"
+      },
+      "action": {
+        "kind": "ignore"
+      }
+    },
+    {
+      "id": "builtin.noise.fbcdn-signals",
+      "version": 1,
+      "tier": "builtin",
+      "title": "忽略 Facebook 信号上报路径",
+      "stage": "response",
+      "priority": 30,
+      "exclude": [
+        {
+          "attachment": true
+        }
+      ],
+      "match": {
+        "host": [
+          "fbcdn.net"
+        ],
+        "pathRegex": "^/signals(?:/|$)"
+      },
+      "action": {
+        "kind": "ignore"
+      }
+    },
+    {
+      "id": "builtin.noise.paths",
+      "version": 2,
+      "tier": "builtin",
+      "title": "忽略站点接口 / 静态资源 / 埋点路径",
+      "stage": "response",
+      "priority": 30,
+      "exclude": [
+        {
+          "ext": [
+            "mp4",
+            "mkv",
+            "avi",
+            "mov",
+            "wmv",
+            "flv",
+            "webm",
+            "m4v",
+            "3gp",
+            "mpg",
+            "mpeg",
+            "f4v",
+            "vob",
+            "ogv",
+            "rmvb",
+            "rm",
+            "asf",
+            "m2ts",
+            "mts",
+            "divx",
+            "ts",
+            "mp3",
+            "flac",
+            "wav",
+            "aac",
+            "ogg",
+            "wma",
+            "m4a",
+            "opus",
+            "alac",
+            "aiff",
+            "mka",
+            "weba",
+            "m4b",
+            "ape",
+            "pdf",
+            "doc",
+            "docx",
+            "xls",
+            "xlsx",
+            "ppt",
+            "pptx",
+            "rtf",
+            "epub",
+            "mobi",
+            "odt",
+            "ods",
+            "odp",
+            "zip",
+            "rar",
+            "7z",
+            "tar",
+            "gz",
+            "bz2",
+            "xz",
+            "iso",
+            "zst",
+            "cab",
+            "tgz",
+            "tbz2",
+            "txz",
+            "lzma",
+            "jar",
+            "img",
+            "z",
+            "lz",
+            "exe",
+            "msi",
+            "dmg",
+            "deb",
+            "rpm",
+            "appimage",
+            "apk",
+            "ipa",
+            "flatpak",
+            "snap",
             "torrent",
             "m3u8",
             "m3u",
@@ -574,10 +725,29 @@
             "srt",
             "ass",
             "ssa",
-            "sub",
-            "idx",
             "sup",
-            "lrc"
+            "lrc",
+            "sub",
+            "idx"
+          ]
+        },
+        {
+          "mime": [
+            "video/*",
+            "audio/*",
+            "application/x-matroska",
+            "application/ogg",
+            "application/vnd.apple.mpegurl",
+            "application/x-mpegurl",
+            "application/mpegurl",
+            "application/octet-stream-m3u8",
+            "audio/mpegurl",
+            "audio/x-mpegurl",
+            "application/dash+xml",
+            "application/m4s",
+            "application/pdf",
+            "application/zip",
+            "application/x-bittorrent"
           ]
         },
         {
@@ -592,59 +762,22 @@
       }
     },
     {
-      "id": "builtin.noise.api",
-      "version": 1,
-      "tier": "builtin",
-      "stage": "response",
-      "priority": 30,
-      "exclude": [
-        {
-          "attachment": true
-        }
-      ],
-      "match": {
-        "pathRegex": "/graphql(?:/|$)",
-        "hasExt": false
-      },
-      "action": {
-        "kind": "ignore"
-      }
-    },
-    {
       "id": "builtin.normalize.strip",
-      "version": 1,
+      "version": 2,
       "tier": "builtin",
+      "title": "去重时忽略缓存破坏与广告追踪参数",
       "stage": "normalize",
       "match": {},
       "action": {
         "kind": "strip-params",
         "params": [
           "_",
-          "__",
-          "t",
-          "ts",
-          "timestamp",
-          "v",
-          "ver",
-          "version",
-          "cache",
           "cb",
           "nocache",
+          "cache",
           "rand",
           "random",
-          "r",
           "bust",
-          "token",
-          "auth",
-          "signature",
-          "sig",
-          "sign",
-          "expire",
-          "expires",
-          "e",
-          "st",
-          "nva",
-          "nvb",
           "utm_source",
           "utm_medium",
           "utm_campaign",
@@ -653,18 +786,7 @@
           "fbclid",
           "gclid",
           "msclkid",
-          "twclid",
-          "ref",
-          "referer",
-          "referrer",
-          "source",
-          "start",
-          "end",
-          "begin",
-          "offset",
-          "sq",
-          "rn",
-          "rbuf"
+          "twclid"
         ]
       }
     },
@@ -672,6 +794,7 @@
       "id": "builtin.normalize.query-ext",
       "version": 1,
       "tier": "builtin",
+      "title": "从 format / ext / fm 查询参数推断扩展名",
       "stage": "normalize",
       "match": {},
       "action": {
@@ -682,6 +805,184 @@
           "fm"
         ]
       }
+    },
+    {
+      "id": "builtin.ext.video-ambiguous",
+      "version": 1,
+      "tier": "builtin",
+      "title": "按扩展名识别视频（歧义扩展名：ts；脚本 / 文本类 MIME 不算）",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "ts"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "video"
+      },
+      "exclude": [
+        {
+          "mime": [
+            "text/*",
+            "application/javascript",
+            "application/x-javascript",
+            "application/json",
+            "application/typescript",
+            "application/x-typescript"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "builtin.ext.audio-ambiguous",
+      "version": 1,
+      "tier": "builtin",
+      "title": "按扩展名识别音频（歧义扩展名：ape；脚本 / 文本类 MIME 不算）",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "ape"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "audio"
+      },
+      "exclude": [
+        {
+          "mime": [
+            "text/*",
+            "application/javascript",
+            "application/x-javascript",
+            "application/json",
+            "application/typescript",
+            "application/x-typescript"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "builtin.ext.archive-ambiguous",
+      "version": 1,
+      "tier": "builtin",
+      "title": "按扩展名识别压缩包 / 镜像（歧义扩展名：img / z / lz；脚本 / 文本类 MIME 不算）",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "img",
+          "z",
+          "lz"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "archive"
+      },
+      "exclude": [
+        {
+          "mime": [
+            "text/*",
+            "application/javascript",
+            "application/x-javascript",
+            "application/json",
+            "application/typescript",
+            "application/x-typescript"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "builtin.ext.image-ambiguous",
+      "version": 1,
+      "tier": "builtin",
+      "title": "按扩展名识别图片（需开启图片嗅探）（歧义扩展名：raw；脚本 / 文本类 MIME 不算）",
+      "stage": "response",
+      "priority": 20,
+      "requires": "sniffImages",
+      "match": {
+        "ext": [
+          "raw"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "image"
+      },
+      "exclude": [
+        {
+          "mime": [
+            "text/*",
+            "application/javascript",
+            "application/x-javascript",
+            "application/json",
+            "application/typescript",
+            "application/x-typescript"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "builtin.ext.executable-ambiguous",
+      "version": 1,
+      "tier": "builtin",
+      "title": "按扩展名识别安装包 / 可执行文件（歧义扩展名：snap；脚本 / 文本类 MIME 不算）",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "snap"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "executable"
+      },
+      "exclude": [
+        {
+          "mime": [
+            "text/*",
+            "application/javascript",
+            "application/x-javascript",
+            "application/json",
+            "application/typescript",
+            "application/x-typescript"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "builtin.ext.subtitle-ambiguous",
+      "version": 1,
+      "tier": "builtin",
+      "title": "按扩展名识别字幕（歧义扩展名：sub / idx；脚本 / 文本类 MIME 不算）",
+      "stage": "response",
+      "priority": 20,
+      "match": {
+        "ext": [
+          "sub",
+          "idx"
+        ]
+      },
+      "action": {
+        "kind": "resource",
+        "type": "subtitle"
+      },
+      "exclude": [
+        {
+          "mime": [
+            "text/html",
+            "text/javascript",
+            "text/css",
+            "application/javascript",
+            "application/x-javascript",
+            "application/json"
+          ]
+        }
+      ]
     }
   ]
 }

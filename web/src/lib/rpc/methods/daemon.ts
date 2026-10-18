@@ -87,6 +87,8 @@ import type {
   SystemProxyDto,
   TaskActivityPage,
   TaskActivityQuery,
+  TaskSpeedHistoryDto,
+  TaskSpeedHistoryQuery,
   TaskDeleteManyParams,
   TaskDeleteParams,
   TaskChangeUrlParams,
@@ -113,6 +115,8 @@ const task = {
   get: (params: TaskIdParams) => call<TaskDto>(METHOD.DAEMON_TASK_GET, params),
   activity: (params: TaskActivityQuery) =>
     call<TaskActivityPage>(METHOD.DAEMON_TASK_ACTIVITY, params),
+  speedHistory: (params: TaskSpeedHistoryQuery) =>
+    call<TaskSpeedHistoryDto | null>(METHOD.DAEMON_TASK_SPEED_HISTORY, params),
   create: (params: DaemonCreateTaskParams) => call<CreatedTask>(METHOD.DAEMON_TASK_CREATE, params),
   /** 批量建任务：一块（≤512 条）共享同一份选项，整块一个事务，按 `batchId` 幂等。 */
   createMany: (params: DaemonCreateTasksParams) =>

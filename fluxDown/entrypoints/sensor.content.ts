@@ -11,7 +11,7 @@
 import { browser } from "wxt/browser";
 import { defineContentScript } from "wxt/utils/define-content-script";
 import { injectScript } from "wxt/utils/inject-script";
-import type { ContentMessage } from "@/background/protocol";
+import type { ContentMessage, HooksInfo, ProbeReply } from "@/background/protocol";
 import {
   EV_CONFIG,
   EV_MEDIA,
@@ -34,7 +34,7 @@ import {
   type ScanContext,
 } from "@/page/dom-scan";
 import { MediaTracker } from "@/page/media-tracker";
-import { compileBundled } from "@/rules/engine";
+import { compileBundled, createClassifier } from "@/rules/engine";
 import { createFloatButton, type FloatButtonController } from "@/ui/features/FloatButton";
 import { normalizeDashManifest, parseDashManifestText } from "@/utils/dash-manifest";
 import { isHttpUrl } from "@/utils/media-sniff";
@@ -48,6 +48,8 @@ const MAX_RESOURCES_PER_PAGE = 200;
 const REPORT_BATCH_MS = 200;
 const MUTATION_FLUSH_DELAY_MS = 200;
 const DOM_RULE_THROTTLE_MS = 1000;
+/** 等钩子握手应答的时间；超时视为协议 0 的旧钩子（不应答但事件照常）。 */
+const HOOKS_HELLO_TIMEOUT_MS = 1000;
 
 const MUTATION_OBSERVER_OPTIONS: MutationObserverInit = {
   childList: true,
@@ -92,14 +94,22 @@ export default defineContentScript({
 
   async main(ctx) {
     const top = isTopFrame();
-    const rules = compileBundled();
+    // 同一扩展实例的内容脚本共享本帧的 ISOLATED 全局。补注入（background/probe.ts）是 allFrames 的，
+    // 会命中已有存活 sensor 的子帧（扩展更新后新建的 iframe 已由声明式注入）；WXT 只在顶层帧淘汰旧实例，
+    // 子帧里由这里保证只有一个存活的 sensor。旧扩展实例留下的探针在其上下文失效后返回 false。
+    const shared = globalThis as { __fluxdownSensorAlive?: () => boolean };
+    if (!top && shared.__fluxdownSensorAlive?.() === true) return;
+    shared.__fluxdownSensorAlive = () => !ctx.isInvalid;
+    // 收到 PageConfig 前用随包规则；之后换成用户实际生效的 classifier。
+    let classify = compileBundled().classify;
 
     let config: PageConfig | null = null;
     const sniffImages = (): boolean => config?.sniffImages === true;
-    let navEpoch = 0;
+    /** 本 sensor 判定的 SPA 换页次数；MAIN 据此（同一 sid 下增大）换代。 */
+    let navCount = 0;
 
     const scanCtx: ScanContext = {
-      classify: (url) => rules.classify(url),
+      classify: (url) => classify(url),
       get sniffImages() {
         return sniffImages();
       },
@@ -110,8 +120,29 @@ export default defineContentScript({
 
     // ===== 媒体元素跟踪 =====
     const tracker = new MediaTracker({
-      send: (payload) => swallow(sendAction({ action: "mediaElementState", ...payload })),
+      send: (payload) => {
+        sendAction({ action: "mediaElementState", sid: tracker.sid, ...payload })
+          .then((res) => {
+            // background 不认识本 sid（SW 重启丢了登记表）：补一次全量
+            if (res?.resync) tracker.resendAll();
+          })
+          .catch(() => {
+            // 扩展可能已失效
+          });
+      },
     });
+
+    // ===== 钩子握手 =====
+    let hooks: HooksInfo | null = null;
+    let hooksReported = false;
+    let hooksTimer: number | undefined;
+
+    function reportHooks(): void {
+      window.clearTimeout(hooksTimer);
+      hooksTimer = undefined;
+      hooksReported = true;
+      swallow(sendAction({ action: "sensorStatus", sid: tracker.sid, hooks }));
+    }
 
     // ===== 资源上报（合批 + 单页上限） =====
     const reportedUrls = new Set<string>();
@@ -348,10 +379,23 @@ export default defineContentScript({
 
     function applyConfig(next: PageConfig): void {
       config = next;
+      if (Array.isArray(next.classify)) {
+        try {
+          classify = createClassifier(next.classify);
+        } catch {
+          /* 形状不对：沿用当前 classifier */
+        }
+      }
       try {
-        document.dispatchEvent(new CustomEvent(EV_CONFIG, { detail: encodeDetail({ ...next, epoch: navEpoch }) }));
+        document.dispatchEvent(
+          new CustomEvent(EV_CONFIG, { detail: encodeDetail({ ...next, sid: tracker.sid, nav: navCount }) }),
+        );
       } catch {
         /* 派发失败无妨 */
+      }
+      // 首次下发即握手：协议 ≥ 1 的钩子同步应答（见 onReport 的 "hooks"），否则超时按旧钩子上报
+      if (!hooksReported && hooksTimer === undefined) {
+        hooksTimer = window.setTimeout(reportHooks, HOOKS_HELLO_TIMEOUT_MS);
       }
       const trackingNeeded = next.sniff || next.floatButton || next.pageDot;
       if (trackingNeeded) tracker.start();
@@ -364,7 +408,9 @@ export default defineContentScript({
 
     async function loadConfig(retry = true): Promise<void> {
       try {
-        const next = (await sendAction({ action: "getPageConfig", pageUrl: matchPageUrl(top) })) as PageConfig | undefined;
+        const next = (await sendAction({ action: "getPageConfig", pageUrl: matchPageUrl(top), sid: tracker.sid })) as
+          | PageConfig
+          | undefined;
         // background 出错时返回 { error }：形状不对不应用，避免后续 config.dom 访问抛错
         if (!next || typeof next.sniff !== "boolean" || !Array.isArray(next.dom) || !Array.isArray(next.bodyWatch)) {
           if (retry) window.setTimeout(() => void loadConfig(false), 1000);
@@ -387,7 +433,7 @@ export default defineContentScript({
           reportResources([
             {
               url: detail.url,
-              type: rules.classify(detail.url, detail.mime),
+              type: classify(detail.url, detail.mime),
               mimeType: detail.mime,
               size: detail.size,
               detectedBy: detail.via === "xhr" ? "xhr-intercept" : detail.via === "json" ? "api-scan" : "fetch-intercept",
@@ -430,6 +476,11 @@ export default defineContentScript({
             swallow(sendAction({ action: "serviceWorkerScope", scope: detail.scope }));
           }
           return;
+        case "hooks":
+          if (typeof detail.protocol !== "number" || typeof detail.hid !== "string") return;
+          hooks = { protocol: detail.protocol, hid: detail.hid, late: detail.late === true };
+          reportHooks();
+          return;
         case "hls": {
           const playlist = normalizeHlsPlaylist(detail.playlist);
           if (!isHttpUrl(detail.url) || !playlist) return;
@@ -445,7 +496,7 @@ export default defineContentScript({
           // 否则本页刚嗅探到的资源 / 内嵌清单会随 background 清空而丢失且不再补报。
           if (isPageChange(kind, typeof detail.from === "string" ? detail.from : "", location.href)) {
             // 旧页面的待发队列属于上一个 URL：丢弃，避免 background 因旧 pageUrl 把 tab 状态改回去
-            navEpoch++;
+            navCount++;
             domSniff.resetForNavigation();
             tracker.resetForNavigation();
           }
@@ -497,6 +548,14 @@ export default defineContentScript({
         case "collectLinks":
           sendResponse({ links: collectLinks() });
           return true;
+        case "probe": {
+          // background 不认识本帧的 sensor（SW 重启丢了登记 / 补注入前的探测）：应答身份并全量重发
+          const reply: ProbeReply = { sid: tracker.sid, hooks };
+          sendResponse(reply);
+          if (!config) void loadConfig();
+          tracker.resendAll();
+          return true;
+        }
         default:
           return undefined;
       }
@@ -526,16 +585,27 @@ export default defineContentScript({
     }
     document.addEventListener("click", onClick, true);
 
+    // bfcache 恢复：内容脚本与页面状态原样回来，但 background 可能已按导航清空了本页投影
+    function onPageShow(event: PageTransitionEvent): void {
+      if (!event.persisted) return;
+      void loadConfig();
+      tracker.resendAll();
+    }
+    window.addEventListener("pageshow", onPageShow);
+
     ctx.onInvalidated(() => {
       document.removeEventListener(EV_REPORT, onReport);
       document.removeEventListener(EV_MEDIA, onMedia, true);
+      document.removeEventListener(EV_SHADOW, onShadow, true);
       document.removeEventListener("contextmenu", onContextMenu, true);
       document.removeEventListener("click", onClick, true);
+      window.removeEventListener("pageshow", onPageShow);
       browser.runtime.onMessage.removeListener(onMessage);
       domSniff.stop();
       tracker.stop();
       float?.destroy();
       window.clearTimeout(flushTimer);
+      window.clearTimeout(hooksTimer);
     });
 
     // ===== 启动序列 =====
@@ -548,7 +618,7 @@ export default defineContentScript({
       }
     }
 
-
+    // 2. 浮钮
     float = createFloatButton({ ctx, tracker, pageUrl: () => matchPageUrl(top) });
 
     // 3. 拉取配置（之后 DOM 扫描 / 跟踪 / 浮钮才真正启用）

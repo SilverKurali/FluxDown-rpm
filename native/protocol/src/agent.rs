@@ -548,9 +548,13 @@ pub struct GatewayStatusDto {
     /// server 模式或环境固定监听地址时为 false。
     #[serde(default = "default_true")]
     pub port_editable: bool,
-    /// 是否对局域网开放兼容 API；修改后下次 agent 启动生效。
+    /// 是否对局域网开放兼容 API（持久化配置）；修改后下次 agent 启动生效。
     #[serde(default)]
     pub lan_enabled: bool,
+    /// 本次运行的网关是否实际监听非回环地址（局域网 / 组网可达）。`lan_enabled` 已开但
+    /// 尚未重启时为 `false`，界面据此提示「重启后生效」；server 模式恒为 `true`。
+    #[serde(default)]
+    pub lan_active: bool,
 }
 
 impl Default for GatewayStatusDto {
@@ -565,6 +569,7 @@ impl Default for GatewayStatusDto {
             port: default_gateway_port(),
             port_editable: true,
             lan_enabled: false,
+            lan_active: false,
         }
     }
 }
@@ -750,12 +755,23 @@ pub struct LinkApproveParams {
     pub accept: bool,
 }
 
-/// `agent.link.remove` / `agent.link.rename` 的设备定位参数。
+/// `agent.link.remove` 的设备定位参数。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LinkDeviceParams {
     pub fingerprint: String,
+}
+
+/// `agent.link.rename` 参数：给已配对设备设置仅本机可见的备注名。`name` 省略、为空或全空白
+/// = 清除备注名，恢复显示对端自报名；非空时去首尾空白后须为 1–64 个字符且不含控制字符。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkRenameParams {
+    pub fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// `agent.link.dispatch` 参数：把下载直接下发到已配对的局域网设备。
@@ -1141,6 +1157,8 @@ pub enum UpdateInstallKind {
     Synology,
     Qnap,
     Openwrt,
+    /// 飞牛 fnOS 应用中心（.fpk）。
+    Fnos,
     /// Android APK（官网分发）：由 App 经系统安装器（PackageInstaller）安装。
     AndroidApk,
     #[default]

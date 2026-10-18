@@ -114,6 +114,8 @@ pub async fn start_embedded(
         Err(error) => return Err(error.into()),
     };
     let mut state = store.load().await?;
+    // 嵌入式宿主没有对外监听端口：不论持久化状态如何都不是局域网可达。
+    state.gateway.lan_active = false;
     let new_device = state.device_id.is_empty();
     if new_device {
         state.device_id = uuid::Uuid::new_v4().to_string();
@@ -228,6 +230,7 @@ pub async fn start_embedded(
             // 没有监听端口：互联只做出站（`reachable = false`）。
             bound: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             server_mode: false,
+            network: crate::link::LinkNetworkOptions::from_env(),
         })
     });
     if let Some(link) = &link {

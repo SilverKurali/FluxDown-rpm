@@ -6,6 +6,7 @@
  * 失败即丢弃。
  */
 
+import type { ClassifyRule } from "@/rules/engine";
 import type { HlsPlaylistInfo } from "@/utils/hls-playlist";
 
 /** MAIN → ISOLATED，在 document 上派发。 */
@@ -30,7 +31,15 @@ export type ReportDetail =
   /** `URL.createObjectURL(blob)` 的 blob 来自某个响应（来源标记唯一）：blob URL ↔ 原始地址。 */
   | { t: "blob"; blobUrl: string; url: string }
   /** 本源已注册的 Service Worker 作用域（识别 SW 合成的下载，见 utils/download-source.ts）。 */
-  | { t: "swScope"; scope: string };
+  | { t: "swScope"; scope: string }
+  /** 钩子对 sensor 握手（EV_CONFIG 带新 sid）的应答；协议 0 的旧钩子不应答。 */
+  | { t: "hooks"; protocol: number; hid: string; late: boolean };
+
+/**
+ * MAIN 钩子协议版本。只在事件契约发生不兼容变化时递增；新增字段不递增。
+ * 0 = 只有布尔安装标记、不应答握手的旧钩子（事件结构与 1 相同）。
+ */
+export const HOOKS_PROTOCOL = 1;
 
 export interface SourceBufferBinding {
   sbId: number;
@@ -44,6 +53,8 @@ export interface SourceBufferBinding {
 
 export interface MediaDetail {
   msId: number;
+  /** 钩子实例 id（协议 ≥ 1）；与 msId 一起唯一标识一次 MediaSource 播放会话。 */
+  hid?: string;
   sourceBuffers: SourceBufferBinding[];
   /** MediaSource 尚未关联任何元素时为 true（在 document 上派发）。 */
   elementless?: boolean;
@@ -67,12 +78,26 @@ export interface PageConfig {
   interceptMagnet: boolean;
   /** settings.sniffImages：DOM 扫描是否把图片链接算作可下载。 */
   sniffImages: boolean;
-  /** SPA 导航代数：sensor 每次导航递增，MAIN 侧据此重置去重状态。 */
-  epoch?: number;
+  /**
+   * 用户实际生效的 classify 规则（含覆盖 / 吊销 / 本地与插件规则，求值顺序）。页面 / 内容脚本据此
+   * 用 `createClassifier` 判定类型；未收到配置前退回随包规则。
+   */
+  classify: ClassifyRule[];
+}
+
+/**
+ * sensor 下发给 MAIN 的配置：PageConfig + 会话身份。
+ * 导航代数由 MAIN 持有：同一 sid 的 `nav` 增大才换代；新 sid（sensor 重注入）只握手、不换代，
+ * 否则重注入会把仍有效的 SourceBuffer 证据当作上一页的清掉。
+ */
+export interface HookConfig extends PageConfig {
+  sid: string;
+  /** sensor 本地的 SPA 换页计数。 */
+  nav: number;
 }
 
 /** 编码 detail；接收方用 {@link decodeDetail}。 */
-export function encodeDetail(value: ReportDetail | MediaDetail | PageConfig): string {
+export function encodeDetail(value: ReportDetail | MediaDetail | HookConfig): string {
   return JSON.stringify(value);
 }
 

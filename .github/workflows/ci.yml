@@ -65,6 +65,7 @@ jobs:
               - '.github/workflows/ci.yml'
             extension:
               - 'fluxDown/**'
+              - 'scripts/sniff-rules/**'
               - '.github/workflows/ci.yml'
             android:
               - 'mobile/Android/**'
@@ -234,6 +235,18 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm run build:firefox
+      # 规则仓与扩展不漂移：vendor 的校验器 / 求值器打包物、内置官方规则种子都必须与规则仓 main 一致。
+      - uses: actions/checkout@v4
+        with:
+          repository: zerx-lab/fluxdown-sniff-rules
+          ref: main
+          path: sniff-rules-repo
+          persist-credentials: false
+      - name: Sniff rules repo drift check
+        working-directory: .
+        run: |
+          bun scripts/sniff-rules/sync-repo.ts vendor --check --repo sniff-rules-repo
+          bun scripts/sniff-rules/sync-repo.ts seed --check --repo sniff-rules-repo
 
   # 原生 Android：Kotlin 单测（含经 UniFFI 生成绑定的本机主机端到端冒烟）+ 组装 APK + lint。
   # :bridge 经 cargo-ndk 交叉编译 fluxdown_mobile；门禁只编 arm64-v8a 以控制时长。

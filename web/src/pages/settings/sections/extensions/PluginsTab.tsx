@@ -6,6 +6,7 @@ import { useT } from '../../../../i18n'
 import { METHOD, call, rpc, uploadBlob, useDaemon } from '../../../../lib/rpc'
 import type { DaemonSnapshot, InstalledPlugin, PluginDto } from '../../../../lib/rpc'
 import { Badge, Button, Card, ConfirmFooter, Dialog, EmptyState, FormField, Input, InputWithAction, Switch, confirmDialog, toast } from '../../../../ui'
+import { hasPluginSettings } from '../../../plugins/contributions'
 import { BlockTitle, ExtLink, IconButton, ListCard, ListRow } from './common'
 import { detailFromPlugin } from './detail'
 import type { PluginDetail } from './detail'
@@ -348,7 +349,7 @@ function PluginRow({
               {t('pluginConsentButton')}
             </Button>
           ) : null}
-          {!loadFailed && plugin.settings.length > 0 ? (
+          {!loadFailed && hasPluginSettings(plugin) ? (
             <IconButton icon={Settings} label={t('pluginSettingsTooltip')} onClick={onSettings} disabled={disabled} />
           ) : null}
           {!loadFailed && plugin.authSupported ? (

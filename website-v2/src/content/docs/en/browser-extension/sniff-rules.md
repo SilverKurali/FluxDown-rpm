@@ -9,6 +9,8 @@ Sniffing rules are small JSON documents that tell the extension **which network 
 
 Open the extension's options page → **Sniffing Rules**. There you'll find the rule list (with filters and a status for every rule), **Rule Sync**, your **Local Rules**, and the **Rule Tester**, which simulates a response and shows what the active rules would decide.
 
+The list can be filtered by tier and searched by title, ID, host, extension, MIME or URL; it can be sorted by evaluation order or hit count, and shows each rule's priority, evaluation position and hit count for this session. Every tier's rules can be opened with "View rule" (except built-in rules in release builds) or copied to a local rule and modified; edit, delete and submit for local rules live in the list's action column. The Rule Tester lists every matching rule (marking the winner and the shadowed ones) and explains whether the response would end up captured; inside the local rule editor you can test an unsaved draft and add the result as a test case that is attached when you submit.
+
 ## Rule tiers and who can change them
 
 Every rule belongs to one of five tiers. When several rules could apply, the tier decides who goes first:

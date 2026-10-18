@@ -8,6 +8,8 @@ import { getEngine } from "./rules-store";
 import { getCachedProfiles, getCachedSettings } from "./settings-cache";
 import {
   getElements,
+  getRetiredElements,
+  lateHookFrames,
   getHlsPlaylists,
   getManifests,
   getResources,
@@ -15,6 +17,7 @@ import {
   getTabVersion,
   whenRestored,
 } from "./tab-state";
+import { probeStateOf } from "./probe";
 import { composeTabView, handoffFor } from "./view-model";
 
 function hostOf(url: string): string {
@@ -66,9 +69,12 @@ export async function buildTabView(tabId: number, opts: { withHandoff?: boolean 
     hlsPlaylists: getHlsPlaylists(tabId),
     mirrorGroups: engine.mirrorGroups(),
     elements: getElements(tabId),
+    retiredElements: getRetiredElements(tabId),
     engine,
     showLowConfidence: settings.showLowConfidence,
     handoff: caps ? handoffFor({ remoteMode, caps, pageUrl }) : { kind: "unavailable", reason: "disconnected" },
     site,
+    probe: probeStateOf(tabId),
+    lateFrames: lateHookFrames(tabId),
   });
 }

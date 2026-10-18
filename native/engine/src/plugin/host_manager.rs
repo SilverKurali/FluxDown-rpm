@@ -247,7 +247,7 @@ impl PluginTaskPort for ScopedTaskPort {
         let (action, target) = match method {
             "daemon.task.create" => {
                 let url = params
-                    .get("url")
+                    .pointer("/request/url")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_string();
@@ -1141,5 +1141,41 @@ mod tests {
         assert!(!limiter.try_acquire(start));
         // 窗口滑过之后额度恢复。
         assert!(limiter.try_acquire(start + CREATE_WINDOW));
+    }
+
+    struct EchoPort;
+
+    #[async_trait::async_trait]
+    impl PluginTaskPort for EchoPort {
+        async fn call(
+            &self,
+            _method: &str,
+            _params: serde_json::Value,
+        ) -> Result<serde_json::Value, PluginError> {
+            Ok(serde_json::Value::Null)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tasks_create_audit_target_is_request_url() {
+        let db = crate::db::Db::connect("sqlite::memory:").await.unwrap();
+        let audit = AuditLog::new(db.clone(), &tokio::runtime::Handle::current());
+        let port = ScopedTaskPort {
+            identity: "a@x".to_string(),
+            inner: Arc::new(EchoPort),
+            audit: audit.clone(),
+            limiter: Arc::new(CreateLimiter::new()),
+        };
+        port.call(
+            "daemon.task.create",
+            serde_json::json!({ "request": { "url": "https://example.com/a.bin" } }),
+        )
+        .await
+        .unwrap();
+        audit.flush().await;
+        let rows = db.list_plugin_audit(None, None, 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "tasks.create");
+        assert_eq!(rows[0].target, "https://example.com/a.bin");
     }
 }

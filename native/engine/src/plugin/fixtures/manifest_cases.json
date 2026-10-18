@@ -2092,5 +2092,136 @@
    "w.js"
   ],
   "ok": false
- }
+},
+{
+ "name": "interceptors ok",
+ "manifest": {
+  "identity": "a@b",
+  "name": "N",
+  "version": "1.0.0",
+  "permissions": ["intercept"],
+  "interceptors": {
+   "entry": "intercept.js",
+   "stages": ["prepare", "segments"],
+   "match": { "urls": ["https://example.com/*"] }
+  }
+ },
+ "files": ["intercept.js"],
+ "ok": true,
+ "risk": "elevated"
+},
+{
+ "name": "interceptors refresh stage ok",
+ "manifest": {
+  "identity": "a@b",
+  "name": "N",
+  "version": "1.0.0",
+  "permissions": ["intercept"],
+  "interceptors": {
+   "entry": "intercept.js",
+   "stages": ["prepare", "refresh"],
+   "match": { "urls": ["https://example.com/*"] }
+  }
+ },
+ "files": ["intercept.js"],
+ "ok": true,
+ "risk": "elevated"
+},
+{
+ "name": "interceptors without permission",
+ "manifest": {
+  "identity": "a@b",
+  "name": "N",
+  "version": "1.0.0",
+  "interceptors": {
+   "entry": "intercept.js",
+   "stages": ["prepare"],
+   "match": { "urls": ["https://example.com/*"] }
+  }
+ },
+ "files": ["intercept.js"],
+ "ok": false
+},
+{
+ "name": "interceptors unknown stage",
+ "manifest": {
+  "identity": "a@b",
+  "name": "N",
+  "version": "1.0.0",
+  "permissions": ["intercept"],
+  "interceptors": {
+   "entry": "intercept.js",
+   "stages": ["bogus"],
+   "match": { "urls": ["https://example.com/*"] }
+  }
+ },
+ "files": ["intercept.js"],
+ "ok": false
+},
+{
+ "name": "interceptors duplicate stage",
+ "manifest": {
+  "identity": "a@b",
+  "name": "N",
+  "version": "1.0.0",
+  "permissions": ["intercept"],
+  "interceptors": {
+   "entry": "intercept.js",
+   "stages": ["prepare", "prepare"],
+   "match": { "urls": ["https://example.com/*"] }
+  }
+ },
+ "files": ["intercept.js"],
+ "ok": false
+},
+{
+ "name": "interceptors empty match urls",
+ "manifest": {
+  "identity": "a@b",
+  "name": "N",
+  "version": "1.0.0",
+  "permissions": ["intercept"],
+  "interceptors": {
+   "entry": "intercept.js",
+   "stages": ["prepare"],
+   "match": { "urls": [] }
+  }
+ },
+ "files": ["intercept.js"],
+ "ok": false
+},
+{
+ "name": "interceptors zero timeout",
+ "manifest": {
+  "identity": "a@b",
+  "name": "N",
+  "version": "1.0.0",
+  "permissions": ["intercept"],
+  "interceptors": {
+   "entry": "intercept.js",
+   "stages": ["prepare"],
+   "match": { "urls": ["https://example.com/*"] },
+   "timeoutMs": 0
+  }
+ },
+ "files": ["intercept.js"],
+ "ok": false
+},
+{
+ "name": "interceptors bad onFailure",
+ "manifest": {
+  "identity": "a@b",
+  "name": "N",
+  "version": "1.0.0",
+  "permissions": ["intercept"],
+  "interceptors": {
+   "entry": "intercept.js",
+   "stages": ["prepare"],
+   "match": { "urls": ["https://example.com/*"] },
+   "onFailure": "retry"
+  }
+ },
+ "files": ["intercept.js"],
+ "ok": false
+}
 ]

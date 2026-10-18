@@ -2,7 +2,7 @@
 title: 参与 FluxDown 翻译
 description: 通过 GitHub 为应用和 Web 界面贡献你的语言翻译。
 section: contributing
-order: 2
+order: 4
 sourceHash: "8191cf5258c4"
 ---
 

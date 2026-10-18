@@ -11,6 +11,8 @@ pub const SYSTEM_SHUTDOWN: &str = "system.shutdown";
 pub const DAEMON_TASK_LIST: &str = "daemon.task.list";
 pub const DAEMON_TASK_GET: &str = "daemon.task.get";
 pub const DAEMON_TASK_ACTIVITY: &str = "daemon.task.activity";
+/// 单任务速度历史（`TaskSpeedHistoryQuery` → `Option<TaskSpeedHistoryDto>`）。
+pub const DAEMON_TASK_SPEED_HISTORY: &str = "daemon.task.speedHistory";
 pub const DAEMON_TASK_CREATE: &str = "daemon.task.create";
 pub const DAEMON_TASK_PAUSE: &str = "daemon.task.pause";
 pub const DAEMON_TASK_RESUME: &str = "daemon.task.resume";
@@ -215,8 +217,10 @@ pub const AGENT_LINK_PAIR_BEGIN: &str = "agent.link.pairBegin";
 pub const AGENT_LINK_PAIR_FINISH: &str = "agent.link.pairFinish";
 /// `LinkApproveParams`：响应端确认 / 拒绝入站配对请求。
 pub const AGENT_LINK_APPROVE: &str = "agent.link.approve";
-/// `LinkDeviceParams`：解除配对。
+/// `LinkDeviceParams`：解除配对（尽力通知在线对端同步解除）。
 pub const AGENT_LINK_REMOVE: &str = "agent.link.remove";
+/// `LinkRenameParams` → `LinkDeviceInfo`：设置 / 清除已配对设备的本机备注名。
+pub const AGENT_LINK_RENAME: &str = "agent.link.rename";
 /// 探测全部已配对设备在线状态 → `Vec<LinkDeviceInfo>`（同时推送 `LinkedDevicesChanged`）。
 pub const AGENT_LINK_REFRESH: &str = "agent.link.refresh";
 /// `LinkDispatchParams` → `LinkDispatchResult`：下发下载到已配对设备。
@@ -331,6 +335,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_TASK_LIST,
     DAEMON_TASK_GET,
     DAEMON_TASK_ACTIVITY,
+    DAEMON_TASK_SPEED_HISTORY,
     DAEMON_TASK_CREATE,
     DAEMON_TASK_CREATE_MANY,
     DAEMON_TASK_PAUSE,
@@ -482,6 +487,7 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_LINK_PAIR_FINISH,
     AGENT_LINK_APPROVE,
     AGENT_LINK_REMOVE,
+    AGENT_LINK_RENAME,
     AGENT_LINK_REFRESH,
     AGENT_LINK_DISPATCH,
     AGENT_PLAN_LIST,

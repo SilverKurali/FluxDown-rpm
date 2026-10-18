@@ -263,6 +263,10 @@ body {
   text-align: right !important;
 }
 
+.opt-col-nowrap {
+  white-space: nowrap;
+}
+
 .opt-col-toggle {
   width: 52px;
 }
@@ -499,6 +503,30 @@ body {
   margin-top: 14px;
   padding-top: 12px;
   border-top: 1px solid var(--fd-border);
+}
+
+.opt-match-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.opt-test-embedded {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--fd-border);
+}
+
+.opt-reason-line {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--fd-text-secondary);
+}
+
+.opt-import-preview {
+  max-height: 200px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding-left: 18px;
 }
 
 /* ===== 表单 / Modal 内容 ===== */

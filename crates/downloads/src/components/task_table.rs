@@ -2316,14 +2316,14 @@ impl DownloadTableDelegate {
     }
 
     /// 任务行右键菜单：按 [`task_menu_entries`] 的纯函数结果逐项渲染。
-    fn task_context_menu(&self, menu: PopupMenu) -> PopupMenu {
+    fn task_context_menu(&self, menu: PopupMenu, destructive: Hsla) -> PopupMenu {
         let Some((selected, facts)) = self.selected_menu_facts() else {
             return menu;
         };
         task_menu_entries(&facts, self.in_multi_select(), self.plugin_commands.len())
             .into_iter()
             .fold(menu, |menu, entry| {
-                self.apply_menu_entry(menu, entry, &selected)
+                self.apply_menu_entry(menu, entry, &selected, destructive)
             })
     }
 
@@ -2332,6 +2332,7 @@ impl DownloadTableDelegate {
         menu: PopupMenu,
         entry: MenuEntry,
         selected: &[RowKey],
+        destructive: Hsla,
     ) -> PopupMenu {
         match entry {
             MenuEntry::Resume => menu.menu_with_icon(
@@ -2420,14 +2421,16 @@ impl DownloadTableDelegate {
             ),
             MenuEntry::MoveToQueue => self.append_move_to_queue(menu),
             MenuEntry::Separator => menu.separator(),
-            MenuEntry::Delete => menu.menu_with_icon(
+            MenuEntry::Delete => destructive_menu_item(
+                menu,
+                destructive,
                 self.strings.delete_task.clone(),
-                FluxIcon::Trash2,
                 Box::new(crate::actions::DeleteSelected),
             ),
-            MenuEntry::DeleteWithFiles => menu.menu_with_icon(
+            MenuEntry::DeleteWithFiles => destructive_menu_item(
+                menu,
+                destructive,
                 self.strings.delete_task_and_file.clone(),
-                FluxIcon::Trash2,
                 Box::new(crate::actions::DeleteSelectedWithFiles),
             ),
             MenuEntry::ShowDetail => menu.menu_with_icon(
@@ -2448,7 +2451,23 @@ impl DownloadTableDelegate {
             MenuEntry::Plugin(index) => self.append_plugin_command(menu, index, selected),
         }
     }
+}
 
+/// 破坏性菜单项：图标与文字取主题 `destructive` 色。
+fn destructive_menu_item(
+    menu: PopupMenu,
+    color: Hsla,
+    label: SharedString,
+    action: Box<dyn gpui::Action>,
+) -> PopupMenu {
+    menu.menu_element_with_icon(
+        Icon::from(FluxIcon::Trash2).text_color(color),
+        action,
+        move |_, _| div().text_color(color).child(label.clone()),
+    )
+}
+
+impl DownloadTableDelegate {
     /// 插件贡献的任务命令：只把本机 daemon 认识的任务 id 交给宿主回调（远程任务不下发）。
     fn append_plugin_command(&self, menu: PopupMenu, index: u16, selected: &[RowKey]) -> PopupMenu {
         let (Some(host), Some(command)) = (
@@ -3063,7 +3082,7 @@ impl TableDelegate for DownloadTableDelegate {
                     self.select_task_for_context_menu(key);
                     cx.notify();
                 }
-                self.task_context_menu(menu)
+                self.task_context_menu(menu, active_theme(cx).tokens().colors.destructive)
             }
             None => menu,
         }

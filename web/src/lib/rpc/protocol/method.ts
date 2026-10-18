@@ -11,6 +11,7 @@ export const METHOD = {
   DAEMON_TASK_LIST: 'daemon.task.list',
   DAEMON_TASK_GET: 'daemon.task.get',
   DAEMON_TASK_ACTIVITY: 'daemon.task.activity',
+  DAEMON_TASK_SPEED_HISTORY: 'daemon.task.speedHistory',
   DAEMON_TASK_CREATE: 'daemon.task.create',
   /** 批量建任务（`DaemonCreateTasksParams`）：整块一个事务、一次 `tasksChanged` 事件，按 `batchId` 幂等。 */
   DAEMON_TASK_CREATE_MANY: 'daemon.task.createMany',
@@ -174,6 +175,7 @@ export const METHOD = {
   AGENT_LINK_PAIR_FINISH: 'agent.link.pairFinish',
   AGENT_LINK_APPROVE: 'agent.link.approve',
   AGENT_LINK_REMOVE: 'agent.link.remove',
+  AGENT_LINK_RENAME: 'agent.link.rename',
   AGENT_LINK_REFRESH: 'agent.link.refresh',
   AGENT_LINK_DISPATCH: 'agent.link.dispatch',
   AGENT_CLOUD_ENDPOINT_GET: 'agent.cloud.endpointGet',

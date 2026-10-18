@@ -54,7 +54,8 @@ interface Item extends TrackedMedia {
 }
 
 export interface MediaTrackerOptions {
-  send(payload: { elements: ElementPayload[]; removed: string[] }): void;
+  /** `full`：本 sid 的全量快照（background 据此删除快照外的本 sid 元素）。 */
+  send(payload: { elements: ElementPayload[]; removed: string[]; full: boolean }): void;
 }
 
 function makeFrameUid(): string {
@@ -127,7 +128,10 @@ function ancestorDepths(el: Node): Map<Node, number> {
 }
 
 export class MediaTracker {
-  private readonly frameUid = makeFrameUid();
+  /** sensor 会话 id：元素 key 的前缀，background 据此识别同一帧换了新的 sensor 实例。 */
+  readonly sid = makeFrameUid();
+  /** 下一次 flush 发送全部元素的全量快照（resync / 重注入 / bfcache 恢复）。 */
+  private fullPending = false;
   private seq = 0;
   private readonly keys = new WeakMap<Element, string>();
   private readonly items = new Map<string, Item>();
@@ -294,7 +298,7 @@ export class MediaTracker {
   adopt(el: HTMLMediaElement): TrackedMedia {
     let key = this.keys.get(el);
     if (!key) {
-      key = `${this.frameUid}:${++this.seq}`;
+      key = `${this.sid}:${++this.seq}`;
       this.keys.set(el, key);
     }
     const existing = this.items.get(key);
@@ -418,7 +422,10 @@ export class MediaTracker {
         item = this.itemOf(inside[0]);
       } else {
         const playing = [...this.items.values()].filter((i) => i.playing);
-        if (playing.length === 1) item = playing[0];
+        // 无元素的会话只能归给唯一的播放元素，且不得覆盖它自己已关联的另一个会话
+        const only = playing.length === 1 ? playing[0] : undefined;
+        const own = only?.bindings;
+        if (only && (!own || (own.msId === detail.msId && own.hid === detail.hid))) item = only;
       }
     }
     if (!item) return;
@@ -478,6 +485,8 @@ export class MediaTracker {
       lastPlayedAt: item.lastPlayedAt,
       lastInteractionAt: item.lastInteractionAt,
       bindings: item.bindings?.sourceBuffers ?? [],
+      msId: item.bindings?.msId,
+      hid: item.bindings?.hid,
       encrypted: item.encrypted || el.mediaKeys !== null,
       title: this.titleOf(item),
       tracks: [...el.querySelectorAll("track")].map((t) => ({
@@ -491,13 +500,15 @@ export class MediaTracker {
 
   private flush(): void {
     this.sendTimer = undefined;
+    const full = this.fullPending;
+    this.fullPending = false;
     const elements: ElementPayload[] = [];
-    for (const key of this.dirty) {
+    for (const key of full ? this.items.keys() : this.dirty) {
       const item = this.items.get(key);
       if (!item) continue;
       const payload = this.snapshot(item);
       const json = JSON.stringify(payload);
-      if (json === item.lastSentJson) continue;
+      if (json === item.lastSentJson && !full) continue;
       item.lastSentJson = json;
       item.lastReportedPlayedAt = item.lastPlayedAt;
       elements.push(payload);
@@ -505,8 +516,17 @@ export class MediaTracker {
     this.dirty.clear();
     const removed = [...this.removedKeys];
     this.removedKeys.clear();
-    if (elements.length === 0 && removed.length === 0) return;
-    this.opts.send({ elements, removed });
+    if (!full && elements.length === 0 && removed.length === 0) return;
+    this.opts.send({ elements, removed, full });
+  }
+
+  /**
+   * 下一次发送改为全量快照：background 不认识本 sid（SW 重启丢了登记）、刚被重注入，
+   * 或页面从 bfcache 恢复时调用。没有任何元素也要发（让 background 清掉本 sid 的残留）。
+   */
+  resendAll(): void {
+    this.fullPending = true;
+    this.scheduleSend();
   }
 
   /**

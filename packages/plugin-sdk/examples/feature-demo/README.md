@@ -45,7 +45,7 @@
 ### 设置视图
 - [ ] 插件行设置按钮打开的对话框有「插件设置」「基础设置」两个 tab；「插件设置」里保存问候语、切换模式后，「基础设置」表单显示新值，反之亦然。
 
-### 桌面脚本（仅 GPUI；Web 显示「仅桌面」占位）
+### 桌面脚本（仅 GPUI；Web 不显示这些仅桌面视图的入口）
 - **桌面脚本面板**（活动栏，嵌入式）
   - [ ] 显示 identity、语言、`colors.primary`；切换主题后颜色值与 revision 变化。
   - [ ] `invoke stats` / `invoke echo` 返回 main 的结果；`call daemon.task.list` 返回任务数；非白名单 `system.shutdown` 报错。

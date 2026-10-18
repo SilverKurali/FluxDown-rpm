@@ -95,6 +95,16 @@ export function settingsViewOf(plugin: PluginDto): PluginViewDeclDto | undefined
   return plugin.contributions.views.find((view) => view.portable && view.location === 'settings')
 }
 
+/** 设置对话框里实际可运行的设置视图：与 GPUI 一致，仅插件可用（已启用且授权齐全）时才有。 */
+export function activeSettingsViewOf(plugin: PluginDto): PluginViewDeclDto | undefined {
+  return pluginUsable(plugin) ? settingsViewOf(plugin) : undefined
+}
+
+/** 插件行是否显示设置按钮：有设置字段，或有可运行的设置视图（同 GPUI `plugins.rs`）。 */
+export function hasPluginSettings(plugin: PluginDto): boolean {
+  return plugin.settings.length > 0 || activeSettingsViewOf(plugin) !== undefined
+}
+
 // ── 命令 ──
 
 export interface PluginCommandRef {

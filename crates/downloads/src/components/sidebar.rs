@@ -24,7 +24,7 @@ use crate::{
     controller::DownloadsCommand,
     model::{
         DownloadFilter, DownloadStatusFilter, SidebarSection, SidebarSelection, StatusFolderMotion,
-        devices::{DeviceKind, devices_section_visible},
+        devices::devices_section_visible,
     },
     pages::downloads::DownloadView,
 };
@@ -842,7 +842,7 @@ impl DownloadView {
         let icon_size = theme.extended().icon.lg;
         let online_color = theme.extended().colors.success;
         let offline_color = theme.extended().colors.text_tertiary;
-        let others = self.controller.other_devices();
+        let others = self.controller.sidebar_devices();
         let mut rows: Vec<(String, SharedString, FluxIcon, Option<Hsla>)> = Vec::new();
         if !others.is_empty() {
             rows.push((
@@ -859,10 +859,7 @@ impl DownloadView {
             None,
         ));
         rows.extend(others.into_iter().map(|device| {
-            let icon = match device.kind {
-                DeviceKind::Cloud => FluxIcon::Globe,
-                DeviceKind::Paired => FluxIcon::Network,
-            };
+            let icon = FluxIcon::Globe;
             let dot = match device.online {
                 Some(true) => Some(online_color),
                 Some(false) => Some(offline_color),
@@ -916,7 +913,7 @@ impl DownloadView {
                 self.controller
                     .preference(section.visibility_pref())
                     .and_then(serde_json::Value::as_bool),
-                self.controller.other_devices().len(),
+                self.controller.sidebar_devices().len(),
             ),
             _ => self
                 .controller

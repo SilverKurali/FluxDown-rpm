@@ -50,6 +50,8 @@ internal object AccountText {
         "errReasonPairingVersionMismatch" to R.string.errReasonPairingVersionMismatch,
         "errReasonPeerNotPaired" to R.string.errReasonPeerNotPaired,
         "errReasonPeerOffline" to R.string.errReasonPeerOffline,
+        "errReasonPeerOutdated" to R.string.errReasonPeerOutdated,
+        "errReasonLinkUnavailable" to R.string.errReasonLinkUnavailable,
         "errReasonTargetDeviceOffline" to R.string.errReasonTargetDeviceOffline,
         "errReasonTaskStateConflict" to R.string.errReasonTaskStateConflict,
         "errReasonTaskDeviceMismatch" to R.string.errReasonTaskDeviceMismatch,

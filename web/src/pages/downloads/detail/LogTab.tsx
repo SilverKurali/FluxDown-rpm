@@ -17,6 +17,7 @@ const KIND_KEY: Record<string, string> = {
   nic_links: 'detailActivityKindNicLinks',
   nic_off: 'detailActivityKindNicOff',
   retry: 'detailActivityKindRetry',
+  plugin: 'detailActivityKindPlugin',
   journal_overflow: 'detailActivityKindJournalOverflow',
 }
 

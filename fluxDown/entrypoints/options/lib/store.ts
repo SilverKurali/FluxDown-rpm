@@ -5,7 +5,7 @@
  * - useLocalValue：绑定某个 storage.local 键的 hook。
  */
 import { signal } from "@preact/signals";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { browser } from "wxt/browser";
 import { showToast } from "@/ui/components/Toast";
 import { t } from "@/utils/i18n";
@@ -48,7 +48,7 @@ export function startSettingsSync(): () => void {
 
 /**
  * 绑定 storage.local 的一个键：读取时经 parse 规整，外部写入（其它页面 / background）自动同步。
- * 返回 [当前值, 写入函数]；写入先更新本地状态再落盘。
+ * 返回 [当前值, 写入函数]；写入先更新本地状态再落盘，落盘失败则回滚并提示。
  */
 export function useLocalValue<T>(key: string, parse: (raw: unknown) => T): [T, (next: T) => Promise<void>] {
   const [value, setValue] = useState<T>(() => parse(undefined));
@@ -67,9 +67,21 @@ export function useLocalValue<T>(key: string, parse: (raw: unknown) => T): [T, (
       browser.storage.onChanged.removeListener(onChanged);
     };
   }, [key]);
+  const latest = useRef(value);
+  latest.current = value;
+  // 落盘失败时回滚到写入前的值并提示，避免界面显示一份从未持久化的状态。
   const write = async (next: T) => {
+    const previous = latest.current;
+    latest.current = next;
     setValue(next);
-    await browser.storage.local.set({ [key]: next });
+    try {
+      await browser.storage.local.set({ [key]: next });
+    } catch (e) {
+      console.error(`[FluxDown Options] storage.local.set(${key}) failed:`, e);
+      latest.current = previous;
+      setValue(previous);
+      showToast(t("options.saveFailed"), "error");
+    }
   };
   return [value, write];
 }

@@ -42,16 +42,27 @@ export interface RulePack {
   rules: SniffRuleV1[];
 }
 
+/**
+ * 各谓词之间为 AND。数量上限（校验时强制）：url ≤ 64、ext ≤ 256、mime ≤ 64、header ≤ 8；
+ * 单条规则序列化后 ≤ 16 KB。
+ */
 export interface MatchSpec {
-  /** "example.com" 匹配本域及子域；"=example.com" 只匹配本域；不支持 "*." */
+  /**
+   * "example.com" 匹配本域及子域；"=example.com" 只匹配本域；不支持 "*."。
+   * 只比较 hostname：端口被忽略，FQDN 末尾的点被归一，IDN 按 punycode 比较。
+   * community / plugin 规则的 host 至少含一个点（不得是 "com" 这类单标签）。
+   */
   host?: string[];
   /** 同上，作用于顶层页面 host */
   pageHost?: string[];
-  /** glob：语义与引擎 url_glob_match 一致（见 glob.ts） */
+  /** glob：语义与引擎 url_glob_match 一致（见 glob.ts）；大小写不敏感，作用于完整 URL（含 query） */
   url?: string[];
-  /** 作用于 URL pathname；不区分大小写；受安全子集约束 */
+  /**
+   * 作用于 URL pathname；不区分大小写；受安全子集约束（regex-safety.ts：无嵌套量词 / 歧义选择支 /
+   * 相邻重叠量词 / 反向引用 / 环视）。非官方层级执行时输入超过 2048 字符视为不匹配。
+   */
   pathRegex?: string;
-  /** 小写、不带点 */
+  /** 小写、不带点；URL 扩展名取末段去掉 `;参数` 后的最后一个 `.ext`（1–10 位字母数字） */
   ext?: string[];
   /** URL 是否带可识别扩展名 */
   hasExt?: boolean;
@@ -66,12 +77,12 @@ export interface MatchSpec {
   maxSize?: number;
   /** 响应头 Content-Disposition 是否为 attachment */
   attachment?: boolean;
-  /** 响应头；name 小写 */
+  /** 响应头；name 小写；正则同 pathRegex 的限制（输入上限同样适用） */
   header?: { name: string; regex: string }[];
 }
 
 export interface SniffRuleV1 {
-  /** /^(builtin|official|community|local)\.[a-z0-9][a-z0-9._-]{1,62}$/，前缀等于 tier */
+  /** /^(builtin|official|plugin|community|local)\.[a-z0-9][a-z0-9._-]{1,62}$/，前缀等于 tier */
   id: string;
   /** 正整数 */
   version: number;
@@ -133,7 +144,10 @@ export type RuleAction =
   | { kind: "title"; selector: string; attr?: string }
   /** 匹配 `selector`（或位于其中）的媒体元素不显示浮钮（背景 / 广告 / 预览视频）。 */
   | { kind: "player"; selector: string; float: "hide" }
-  /** 下载这些 URL 时补充的请求头（Referer / Origin / UA 等；凭据类头不允许）。 */
+  /**
+   * 下载这些 URL 时补充的请求头。名字只允许 {@link ALLOWED_RULE_HEADERS}；规则必须用 `match.host`
+   * 限定目标（只写 pageHost 会把头注入该页面发出的所有第三方请求）。plugin 层不可用。
+   */
   | { kind: "headers"; set: Record<string, string> };
 
 export interface EmitSpec {
@@ -175,13 +189,16 @@ export const STAGE_ACTIONS: Record<RuleStage, RuleAction["kind"][]> = {
   request: ["headers"],
 };
 
-/** headers 动作禁止设置的请求头（凭据与连接控制由浏览器 / 引擎负责）。 */
-export const FORBIDDEN_RULE_HEADERS: ReadonlySet<string> = new Set([
-  "cookie",
-  "authorization",
-  "proxy-authorization",
-  "host",
-  "content-length",
-  "range",
-  "connection",
+/**
+ * headers 动作允许设置的请求头（白名单）：只有这些与「站点防盗链 / 内容协商」相关的头可以注入。
+ * 不含 range（分片由下载引擎管理）、cookie / authorization（凭据）、host / content-length / connection
+ * 等连接控制头，以及 transfer-encoding / sec-* / proxy-* 等浏览器保留头。
+ */
+export const ALLOWED_RULE_HEADERS: ReadonlySet<string> = new Set([
+  "referer",
+  "origin",
+  "user-agent",
+  "accept",
+  "accept-language",
+  "x-requested-with",
 ]);

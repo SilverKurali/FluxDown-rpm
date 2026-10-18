@@ -295,6 +295,13 @@ export interface LinkDeviceInfo {
   /** 对端自报的默认下载目录；旧版对端省略。 */
   defaultSaveDir?: string;
   pathStyle?: PathStyle;
+  /** 本机备注名；`name` 已是生效名（备注名优先）。 */
+  customName?: string;
+  appVersion?: string;
+  /** 对端登录云账号时自报的云设备 id（用于与云设备合并）。 */
+  cloudDeviceId?: string;
+  /** 对端已解除配对。 */
+  revoked: boolean;
 }
 
 /** 局域网发现的对端（`agent.link.probe` 结果 / `linkDiscoveredChanged`）。 */
@@ -358,6 +365,8 @@ export interface GatewayStatusDto {
   portEditable: boolean;
   /** 是否对局域网开放兼容 API；修改后下次 agent 启动生效。 */
   lanEnabled: boolean;
+  /** 本次运行网关是否实际监听非回环地址。 */
+  lanActive: boolean;
 }
 
 export type TrayUnavailableReason = 'notBuilt' | 'noDisplay' | 'noHost' | 'initFailed';
@@ -531,6 +540,7 @@ export type UpdateInstallKind =
   | 'synology'
   | 'qnap'
   | 'openwrt'
+  | 'fnos'
   | 'androidApk'
   | 'unknown';
 

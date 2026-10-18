@@ -1,5 +1,5 @@
 import type { ComponentChildren, JSX } from "preact";
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import type { ResourceType, RuleStage, SniffRuleV1 } from "@/rules/schema";
 import { Button } from "@/ui/components/Button";
 import { Modal } from "@/ui/components/Modal";
@@ -7,8 +7,9 @@ import { Select } from "@/ui/components/Select";
 import { Tabs } from "@/ui/components/Tabs";
 import { TagInput } from "@/ui/components/TagInput";
 import { TextInput } from "@/ui/components/TextInput";
-import { useT } from "@/ui/i18n";
+import { getLocale, useT } from "@/ui/i18n";
 import { isRecord } from "../../lib/guards";
+import { sniffRulesDocsUrl } from "../../lib/local-rules";
 import {
   REQUEST_TYPE_OPTIONS,
   RESOURCE_TYPE_OPTIONS,
@@ -24,10 +25,17 @@ import {
   type FormStage,
   type RuleForm,
 } from "../../lib/rule-form";
+import { issueText } from "../../lib/rule-issue";
+import { ConfirmModal } from "../../parts";
+import { RuleTester, type TesterBinding } from "./RuleTester";
+import { stageLabels } from "./stage-labels";
 
 interface RuleEditorModalProps {
   /** 正在编辑的已存规则；新建为 null。 */
   editing: SniffRuleV1 | null;
+  /** 新建时的起始内容（「复制为本地规则」）；editing 非空时忽略。 */
+  seed?: SniffRuleV1;
+  binding: TesterBinding;
   takenIds: ReadonlySet<string>;
   onSave: (rule: SniffRuleV1) => void;
   onClose: () => void;
@@ -49,14 +57,24 @@ function Field(props: { label: string; hint?: string; children?: ComponentChildr
 export function RuleEditorModal(props: RuleEditorModalProps): JSX.Element {
   const t = useT();
   const { editing } = props;
+  const source = editing ?? props.seed ?? null;
 
   // 初始：能用表单表示的规则走表单，否则（含 body / dom / 高级字段）直接进 JSON。
-  const initialForm = editing ? ruleToForm(editing) : emptyForm();
+  const initialForm = source ? ruleToForm(source) : emptyForm();
   const [mode, setMode] = useState<EditorMode>(initialForm ? "form" : "json");
   const [form, setForm] = useState<RuleForm>(initialForm ?? emptyForm());
-  const [jsonText, setJsonText] = useState(initialForm ? "" : JSON.stringify(editing, null, 2));
+  const [jsonText, setJsonText] = useState(initialForm ? "" : JSON.stringify(source, null, 2));
   const [errors, setErrors] = useState<string[]>([]);
   const [valid, setValid] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const snapshot = JSON.stringify({ mode, form, jsonText });
+  const [initialSnapshot] = useState(snapshot);
+  const dirty = snapshot !== initialSnapshot;
+
+  const requestClose = () => {
+    if (dirty) setConfirmDiscard(true);
+    else props.onClose();
+  };
 
   const patch = (next: Partial<RuleForm>) => {
     setForm({ ...form, ...next });
@@ -67,18 +85,9 @@ export function RuleEditorModal(props: RuleEditorModalProps): JSX.Element {
     id: editing?.id ?? generateRuleId(form.title, Date.now()),
     version: editing?.version ?? 1,
     enabled: editing?.enabled,
-    priority: editing?.priority,
   });
 
-  const stageLabels: Record<EditorStage, string> = {
-    response: t("rules.stage.response"),
-    normalize: t("rules.stage.normalize"),
-    track: t("rules.stage.track"),
-    body: t("rules.stage.body"),
-    dom: t("rules.stage.dom"),
-    page: t("rules.stage.page"),
-    request: t("rules.stage.request"),
-  };
+  const stageNames = stageLabels();
 
   /** 当前表单 / JSON 对应的草稿对象；解析失败返回错误文案。 */
   const readDraft = (): { ok: true; draft: unknown } | { ok: false; errors: string[] } => {
@@ -103,7 +112,7 @@ export function RuleEditorModal(props: RuleEditorModalProps): JSX.Element {
     }
     const result = finalizeLocalRule(draft.draft, { editing, takenIds: props.takenIds, now: Date.now() });
     if (!result.ok) {
-      setErrors(result.errors);
+      setErrors(result.errors.map((issue) => issueText(t, issue)));
       setValid(false);
       return null;
     }
@@ -111,6 +120,15 @@ export function RuleEditorModal(props: RuleEditorModalProps): JSX.Element {
     setValid(true);
     return result.rule;
   };
+
+  // 编辑后停顿即校验，不必等点「校验」才发现问题。
+  useEffect(() => {
+    if (!dirty) return;
+    const handle = setTimeout(() => {
+      validate();
+    }, 400);
+    return () => clearTimeout(handle);
+  }, [snapshot]);
 
   const switchMode = (next: EditorMode) => {
     if (next === mode) return;
@@ -165,13 +183,14 @@ export function RuleEditorModal(props: RuleEditorModalProps): JSX.Element {
   };
 
   return (
+    <>
     <Modal
       title={editing ? t("rules.editor.editTitle") : t("rules.editor.newTitle")}
-      onClose={props.onClose}
+      onClose={requestClose}
       width={680}
       footer={
         <>
-          <Button onClick={props.onClose}>{t("options.cancel")}</Button>
+          <Button onClick={requestClose}>{t("options.cancel")}</Button>
           <Button onClick={validate}>{t("rules.editor.validate")}</Button>
           <Button variant="primary" onClick={save}>
             {t("options.save")}
@@ -212,12 +231,12 @@ export function RuleEditorModal(props: RuleEditorModalProps): JSX.Element {
                 value={form.stage}
                 onChange={changeStage}
                 options={[
-                  { value: "response", label: stageLabels.response },
-                  { value: "normalize", label: stageLabels.normalize },
-                  { value: "body", label: stageLabels.body },
-                  { value: "dom", label: stageLabels.dom },
-                  { value: "page", label: stageLabels.page },
-                  { value: "request", label: stageLabels.request },
+                  { value: "response", label: stageNames.response },
+                  { value: "normalize", label: stageNames.normalize },
+                  { value: "body", label: stageNames.body },
+                  { value: "dom", label: stageNames.dom },
+                  { value: "page", label: stageNames.page },
+                  { value: "request", label: stageNames.request },
                 ]}
               />
             </Field>
@@ -270,6 +289,21 @@ export function RuleEditorModal(props: RuleEditorModalProps): JSX.Element {
                 <TextInput type="number" min={0} value={form.maxSizeMB} placeholder="MB" onInput={(maxSizeMB) => patch({ maxSizeMB })} />
               </Field>
             </div>
+
+            <Field label={t("rules.editor.excludeHost")} hint={t("rules.editor.excludeHostHint")}>
+              <TagInput
+                tags={form.excludeHost}
+                normalize={normalizeHostPattern}
+                placeholder="example.com"
+                onChange={(excludeHost) => patch({ excludeHost })}
+              />
+            </Field>
+            <Field label={t("rules.editor.excludeUrl")} hint={t("rules.editor.excludeUrlHint")}>
+              <TagInput tags={form.excludeUrl} placeholder="*/ads/*" onChange={(excludeUrl) => patch({ excludeUrl })} />
+            </Field>
+            <Field label={t("rules.editor.priority")} hint={t("rules.editor.priorityHint")}>
+              <TextInput type="number" value={form.priority} placeholder="0" onInput={(priority) => patch({ priority })} />
+            </Field>
 
             <h3 class="opt-subtitle">{t("rules.editor.action")}</h3>
             {form.stage === "response" ? (
@@ -327,8 +361,29 @@ export function RuleEditorModal(props: RuleEditorModalProps): JSX.Element {
             </ul>
           </div>
         ) : null}
-        {valid ? <div class="opt-ok">{t("rules.editor.valid")}</div> : null}
+        {valid ? (
+          <div class="opt-ok" role="status">
+            {t("rules.editor.valid")}
+          </div>
+        ) : null}
+        <a class="opt-field-hint" href={sniffRulesDocsUrl(getLocale())} target="_blank" rel="noreferrer">
+          {t("rules.editor.docsLink")}
+        </a>
+
+        <RuleTester binding={props.binding} getDraft={validate} />
       </div>
+
     </Modal>
+      {confirmDiscard ? (
+        <ConfirmModal
+          title={t("rules.editor.discardTitle")}
+          message={t("rules.editor.discardMessage")}
+          confirmLabel={t("rules.editor.discard")}
+          danger
+          onCancel={() => setConfirmDiscard(false)}
+          onConfirm={props.onClose}
+        />
+      ) : null}
+    </>
   );
 }

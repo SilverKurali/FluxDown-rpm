@@ -25,7 +25,7 @@ use crate::{
         LAST_SAVE_DIR_PREF, REMEMBER_LAST_SAVE_DIR_PREF,
     },
     model::{
-        devices::{DeviceEntry, DeviceKind, DispatchTarget, other_devices},
+        devices::{DeviceEntry, DeviceKind, DispatchTarget, other_devices, resolve_target},
         dispatch::{RemoteDirCheck, check_remote_save_dir},
         new_download::{
             BuiltRequests, DEFAULT_HASH_ALGORITHM, DraftOptions, HASH_ALGORITHMS, MAX_THREADS,
@@ -178,10 +178,8 @@ pub(crate) fn build_new_download_context(
         .get(LAST_DOWNLOAD_TARGET_PREF)
         .and_then(serde_json::Value::as_str)
         .and_then(DispatchTarget::from_pref)
-        .filter(|target| {
-            *target == DispatchTarget::Local
-                || targets.iter().any(|entry| entry.target() == *target)
-        })
+        // `link:<fp>` 已挂接到云条目时解析为该云条目；目标已不存在则回退本机。
+        .and_then(|target| resolve_target(target, &targets))
         .unwrap_or_default();
     NewDownloadContext {
         save_dir: save_dir.to_owned(),
@@ -739,12 +737,13 @@ impl NewDownloadView {
             Some(false) => &self.strings.device_offline,
             None => &self.strings.device_presence_unknown,
         };
-        match entry.kind {
-            DeviceKind::Cloud => SharedString::from(format!("{} · {status}", entry.label)),
-            DeviceKind::Paired => SharedString::from(format!(
+        if entry.is_standalone_link() {
+            SharedString::from(format!(
                 "{} · {} · {status}",
                 entry.label, self.strings.device_lan_tag
-            )),
+            ))
+        } else {
+            SharedString::from(format!("{} · {status}", entry.label))
         }
     }
 
@@ -1095,11 +1094,14 @@ impl NewDownloadView {
                 captures.push(self.captures.remove(index).transaction_id);
             }
         }
+        // 挂接直连且在线 → 局域网直连（一次性投递），否则云端 / 独立直连按条目本身。
+        let route = entry.route();
         (self.on_submit)(
             NewDownloadSubmission::Remote(RemoteSubmission {
-                target: entry.target(),
+                target: route.clone(),
                 device_label: entry.label.clone(),
-                target_offline: entry.kind == DeviceKind::Cloud && entry.online == Some(false),
+                target_offline: matches!(route, DispatchTarget::Cloud(_))
+                    && entry.online == Some(false),
                 items,
                 save_dir,
                 captures,

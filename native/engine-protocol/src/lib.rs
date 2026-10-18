@@ -87,6 +87,22 @@ pub fn task_activity_to_dto(
     }
 }
 
+/// 将任务速度历史转换成 wire DTO（未满桶的当前均值作为末点）。
+#[must_use]
+pub fn task_speed_history_to_dto(
+    task_id: String,
+    history: fluxdown_engine::speed_history::SpeedHistory,
+) -> fluxdown_protocol::TaskSpeedHistoryDto {
+    fluxdown_protocol::TaskSpeedHistoryDto {
+        task_id,
+        bucket_secs: history.bucket_secs,
+        samples: history.points(),
+        active_secs: history.active_secs,
+        transferred_bytes: history.transferred_bytes,
+        peak_bps: history.peak_bps,
+    }
+}
+
 /// 将引擎任务投影转换为 wire DTO。
 #[must_use]
 pub fn task_info_to_dto(task: TaskInfo) -> TaskDto {

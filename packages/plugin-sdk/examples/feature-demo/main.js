@@ -109,13 +109,15 @@ flux.rpc.handle("echo", (args) => ({ youSent: args, at: now() }));
 // ---------------------------------------------------------------------------
 // 视图：演示面板（活动栏）
 // ---------------------------------------------------------------------------
+// TaskDto.status: 0=pending 1=downloading 2=paused 3=completed 4=error 5=preparing.
 function statusBadge(status) {
   const map = {
     0: ["排队", "muted"],
     1: ["下载中", "accent"],
-    2: ["已完成", "success"],
-    3: ["已暂停", "warning"],
+    2: ["已暂停", "warning"],
+    3: ["已完成", "success"],
     4: ["失败", "danger"],
+    5: ["准备中", "accent"],
   };
   const [text, tone] = map[status] || [`状态 ${status}`, "neutral"];
   return { text, tone };
@@ -244,7 +246,8 @@ function tasksTab(state) {
     done: t.totalBytes > 0 ? t.downloadedBytes / t.totalBytes : 0,
     pct: t.totalBytes > 0 ? t.downloadedBytes / t.totalBytes : 0,
     status: statusBadge(t.status),
-    created: Date.parse(t.createdAt) || 0,
+    // createdAt 是 Unix 秒（字符串）；`time` 列要求毫秒。
+    created: Number(t.createdAt) * 1000 || 0,
   }));
   return h(
     "stack",

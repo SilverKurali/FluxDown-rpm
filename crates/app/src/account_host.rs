@@ -2,13 +2,13 @@
 //! 「添加设备」对话框共享；这里把它的一次性提示落到窗口上——
 //! 入站局域网配对请求弹确认框，agent 的 `SessionRevoked` 给一次性通知。
 
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use fluxdown_protocol::ErrorReason;
 use fluxdown_ui_account::{AccountHost, AccountHostEvent, open_add_device, open_pairing_prompt};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_settings::SettingsStore;
-use gpui::{App, AppContext as _, Entity, Global, Window};
+use gpui::{App, AppContext as _, Entity, Window};
 use gpui_component::{WindowExt as _, notification::Notification};
 
 use crate::{
@@ -19,12 +19,6 @@ use crate::{
     windows::{WindowRegistry, bring_to_front},
 };
 
-/// 已经弹出过确认框的入站请求（`session_id`），避免重连快照重复弹窗。
-#[derive(Default)]
-struct PromptedRequests(HashSet<String>);
-
-impl Global for PromptedRequests {}
-
 /// 创建并装配账户宿主：订阅会话，登记提示落点。
 pub(crate) fn install(
     translator: &Entity<Translator>,
@@ -34,10 +28,25 @@ pub(crate) fn install(
 ) -> Entity<AccountHost> {
     let port = Arc::new(AgentAccountPort::new(client.clone()));
     let host = cx.new(|cx| AccountHost::new(translator.clone(), port, cx));
-    cx.set_global(PromptedRequests::default());
     cx.subscribe(&host, |host, event, cx| match event {
         AccountHostEvent::PairingRequested(id) => show_pairing_prompt(&host, id, cx),
         AccountHostEvent::SessionRevoked(reason) => notify_session_revoked(&host, *reason, cx),
+        AccountHostEvent::DevicePaired { name } => notify_device_paired(&host, name, cx),
+        AccountHostEvent::OpenSettingsRequested => {
+            let row = Desktop::global(cx)
+                .translator
+                .read(cx)
+                .text("apiServiceLanEnable")
+                .to_owned();
+            crate::windows::settings::reveal(
+                cx,
+                fluxdown_ui_settings::SettingsTarget {
+                    page: "api",
+                    tab: "",
+                    row: Some(row.into()),
+                },
+            );
+        }
         AccountHostEvent::SnapshotReplaced => {}
         AccountHostEvent::ShowReferralRequested(value) => {
             Desktop::set_pref(cx, SHOW_REFERRAL_PREF, serde_json::Value::Bool(*value));
@@ -100,25 +109,35 @@ pub(crate) fn replay_pending(cx: &mut App) {
 }
 
 fn show_pairing_prompt(host: &Entity<AccountHost>, id: &str, cx: &mut App) {
-    let pending = host.read(cx).pending_pairing_requests();
-    let prompted = cx.global_mut::<PromptedRequests>();
-    prompted.0.retain(|shown| pending.contains(shown));
-    if prompted.0.contains(id) {
-        return;
-    }
     let Some(handle) = WindowRegistry::overlay_window(cx) else {
+        // 只剩托盘 / 没有承载窗口：打开并聚焦主窗口；新窗口就绪后 `replay_pending` 补弹本请求
+        // （对端只等 60 秒，不能静默丢失）。
+        if host.read(cx).pairing_request(id).is_some() {
+            cx.defer(crate::windows::main::reveal);
+        }
         return;
     };
     let host = host.clone();
     let id = id.to_owned();
-    let shown = handle
-        .update(cx, |_, window, cx| {
-            bring_to_front(window, cx);
-            open_pairing_prompt(&host, &id, window, cx);
-        })
-        .is_ok();
-    if shown {
-        cx.global_mut::<PromptedRequests>().0.insert(id);
+    // 重复弹窗由确认框队列按 `session_id` 去重（已显示 / 已排队的请求不会再开）。
+    if let Err(error) = handle.update(cx, |_, window, cx| {
+        bring_to_front(window, cx);
+        open_pairing_prompt(&host, &id, window, cx);
+    }) {
+        log::debug!("pairing prompt window released before showing: {error:#}");
+    }
+}
+
+/// 响应方成功反馈：已配对列表出现对端指纹后提示一次；无承载窗口时不补弹（设备已在列表里）。
+fn notify_device_paired(host: &Entity<AccountHost>, name: &str, cx: &mut App) {
+    let Some(handle) = WindowRegistry::overlay_window(cx) else {
+        return;
+    };
+    let message = host.read(cx).device_paired_message(name, cx);
+    if let Err(error) = handle.update(cx, |_, window, cx| {
+        window.push_notification(Notification::success(message), cx);
+    }) {
+        log::debug!("window released before paired notification: {error:#}");
     }
 }
 

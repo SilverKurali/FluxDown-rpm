@@ -11,8 +11,8 @@ function resource(id: string): DetectedResource {
   return { id, url: `https://cdn.example.com/${id}.mp4` } as DetectedResource;
 }
 
-function element(key: string): ElementState {
-  return { key } as ElementState;
+function element(key: string, frameId = 0): ElementState {
+  return { key, frameId } as ElementState;
 }
 
 function emptyState(pageUrl = ""): RestorableState {
@@ -23,6 +23,8 @@ function emptyState(pageUrl = ""): RestorableState {
     carriedManifests: new Set(),
     hlsPlaylists: new Map(),
     elements: new Map(),
+    sessions: new Map(),
+    retired: [],
   };
 }
 
@@ -70,5 +72,19 @@ describe("mergeRestoredTab", () => {
     const state = emptyState();
     expect(mergeRestoredTab(state, saved, `${PAGE}#t=30`, identity)).toBe(true);
     expect(state.resources.size).toBe(2);
+  });
+
+  test("帧已登记了新的 sensor 会话：快照里旧会话的元素不再恢复（它们不会再更新或被移除）", () => {
+    const state = emptyState(PAGE);
+    state.sessions.set(0, { sid: "new", hooks: null });
+    const snapshot: PersistedTab = {
+      ...saved,
+      elements: [element("old:1"), element("new:1"), element("sub:1", 3)],
+      sessions: [{ frameId: 0, sid: "old", hooks: null }, { frameId: 3, sid: "sub", hooks: null }],
+    };
+    expect(mergeRestoredTab(state, snapshot, PAGE, identity)).toBe(true);
+    expect([...state.elements.keys()].sort()).toEqual(["new:1", "sub:1"]);
+    expect(state.sessions.get(0)?.sid).toBe("new");
+    expect(state.sessions.get(3)?.sid).toBe("sub");
   });
 });

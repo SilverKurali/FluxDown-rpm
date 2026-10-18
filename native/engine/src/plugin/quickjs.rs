@@ -372,6 +372,57 @@ impl ScriptRuntime for QuickJsScriptRuntime {
         Ok(Some(result))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn invoke_intercept(
+        &self,
+        plugin: &PluginScript,
+        arg_json: String,
+        settings_json: String,
+        bridge: Arc<dyn PluginBridge>,
+        budget: ExecutionBudget,
+        host: HostContext,
+        long_running: bool,
+        artifact_task_id: Option<String>,
+    ) -> Result<Option<String>, PluginError> {
+        let _permit = if long_running {
+            self.ext_hook_sema
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| PluginError::Overloaded)?
+        } else {
+            tokio::time::timeout(
+                RESOLVE_ACQUIRE_TIMEOUT,
+                self.resolve_sema.clone().acquire_owned(),
+            )
+            .await
+            .map_err(|_| PluginError::Overloaded)?
+            .map_err(|_| PluginError::Overloaded)?
+        };
+
+        let info_json = info_json(&plugin.identity, &plugin.version, &plugin.app_version);
+        let raw = self
+            .run_script(
+                plugin.source.clone(),
+                "intercept",
+                true,
+                arg_json,
+                settings_json,
+                info_json,
+                None,
+                artifact_task_id,
+                bridge,
+                plugin.identity.clone(),
+                budget,
+                host,
+            )
+            .await?;
+        if raw == NULL_SENTINEL {
+            return Ok(None);
+        }
+        Ok(Some(raw))
+    }
+
     async fn invoke_auth(
         &self,
         plugin: &PluginScript,

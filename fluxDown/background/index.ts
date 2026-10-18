@@ -23,6 +23,7 @@ import { downloadPlayingMedia } from "./downloads";
 import { installMessages } from "./messages";
 import { notify } from "./notify";
 import { installPorts } from "./ports";
+import { installProbe } from "./probe";
 import { installRequestCache } from "./request-cache";
 import { installRulesStore, onEngineChanged } from "./rules-store";
 import {
@@ -70,6 +71,7 @@ export function startBackground(): void {
   installSettingsCacheListener();
   installRequestCache();
   installTabState();
+  installProbe();
   installRulesStore();
   installSniff();
   installIntercept();

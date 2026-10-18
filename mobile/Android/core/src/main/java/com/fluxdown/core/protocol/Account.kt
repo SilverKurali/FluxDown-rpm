@@ -582,6 +582,8 @@ object AccountRules {
         "pairingVersionMismatch" -> "errReasonPairingVersionMismatch"
         "peerNotPaired" -> "errReasonPeerNotPaired"
         "peerOffline" -> "errReasonPeerOffline"
+        "peerOutdated" -> "errReasonPeerOutdated"
+        "linkUnavailable" -> "errReasonLinkUnavailable"
         "targetDeviceOffline" -> "errReasonTargetDeviceOffline"
         "taskStateConflict" -> "errReasonTaskStateConflict"
         "taskDeviceMismatch" -> "errReasonTaskDeviceMismatch"

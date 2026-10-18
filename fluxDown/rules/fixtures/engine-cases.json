@@ -624,13 +624,31 @@
     "expect": null
   },
   {
-    "name": "[classify] MIME 优先",
+    "name": "[classify] 与 classifyResponse 同序：后缀规则先于 MIME 规则",
     "call": "classify",
     "args": [
       "https://x/a.mp4",
       "audio/mpeg"
     ],
+    "expect": "video"
+  },
+  {
+    "name": "[classify] 无后缀时按 MIME 判定",
+    "call": "classify",
+    "args": [
+      "https://x/noext",
+      "audio/mpeg"
+    ],
     "expect": "audio"
+  },
+  {
+    "name": "[classify] m4s 分片带 video/mp4 仍是 stream",
+    "call": "classify",
+    "args": [
+      "https://x/a.m4s",
+      "video/mp4"
+    ],
+    "expect": "stream"
   },
   {
     "name": "[classify] audio/mpegurl 是 HLS 播放列表，不是音频文件",
@@ -955,13 +973,13 @@
     "expect": []
   },
   {
-    "name": "[dedupe] 去除 token/utm_source/t 并排序",
+    "name": "[dedupe] 去除 utm_source/缓存破坏参数并排序，保留 token/t",
     "call": "dedupeKey",
     "args": [
-      "https://x.com/a.mp4?token=1&utm_source=x&t=5&z=2&b=1#frag",
+      "https://x.com/a.mp4?token=1&utm_source=x&t=5&z=2&b=1&_=9#frag",
       ""
     ],
-    "expect": "https://x.com/a.mp4?b=1&z=2"
+    "expect": "https://x.com/a.mp4?b=1&t=5&token=1&z=2"
   },
   {
     "name": "[dedupe] 无效 URL 原样返回",
@@ -1798,5 +1816,263 @@
         "id": "official.mp4"
       }
     }
+  },
+  {
+    "name": "[noise] /api/v1/stream 返回 video/mp4 不被忽略",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/api/v1/stream/123",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false,
+        "mime": "video/mp4"
+      }
+    ],
+    "expect": {
+      "decision": "resource",
+      "type": "video"
+    }
+  },
+  {
+    "name": "[noise] /track/ 下无扩展名 audio/mpeg 不被忽略",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/track/9",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false,
+        "mime": "audio/mpeg"
+      }
+    ],
+    "expect": {
+      "decision": "resource",
+      "type": "audio"
+    }
+  },
+  {
+    "name": "[noise] robots.txt 被 ignore",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/robots.txt",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false
+      }
+    ],
+    "expect": {
+      "decision": "ignore"
+    }
+  },
+  {
+    "name": "[noise] 静态路径下 csv 被 ignore",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/static/js/data.csv",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false
+      }
+    ],
+    "expect": {
+      "decision": "ignore"
+    }
+  },
+  {
+    "name": "[noise] adservice-guide.pdf 不被忽略",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/files/adservice-guide.pdf",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false
+      }
+    ],
+    "expect": {
+      "decision": "resource",
+      "type": "document"
+    }
+  },
+  {
+    "name": "[noise] 查询串含 sentry.io 不被忽略",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/a.mp4?next=sentry.io",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false
+      }
+    ],
+    "expect": {
+      "decision": "resource",
+      "type": "video"
+    }
+  },
+  {
+    "name": "[noise] 子域 sentry.io 仍被忽略",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://o1.ingest.sentry.io/api/1/envelope",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false
+      }
+    ],
+    "expect": {
+      "decision": "ignore"
+    }
+  },
+  {
+    "name": "[noise] facebook.com/trending 不被忽略",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://www.facebook.com.evil.example/trending/a.mp4",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false
+      }
+    ],
+    "expect": {
+      "decision": "resource",
+      "type": "video"
+    }
+  },
+  {
+    "name": "[noise] google.com/pagead 被忽略",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://www.google.com/pagead/x",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false
+      }
+    ],
+    "expect": {
+      "decision": "ignore"
+    }
+  },
+  {
+    "name": "[sniff] .ts 返回 text/javascript 不是视频",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/app/main.ts",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false,
+        "mime": "text/javascript"
+      }
+    ],
+    "expect": {
+      "decision": "none"
+    }
+  },
+  {
+    "name": "[sniff] .ts 返回 video/mp2t 是视频",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/seg/1.ts",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false,
+        "mime": "video/mp2t"
+      }
+    ],
+    "expect": {
+      "decision": "resource",
+      "type": "video"
+    }
+  },
+  {
+    "name": "[sniff] eot 字体 (vnd.ms-fontobject) 不是文档",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/f/a.eot",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false,
+        "mime": "application/vnd.ms-fontobject"
+      }
+    ],
+    "expect": {
+      "decision": "none"
+    }
+  },
+  {
+    "name": "[sniff] rmvb 命中 video",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/a.rmvb",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false
+      }
+    ],
+    "expect": {
+      "decision": "resource",
+      "type": "video"
+    }
+  },
+  {
+    "name": "[sniff] tgz 命中 archive",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/a.tgz",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false
+      }
+    ],
+    "expect": {
+      "decision": "resource",
+      "type": "archive"
+    }
+  },
+  {
+    "name": "[sniff] application/x-matroska 命中 video",
+    "call": "classifyResponse",
+    "args": [
+      {
+        "url": "https://x.com/noext",
+        "pageUrl": "",
+        "size": -1,
+        "attachment": false,
+        "mime": "application/x-matroska"
+      }
+    ],
+    "expect": {
+      "decision": "resource",
+      "type": "video"
+    }
+  },
+  {
+    "name": "[dedupe] ?v=a 与 ?v=b 不合并",
+    "call": "dedupeKey",
+    "args": [
+      "https://x.com/watch?v=a",
+      ""
+    ],
+    "expect": "https://x.com/watch?v=a"
+  },
+  {
+    "name": "[dedupe] ?v=b 保留",
+    "call": "dedupeKey",
+    "args": [
+      "https://x.com/watch?v=b",
+      ""
+    ],
+    "expect": "https://x.com/watch?v=b"
   }
 ]

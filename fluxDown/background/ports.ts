@@ -8,6 +8,7 @@ import { browser } from "wxt/browser";
 import type { Browser } from "wxt/browser";
 import { onEngineChanged } from "./rules-store";
 import { onSettingsChanged } from "./settings-cache";
+import { scheduleProbeCheck } from "./probe";
 import { onTabChanged } from "./tab-state";
 import { buildTabView } from "./tab-view";
 import { updateBadgeForTab } from "./toolbar";
@@ -98,6 +99,8 @@ export function installPorts(): void {
         subscribers.set(tabId, ports);
       }
       ports.add(port);
+      // 打开面板 / 侧边栏是用户正要看这个页面：页面缺少 sensor 时立即开始恢复
+      scheduleProbeCheck(tabId, 0);
       // 订阅时立即推送一次，不等合并窗口。
       publish(tabId).catch((e) => console.warn("[FluxDown] tab view publish failed:", e));
     });

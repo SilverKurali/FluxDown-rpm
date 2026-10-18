@@ -594,6 +594,7 @@ pub(crate) struct NewDownloadStrings {
     path_invalid: SharedString,
     dispatched: SharedString,
     dispatched_offline: SharedString,
+    link_dispatched: SharedString,
     dispatch_partial: SharedString,
     pub(crate) dispatch_failed: SharedString,
     import_cancelled: SharedString,
@@ -694,6 +695,7 @@ impl NewDownloadStrings {
             path_invalid: shared(translator.text("downloadToPathInvalid")),
             dispatched: shared(translator.text("downloadToDispatched")),
             dispatched_offline: shared(translator.text("downloadToDispatchedOffline")),
+            link_dispatched: shared(translator.text("linkDispatchedToDevice")),
             dispatch_partial: shared(translator.text("downloadToPartial")),
             dispatch_failed: shared(translator.text("dispatchFailed")),
             import_cancelled: shared(translator.text("importCancelled")),
@@ -773,8 +775,18 @@ impl NewDownloadStrings {
         SharedString::from(self.path_invalid.replace("{example}", example))
     }
 
-    /// 下发成功提示；目标离线（云设备）时说明上线后才执行。
-    pub(crate) fn format_dispatched(&self, count: usize, device: &str, offline: bool) -> String {
+    /// 下发成功提示；目标离线（云设备）时说明上线后才执行；直连下发是一次性投递，
+    /// 提示进度要在目标设备上查看。
+    pub(crate) fn format_dispatched(
+        &self,
+        count: usize,
+        device: &str,
+        offline: bool,
+        direct: bool,
+    ) -> String {
+        if direct {
+            return self.link_dispatched.replace("{device}", device);
+        }
         let template = if offline {
             &self.dispatched_offline
         } else {

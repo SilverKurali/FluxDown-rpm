@@ -219,7 +219,6 @@ export function InterceptPanel(): JSX.Element | null {
       <ToggleRow
         title={t("options.intercept.fallbackCancel")}
         desc={t("options.intercept.fallbackCancelDesc")}
-        note={t("options.intercept.fallbackCancelNote")}
         checked={s.fallbackOnCancel}
         onChange={(v) => void updateSettings({ fallbackOnCancel: v })}
       />

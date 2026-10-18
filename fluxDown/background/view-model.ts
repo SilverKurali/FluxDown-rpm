@@ -22,6 +22,7 @@ import type {
   ElementState,
   HandoffState,
   HostCapabilities,
+  ProbeState,
   ResourceRow,
   TabView,
 } from "./protocol";
@@ -132,10 +133,16 @@ export interface ViewModelInput {
   /** mirror 规则声明的镜像域名组。 */
   mirrorGroups: string[][];
   elements: ElementState[];
+  /** 历史播放会话（tab-state 归档，新的在前）：参与关联，不会成为当前播放元素。 */
+  retiredElements: ElementState[];
   engine: Pick<CompiledRules, "dedupeKey" | "trackKind">;
   showLowConfidence: boolean;
   handoff: HandoffState;
   site: TabView["site"];
+  /** 探测协调器给出的基础状态（live / recovering / unavailable / unknown）。 */
+  probe: ProbeState;
+  /** 钩子补注入晚于页面加载的帧。 */
+  lateFrames: ReadonlySet<number>;
 }
 
 const MEDIA_TYPES: ReadonlySet<ResourceType> = new Set(["video", "stream", "audio"]);
@@ -296,9 +303,38 @@ function inferBinding(
   bindings.set(eligible[0].id, { elementKey: element.key, playingVariantId: null, confidence: "inferred" });
 }
 
+/**
+ * 按 SourceBuffer 证据纠正轨道类型：被追加进音频 SourceBuffer（且从未进过视频 SourceBuffer）的
+ * 完整文件是音轨，即便服务端把它标成 video/mp4——这是播放器自己的判断。音轨不会再作为一条
+ * 「视频」直链单独出现，只在配对候选里出现。
+ */
+function withSourceBufferKinds(
+  resources: DetectedResource[],
+  elements: ElementState[],
+  key: (u: string) => string,
+): DetectedResource[] {
+  const audio = new Set<string>();
+  const video = new Set<string>();
+  for (const element of elements) {
+    for (const binding of element.bindings) {
+      const into = binding.kind === "audio" ? audio : binding.kind === "video" ? video : null;
+      if (into) for (const url of binding.exact) into.add(key(url));
+    }
+  }
+  if (audio.size === 0) return resources;
+  return resources.map((r) => {
+    if (r.type !== "video") return r;
+    const k = key(r.url);
+    return audio.has(k) && !video.has(k) ? { ...r, type: "audio" } : r;
+  });
+}
+
 export function composeTabView(input: ViewModelInput): TabView {
-  const { engine, resources, elements } = input;
+  const { engine, elements } = input;
   const key = (url: string) => engine.dedupeKey(url, input.pageUrl);
+  // 真实元素在前：同分时保留真实元素（历史会话只承接真实元素已不再持有的证据）
+  const evidenceElements = input.retiredElements.length > 0 ? [...elements, ...input.retiredElements] : elements;
+  const resources = withSourceBufferKinds(input.resources, evidenceElements, key);
   const byId = new Map(resources.map((r) => [r.id, r]));
 
   const built = buildMediaCandidates(resources, {
@@ -311,13 +347,13 @@ export function composeTabView(input: ViewModelInput): TabView {
     key,
   });
   const candidates = [...built];
-  for (const element of elements) {
+  for (const element of evidenceElements) {
     const synthesized = synthesizeCurrentSrc(element, candidates, key, input.pageTitle, input.pageUrl);
     if (synthesized) candidates.push(synthesized);
   }
   // 音视频分离播放的元素合成「音视频对」；被吸收的单轨直链不再单独出现（否则会看到两个
   // 「播放中」的同名候选，各自只有一半内容）。
-  for (const element of elements.filter(hasBothKinds)) {
+  for (const element of evidenceElements.filter(hasBothKinds)) {
     const pair = synthesizePair(element, resources, candidates, input, key);
     if (!pair) continue;
     const absorbed = new Set(pair.rawResourceIds);
@@ -330,11 +366,11 @@ export function composeTabView(input: ViewModelInput): TabView {
     candidates.push(pair);
   }
 
-  const bindings = bindCandidates(candidates, elements, key);
+  const bindings = bindCandidates(candidates, evidenceElements, key);
   const active = activeElement(elements);
   bindDeclared(candidates, elements, bindings, byId);
   inferBinding(candidates, elements, bindings, byId);
-  const elementsByKey = new Map(elements.map((element) => [element.key, element]));
+  const elementsByKey = new Map(evidenceElements.map((element) => [element.key, element]));
   /**
    * 关联到元素的候选带上元素的事实：元素标题（比页面标题准确，如推荐流 / 弹窗播放器里的单个视频）
    * 与 DRM 状态（EME 加密的内容下载得到的是密文）。
@@ -395,6 +431,14 @@ export function composeTabView(input: ViewModelInput): TabView {
     addCount(resource.type, 1);
   }
 
+  // 钩子在页面开始播放之后才补装（扩展安装 / 更新时页面已打开）：当前播放元素的 MediaSource
+  // 关联已经错过、拿不到任何来源证据，只有刷新页面才能完整识别。
+  const degraded =
+    input.probe === "live" &&
+    active !== null &&
+    active.playing &&
+    input.lateFrames.has(active.frameId) &&
+    hasNoSourceEvidence(active);
   return {
     tabId: input.tabId,
     pageUrl: input.pageUrl,
@@ -409,6 +453,7 @@ export function composeTabView(input: ViewModelInput): TabView {
     counts,
     handoff: input.handoff,
     site: input.site,
+    probe: degraded ? "degraded" : input.probe,
   };
 }
 

@@ -15,10 +15,10 @@
  */
 
 import { compileBundled } from "@/rules/engine";
-import { isStreamingUrl } from "./resource-types";
+import { isStreamingUrl, type ResourceType } from "./resource-types";
 
-/** 只含内置规则的分类器：仅按扩展名判定（无 MIME），与页面上下文无关。 */
-const builtinRules = compileBundled();
+/** 仅随包规则的分类器（无 MIME，与页面上下文无关）；调用方可传入用户实际生效的 classifier 取代。 */
+const bundledClassify = (url: string): ResourceType => compileBundled().classify(url);
 
 /** 仅 http(s)：挡 blob: / data: / 页面 URL 被上报（引擎无法 fetch 非 http 资源）。 */
 export function isHttpUrl(url: string): boolean {
@@ -72,10 +72,10 @@ const MAX_SCAN_DEPTH = 20; // 沿用 cat-catch search.js:98 已验证常量
 const MAX_SCAN_NODES = 5000; // 节点访问上限（宽度守卫，cat-catch 无）
 const MAX_STRING_LEN = 4096; // 超长字符串跳过语义判定（内联 base64 / HTML / bundle）
 
-/** 一个绝对 URL 是否指向可下载媒体：清单（.m3u8/.mpd/manifest/playlist）或内置规则可识别的扩展名（排除 image/other）。 */
-function isMediaUrl(absUrl: string): boolean {
+/** 一个绝对 URL 是否指向可下载媒体：清单（.m3u8/.mpd/manifest/playlist）或规则可识别的扩展名（排除 image/other）。 */
+function isMediaUrl(absUrl: string, classify: (url: string) => ResourceType): boolean {
   if (isStreamingUrl(absUrl)) return true;
-  const type = builtinRules.classify(absUrl);
+  const type = classify(absUrl);
   return type !== "other" && type !== "image";
 }
 
@@ -87,11 +87,16 @@ function isMediaUrl(absUrl: string): boolean {
  * 绝不附带任何凭证：只返回 URL 字符串；cookies/headers 一律留给下载时按目标 URL 现查
  * （延续 background 现状「检测时不挂凭证」，杜绝跨域凭证泄露）。
  *
- * @param root    JSON.parse 的结果（或 responseType==="json" 的 xhr.response）
- * @param baseUrl 该响应的绝对 URL（用于解析内嵌相对路径）
+ * @param root     JSON.parse 的结果（或 responseType==="json" 的 xhr.response）
+ * @param baseUrl  该响应的绝对 URL（用于解析内嵌相对路径）
+ * @param classify 类型判定；页面上下文传入用户实际生效的 classifier，缺省仅随包规则
  * @returns 去重后的绝对媒体 URL 列表
  */
-export function scanForMediaUrls(root: unknown, baseUrl: string): string[] {
+export function scanForMediaUrls(
+  root: unknown,
+  baseUrl: string,
+  classify: (url: string) => ResourceType = bundledClassify,
+): string[] {
   const found = new Set<string>();
   let nodes = 0;
 
@@ -110,7 +115,7 @@ export function scanForMediaUrls(root: unknown, baseUrl: string): string[] {
       if (!value.includes("/")) return;
       try {
         const abs = new URL(value, baseUrl).href;
-        if (isHttpUrl(abs) && isMediaUrl(abs)) found.add(abs);
+        if (isHttpUrl(abs) && isMediaUrl(abs, classify)) found.add(abs);
       } catch {
         /* 非 URL 字符串，忽略 */
       }

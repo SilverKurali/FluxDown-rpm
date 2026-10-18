@@ -83,6 +83,7 @@ import type {
   LinkPairBeginResponse,
   LinkPairFinishParams,
   LinkPairFinishResponse,
+  LinkRenameParams,
   LinkPairingCodeDto,
   RemoteCommandParams,
   RemoteDispatchParams,
@@ -201,6 +202,7 @@ const link = {
     call<LinkPairFinishResponse>(METHOD.AGENT_LINK_PAIR_FINISH, params, { timeoutMs: PAIR_FINISH_TIMEOUT_MS }),
   approve: (params: LinkApproveParams) => call<OkResult>(METHOD.AGENT_LINK_APPROVE, params),
   remove: (params: LinkDeviceParams) => call<OkResult>(METHOD.AGENT_LINK_REMOVE, params),
+  rename: (params: LinkRenameParams) => call<LinkDeviceInfo>(METHOD.AGENT_LINK_RENAME, params),
   refresh: () => call<LinkDeviceInfo[]>(METHOD.AGENT_LINK_REFRESH),
   dispatch: (params: LinkDispatchParams) =>
     call<LinkDispatchResult>(METHOD.AGENT_LINK_DISPATCH, params),

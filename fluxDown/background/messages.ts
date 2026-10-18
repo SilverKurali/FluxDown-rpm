@@ -40,10 +40,15 @@ import type {
   HostStatus,
   MessageAction,
   MessageMap,
+  ClassifiedLink,
   PageLink,
   SendChannel,
 } from "./protocol";
 import { getEngine, getRuleSyncStatus, syncRemotePacks } from "./rules-store";
+import { compileWithDraft, engineSettled } from "./rules-store";
+import { getRuleHits } from "./rule-hits";
+import { toListItem } from "./rule-view";
+import { BUILTIN_RULE_PREVIEW } from "@/utils/rule-preview";
 import { getCachedProfiles, getCachedSettings } from "./settings-cache";
 import {
   addManifest,
@@ -54,14 +59,19 @@ import {
   getHlsPlaylists,
   getElements,
   getResources,
+  getRetiredElements,
   getTabPageUrl,
   ingestResources,
   isCurrentPage,
-  registerFrame,
+  registerSession,
   setContextTarget,
+  setSessionHooks,
   syncTabPageUrl,
+  unseenEvidence,
   updateElements,
+  whenRestored,
 } from "./tab-state";
+import { scheduleProbeCheck } from "./probe";
 import { buildTabView } from "./tab-view";
 import { processTasksPollResult } from "./tasks";
 import { rowsForElement } from "./view-model";
@@ -159,9 +169,10 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
   async getPageConfig(req, sender) {
     const tabId = senderTabId(sender);
     const frameId = sender.frameId ?? 0;
-    const [settings, profiles] = await Promise.all([getCachedSettings(), getCachedProfiles()]);
+    // 会话登记要落在恢复后的状态上：SW 被本条消息唤醒时快照恢复尚未完成
+    const [settings, profiles] = await Promise.all([getCachedSettings(), getCachedProfiles(), whenRestored()]);
     if (tabId !== undefined) {
-      registerFrame(tabId, frameId);
+      if (typeof req.sid === "string" && req.sid) registerSession(tabId, frameId, req.sid);
       if (frameId === 0) syncTabPageUrl(tabId, req.pageUrl, "document");
     }
     const topUrl = (tabId !== undefined && getTabPageUrl(tabId)) || sender.tab?.url || req.pageUrl;
@@ -191,6 +202,7 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
       frameIsTop: frameId === 0,
       interceptMagnet: settings.enabled && settings.interceptMagnet && profile.intercept !== "never",
       sniffImages: settings.sniffImages,
+      classify: engine.classifyRules(),
     };
     return config;
   },
@@ -293,8 +305,31 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
 
   async mediaElementState(req, sender) {
     const tabId = senderTabId(sender);
+    if (tabId === undefined || typeof req.sid !== "string" || !req.sid) return { ok: false };
+    const frameId = sender.frameId ?? 0;
+    await whenRestored();
+    const resync = updateElements(tabId, frameId, req.sid, req.elements, req.removed, req.full === true);
+    // 资源表缺少播放器实际追加过的地址（扩展更新清空了会话存储、播放器已不再请求）：按证据补报
+    const missing = unseenEvidence(tabId, req.elements);
+    if (missing.length > 0) {
+      const pageUrl = getTabPageUrl(tabId) || sender.tab?.url || "";
+      if (await sniffEnabled(tabId, pageUrl)) ingestResources(tabId, pageUrl, missing, { frameId });
+    }
+    return resync ? { ok: true, resync } : { ok: true };
+  },
+
+  async sensorStatus(req, sender) {
+    const tabId = senderTabId(sender);
+    if (tabId === undefined || typeof req.sid !== "string" || !req.sid) return { ok: false };
+    await whenRestored();
+    setSessionHooks(tabId, sender.frameId ?? 0, req.sid, req.hooks ?? null);
+    return { ok: true };
+  },
+
+  async reloadTab(req, sender) {
+    const tabId = await resolveTabId(sender, req.tabId);
     if (tabId === undefined) return { ok: false };
-    updateElements(tabId, sender.frameId ?? 0, req.elements, req.removed);
+    await browser.tabs.reload(tabId);
     return { ok: true };
   },
 
@@ -313,7 +348,9 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
 
   async getTabView(req, sender) {
     const tabId = await resolveTabId(sender, req.tabId);
-    return tabId === undefined ? null : buildTabView(tabId);
+    if (tabId === undefined) return null;
+    scheduleProbeCheck(tabId, 0);
+    return buildTabView(tabId);
   },
 
   async downloadCandidate(req, sender) {
@@ -347,11 +384,12 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
     const frames = new Set([0, ...framesOf(req.tabId)]);
     const results = await Promise.all([...frames].map((frameId) => collectFrameLinks(req.tabId, frameId)));
     const seen = new Set<string>();
-    const links: PageLink[] = [];
+    const engine = getEngine();
+    const links: ClassifiedLink[] = [];
     for (const link of results.flat()) {
       if (seen.has(link.url)) continue;
       seen.add(link.url);
-      links.push(link);
+      links.push({ ...link, type: engine.classify(link.url) });
       if (links.length >= MAX_LINKS) break;
     }
     return { links };
@@ -369,12 +407,25 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
   },
 
   async rulesTest(req) {
-    const engine = getEngine();
+    const { draft, ...input } = req;
+    const engine = draft ? await compileWithDraft(draft) : getEngine();
+    const response = engine.classifyResponse(input);
+    const allowed = await sniffEnabled(-1, input.pageUrl);
+    const ignored = response.decision === "ignore";
+    // 与 sniff.ts onSniffResponse 的收录条件一致：未被忽略，且命中资源规则或带 attachment。
+    const wouldIngest = allowed && !ignored && (response.decision === "resource" || input.attachment);
+    const own = draft ? engine.listRules().find((e) => e.rule.id === draft.id) : undefined;
     return {
-      response: engine.classifyResponse(req),
-      track: engine.trackKind({ url: req.url, mime: req.mime, pageUrl: req.pageUrl }),
-      dedupeKey: engine.dedupeKey(req.url, req.pageUrl),
-      fileExtension: engine.fileExtension(req.url, req.pageUrl),
+      response,
+      track: engine.trackKind({ url: input.url, mime: input.mime, pageUrl: input.pageUrl }),
+      dedupeKey: engine.dedupeKey(input.url, input.pageUrl),
+      fileExtension: engine.fileExtension(input.url, input.pageUrl),
+      matches: engine.explainResponse(input),
+      sniffAllowed: allowed,
+      wouldIngest,
+      finalType: !wouldIngest ? null : response.decision === "resource" ? response.type : engine.classify(input.url, input.mime),
+      ignoredBy: response.decision === "ignore" ? response.rule : null,
+      ...(own ? { draft: { status: own.status, detail: own.detail, code: own.code, param: own.param } } : {}),
     };
   },
 
@@ -397,7 +448,24 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
   },
 
   async rulesList() {
-    return getEngine().listRules();
+    await engineSettled();
+    const hits = await getRuleHits();
+    return getEngine()
+      .listRules()
+      .map((entry) => toListItem(entry, hits.get(entry.rule.id), entry.rule.tier === "builtin" && !BUILTIN_RULE_PREVIEW));
+  },
+
+  async ruleGet(req) {
+    await engineSettled();
+    const entry = getEngine()
+      .listRules()
+      .find((e) => e.rule.id === req.id);
+    if (!entry || (entry.rule.tier === "builtin" && !BUILTIN_RULE_PREVIEW)) return null;
+    return entry.rule;
+  },
+
+  async rulesSyncStatus() {
+    return getRuleSyncStatus();
   },
 
   async getDebugLog(req) {
@@ -429,7 +497,7 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
       manifests,
       hlsPlaylists: getHlsPlaylists(tabId),
       candidates,
-      elements: getElements(tabId),
+      elements: [...getElements(tabId), ...getRetiredElements(tabId)],
       bindings: new Map(
         rows.map((row) => [
           row.candidate.id,

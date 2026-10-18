@@ -280,7 +280,13 @@ extension LinkDeviceDto {
             platform: platform,
             online: online,
             defaultSaveDir: defaultSaveDir,
-            pathStyle: pathStyle.map(PathStyle.init(wire:))
+            pathStyle: pathStyle.map(PathStyle.init(wire:)),
+            customName: customName,
+            appVersion: appVersion,
+            cloudDeviceId: cloudDeviceId,
+            revoked: revoked,
+            pairedAt: pairedAt,
+            lastSeenAt: lastSeenAt
         )
     }
 }

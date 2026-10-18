@@ -1342,15 +1342,16 @@ jobs:
           name: server-bin-${{ matrix.platform }}
           path: release-assets/*
 
-  # ── 并行 Job 5c': NAS/软路由包（OpenWrt ipk + QNAP qpkg + 群晖 spk，复用 linux musl 静态产物）──
+  # ── 并行 Job 5c': NAS/软路由包（OpenWrt ipk + QNAP qpkg + 群晖 spk + 飞牛 fpk，复用 linux musl 静态产物）──
   # ipk 纯脚本手打（packaging/openwrt/build_ipk.sh，无需 OpenWrt SDK）；
   # qpkg 用官方 QDK qbuild（packaging/qnap/build_qpkg.sh）。
   # 不跑 InstallToUbuntu.sh（其 apt 依赖列表含 ubuntu 24.04 已不存在的 `python` 包），手动装 QDK。
   # spk 纯脚本手打（packaging/synology/build_spk.sh，做法同 SynoCommunity spksrc，无需群晖 toolkit）；
   # DSM 6 / DSM 7 × x86_64 / armv8 共 4 包（DSM 7 强制套件用户运行，DSM 6 root）。
+  # fpk 由 packaging/fnos/build_fpk.sh 拼装后交官方 fnpack（钉版本 + sha256）打包，x86 / arm 各 1 包。
   # 产物名带 server-bin- 前缀 → upload-server 的 download pattern 自动收集附到统一 release。
   build-server-nas-packages:
-    name: Build Server (OpenWrt/QNAP/Synology packages)
+    name: Build Server (OpenWrt/QNAP/Synology/fnOS packages)
     needs: [changes, build-server-binaries]
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
@@ -1424,6 +1425,26 @@ jobs:
             ./packaging/synology/build_spk.sh "$VERSION" "$dsm" armv8 "$A64" \
               "release-assets/FluxDown-Server-${VERSION}-synology-${dsm}-arm64.spk"
           done
+
+      - name: Install fnpack
+        env:
+          FNPACK_VERSION: 1.2.3
+          FNPACK_SHA256: 54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93
+        run: |
+          curl -fsSL --retry 3 -o /tmp/fnpack \
+            "https://static2.fnnas.com/fnpack/fnpack-${FNPACK_VERSION}-linux-amd64"
+          echo "${FNPACK_SHA256}  /tmp/fnpack" | sha256sum -c -
+          sudo install -m 755 /tmp/fnpack /usr/local/bin/fnpack
+
+      - name: Build fnOS fpk
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          X64="extracted/fluxdown-server-${VERSION}-linux-x64"
+          A64="extracted/fluxdown-server-${VERSION}-linux-arm64"
+          ./packaging/fnos/build_fpk.sh "$VERSION" x86 "$X64" \
+            "release-assets/FluxDown-Server-${VERSION}-fnos-x64.fpk"
+          ./packaging/fnos/build_fpk.sh "$VERSION" arm "$A64" \
+            "release-assets/FluxDown-Server-${VERSION}-fnos-arm64.fpk"
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@v4

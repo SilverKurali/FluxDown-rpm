@@ -549,6 +549,18 @@ pub struct LinkDeviceDto {
     pub default_save_dir: Option<String>,
     /// 见 [`path_style_wire`]。
     pub path_style: Option<String>,
+    /// 本机备注名（`agent.link.rename`）；`name` 已是生效名。
+    pub custom_name: Option<String>,
+    /// 对端自报的客户端版本。
+    pub app_version: Option<String>,
+    /// 对端自报的云设备 id：本机云名册里存在同 id 时合并为同一台设备展示。
+    pub cloud_device_id: Option<String>,
+    /// 对端已解除与本机的配对：不可下发，只能删除或重新配对。
+    pub revoked: bool,
+    /// 配对时间（Unix 秒）。
+    pub paired_at: i64,
+    /// 最近一次确认在线的时间（Unix 秒，0 = 未知）。
+    pub last_seen_at: i64,
 }
 
 impl From<&proto::LinkDeviceInfo> for LinkDeviceDto {
@@ -560,6 +572,12 @@ impl From<&proto::LinkDeviceInfo> for LinkDeviceDto {
             online: device.online,
             default_save_dir: device.default_save_dir.clone(),
             path_style: path_style_wire(device.path_style),
+            custom_name: device.custom_name.clone(),
+            app_version: device.app_version.clone(),
+            cloud_device_id: device.cloud_device_id.clone(),
+            revoked: device.revoked,
+            paired_at: device.paired_at,
+            last_seen_at: device.last_seen_at,
         }
     }
 }

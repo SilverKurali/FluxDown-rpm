@@ -1,13 +1,16 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import type { RuleDocSummary, RuleSyncStatus } from "@/background/protocol";
+import { Badge } from "@/ui/components/Badge";
 import { Button } from "@/ui/components/Button";
 import { Icon } from "@/ui/components/Icon";
 import { showToast } from "@/ui/components/Toast";
 import { Toggle } from "@/ui/components/Toggle";
 import { useT } from "@/ui/i18n";
+import { docExpiry } from "@/utils/doc-expiry";
 import { sendAction } from "@/utils/messaging";
 import { settings, updateSettings } from "../../lib/store";
+import { syncOutcomeLabels, syncProblemLabel } from "./sync-labels";
 
 interface SyncCardProps {
   sync: RuleSyncStatus | null;
@@ -31,9 +34,10 @@ export function SyncCard(props: SyncCardProps): JSX.Element | null {
   const syncNow = async () => {
     setSyncing(true);
     try {
-      const status = await sendAction<"rulesSyncNow">({ action: "rulesSyncNow" });
+      const { outcome, status } = await sendAction<"rulesSyncNow">({ action: "rulesSyncNow" });
       props.onSynced(status);
-      showToast(status.lastError ? t("rules.sync.failed") : t("rules.sync.done"), status.lastError ? "error" : "success");
+      const [msg, kind] = syncOutcomeLabels()[outcome];
+      showToast(msg, kind);
     } catch (e) {
       console.error("[FluxDown Options] rulesSyncNow failed:", e);
       showToast(t("rules.sync.failed"), "error");
@@ -42,19 +46,24 @@ export function SyncCard(props: SyncCardProps): JSX.Element | null {
     }
   };
 
-  const docs: [string, RuleDocSummary | null | undefined][] = [
-    [t("rules.sync.official"), sync?.official],
-    [t("rules.sync.community"), sync?.community],
-    [t("rules.sync.plugin"), sync?.plugin],
+  const docs: [string, RuleDocSummary | null | undefined, boolean][] = [
+    [t("rules.sync.official"), sync?.official, false],
+    [t("rules.sync.community"), sync?.community, true],
+    [t("rules.sync.plugin"), sync?.plugin, false],
+    [t("rules.sync.revocations"), sync?.revocations, true],
   ];
-  const lastError = sync?.lastError ?? sync?.host?.lastError ?? null;
-  const hostFetch = sync?.host?.lastFetchUnix;
+  const now = Date.now();
+  const problems = sync?.problems ?? [];
+  const host = sync?.host ?? null;
+  const hostFetch = host?.lastFetchUnix;
+  const outcome = sync?.lastOutcome ?? null;
+  const outcomeText = outcome ? syncOutcomeLabels()[outcome][0] : t("rules.sync.never");
 
   return (
     <div class="opt-card">
       <div class="opt-card-head">
         <h2 class="opt-card-title">{t("rules.sync.title")}</h2>
-        <Button variant="primary" size="sm" disabled={syncing} onClick={() => void syncNow()}>
+        <Button variant="primary" size="sm" disabled={syncing || !s.ruleSyncEnabled} onClick={() => void syncNow()}>
           <Icon name="refresh" size={13} />
           {syncing ? t("rules.sync.syncing") : t("rules.sync.now")}
         </Button>
@@ -64,35 +73,79 @@ export function SyncCard(props: SyncCardProps): JSX.Element | null {
         <thead>
           <tr>
             <th>{t("rules.sync.colPack")}</th>
-            <th>{t("rules.sync.colSequence")}</th>
+            <th>{t("rules.sync.colCount")}</th>
             <th>{t("rules.sync.colIssued")}</th>
             <th>{t("rules.sync.colExpires")}</th>
+            <th>{t("rules.sync.colSequence")}</th>
           </tr>
         </thead>
         <tbody>
-          {docs.map(([label, doc]) => (
-            <tr key={label}>
-              <td>{label}</td>
-              <td class="opt-cell-mono">{doc ? doc.sequence : "—"}</td>
-              <td>{doc ? formatIso(doc.issuedAt) : t("rules.sync.none")}</td>
-              <td>{doc ? formatIso(doc.expiresAt) : "—"}</td>
-            </tr>
-          ))}
+          {docs.map(([label, doc, pausesCommunity]) => {
+            const expiry = docExpiry(doc?.expiresAt, now);
+            return (
+              <tr key={label}>
+                <td>{label}</td>
+                <td class="opt-cell-mono">{doc ? doc.count : "—"}</td>
+                <td>{doc ? formatIso(doc.issuedAt) : t("rules.sync.none")}</td>
+                <td>
+                  {doc ? formatIso(doc.expiresAt) : "—"}
+                  {expiry.state === "expired" ? (
+                    <Badge tone="danger" title={pausesCommunity ? t("rules.sync.expiryHint") : undefined}>
+                      {t("rules.sync.expired")}
+                    </Badge>
+                  ) : expiry.state === "soon" ? (
+                    <Badge tone="warning" title={pausesCommunity ? t("rules.sync.expiryHint") : undefined}>
+                      {t("rules.sync.expiresIn", { n: String(expiry.days) })}
+                    </Badge>
+                  ) : null}
+                </td>
+                <td class="opt-cell-mono">{doc ? doc.sequence : "—"}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
 
-      <dl class="opt-kv">
-        <dt>{t("rules.sync.lastSync")}</dt>
-        <dd>{sync?.lastSyncAt ? new Date(sync.lastSyncAt).toLocaleString() : t("rules.sync.never")}</dd>
-        {hostFetch ? (
-          <>
-            <dt>{t("rules.sync.hostFetch")}</dt>
-            <dd>{new Date(hostFetch * 1000).toLocaleString()}</dd>
-          </>
-        ) : null}
-        <dt>{t("rules.sync.lastError")}</dt>
-        <dd class={lastError ? "opt-error-text" : ""}>{lastError ?? t("rules.sync.noError")}</dd>
-      </dl>
+      <div role="status" aria-live="polite">
+        <dl class="opt-kv">
+          <dt>{t("rules.sync.lastSync")}</dt>
+          <dd>{sync?.lastSyncAt ? new Date(sync.lastSyncAt).toLocaleString() : t("rules.sync.never")}</dd>
+          <dt>{t("rules.sync.lastResult")}</dt>
+          <dd>
+            {outcomeText}
+            {sync?.lastAttemptAt ? ` · ${new Date(sync.lastAttemptAt).toLocaleString()}` : ""}
+          </dd>
+          {hostFetch ? (
+            <>
+              <dt>{t("rules.sync.hostFetch")}</dt>
+              <dd>
+                {new Date(hostFetch * 1000).toLocaleString()}
+                {host?.refreshing ? ` · ${t("rules.sync.hostRefreshing")}` : ""}
+              </dd>
+            </>
+          ) : null}
+          <dt>{t("rules.sync.lastError")}</dt>
+          <dd class={problems.length > 0 ? "opt-error-text" : ""}>
+            {problems.length > 0
+              ? problems.map((problem) => (
+                  <div key={`${problem.code}:${problem.tier ?? ""}`}>{syncProblemLabel(problem)}</div>
+                ))
+              : t("rules.sync.noError")}
+          </dd>
+          {host?.lastError ? (
+            <>
+              <dt>{t("rules.sync.hostError")}</dt>
+              <dd>{host.lastError}</dd>
+            </>
+          ) : null}
+          {sync?.compileError ? (
+            <>
+              <dt>{t("rules.sync.compileError")}</dt>
+              <dd class="opt-error-text">{sync.compileError}</dd>
+            </>
+          ) : null}
+        </dl>
+      </div>
 
       <div class="opt-card-toggles">
         <label class="opt-inline-toggle">

@@ -6,6 +6,7 @@ import {
   deriveDetailTabs,
   derivePaletteCommands,
   deriveTaskCommands,
+  hasPluginSettings,
   isPluginEntryActive,
   parsePluginRouteId,
   pluginRouteId,
@@ -104,5 +105,14 @@ describe('plugin contributions', () => {
     expect(deriveActivityEntries([desktopOnly])).toEqual([])
     expect(deriveDetailTabs([desktopOnly])).toEqual([])
     expect(settingsViewOf(desktopOnly)).toBeUndefined()
+  })
+
+  test('settings button: fields or a usable settings view', () => {
+    const field = { key: 'k' } as unknown as PluginDto['settings'][number]
+    expect(hasPluginSettings(good)).toBe(true) // 仅视图
+    expect(hasPluginSettings(plugin({ identity: 'n@x' }))).toBe(false)
+    expect(hasPluginSettings(plugin({ identity: 'f@x', settings: [field] }))).toBe(true)
+    expect(hasPluginSettings(disabled)).toBe(false) // 视图不可运行且无字段
+    expect(hasPluginSettings(plugin({ ...disabled, settings: [field] }))).toBe(true)
   })
 })

@@ -85,6 +85,8 @@ pub enum ProgressWindowEvent {
     HandedOff,
     /// 用户切换全局「完成后显示完成窗口」设置。
     ShowCompletionChanged(bool),
+    /// 用户点「打开主界面」：宿主关闭本窗口并显示主窗口。
+    OpenMainWindow,
 }
 
 pub struct ProgressWindowView {
@@ -989,6 +991,7 @@ impl ProgressWindowView {
                     cx,
                 )),
             )
+            .child(self.render_open_main_button(cx))
             .child(self.render_delete_button(cx))
             .child(
                 Button::new("progress-stop")
@@ -1013,6 +1016,16 @@ impl ProgressWindowView {
                     })
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))),
             )
+            .into_any_element()
+    }
+
+    fn render_open_main_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("progress-open-main")
+            .outline()
+            .control_icon(cx)
+            .icon(FluxIcon::AppWindow)
+            .tooltip(self.t(cx, "progressWindowOpenMain"))
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(ProgressWindowEvent::OpenMainWindow)))
             .into_any_element()
     }
 
@@ -1127,6 +1140,7 @@ impl ProgressWindowView {
         Self::footer(cx)
             .justify_end()
             .child(div().flex_1().child(self.render_delete_button(cx)))
+            .child(self.render_open_main_button(cx))
             .child(
                 Button::new("progress-open-folder")
                     .outline()

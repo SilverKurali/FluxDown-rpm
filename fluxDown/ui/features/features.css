@@ -135,6 +135,21 @@
 .fd-handoff-desc { font-size: 12px; color: var(--fd-text-secondary); }
 .fd-handoff-progress { margin-top: 6px; }
 
+/* ===== 页面探测状态 ===== */
+.fd-probe {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--fd-radius);
+  background: var(--fd-hover);
+  color: var(--fd-text-secondary);
+  font-size: 12px;
+}
+.fd-probe-degraded,
+.fd-probe-unavailable { background: var(--fd-warning-muted); color: var(--fd-warning); }
+.fd-probe-text { flex: 1; min-width: 0; }
+
 /* ===== SiteCard ===== */
 .fd-site-card { padding: 10px 12px; border: 1px solid var(--fd-border); border-radius: var(--fd-radius); background: var(--fd-surface); }
 .fd-site-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }

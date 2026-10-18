@@ -1,8 +1,8 @@
 /** 链接抓取：按扩展名分组勾选、自定义扩展名、文本过滤，发送所选到 FluxDown（downloadUrls）。 */
 import type { JSX } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
-import type { PageLink } from "@/background/protocol";
-import { compileBundled } from "@/rules/engine";
+import type { ClassifiedLink } from "@/background/protocol";
+import type { ResourceType } from "@/utils/resource-types";
 import { extractExtension } from "@/rules/url";
 import { sendAction } from "@/utils/messaging";
 import { Button } from "@/ui/components/Button";
@@ -16,10 +16,7 @@ type Group = "video" | "audio" | "archive" | "document" | "image" | "executable"
 const GROUPS: Group[] = ["video", "audio", "archive", "document", "image", "executable", "other"];
 const MAX_PER_BATCH = 1000;
 
-const engine = compileBundled({ sniffImages: true });
-
-function groupOf(url: string): Group {
-  const type = engine.classify(url);
+function groupOf(type: ResourceType): Group {
   if (type === "stream") return "video";
   if (type === "video" || type === "audio" || type === "archive" || type === "document" || type === "image" || type === "executable") {
     return type;
@@ -29,7 +26,7 @@ function groupOf(url: string): Group {
 
 export function LinkGrabber(props: { tabId: number; pageUrl: string }): JSX.Element {
   const t = useT();
-  const [links, setLinks] = useState<PageLink[] | null>(null);
+  const [links, setLinks] = useState<ClassifiedLink[] | null>(null);
   const [groups, setGroups] = useState<Set<Group>>(new Set(["video", "audio", "archive", "document"]));
   const [customExts, setCustomExts] = useState<string[]>([]);
   const [text, setText] = useState("");
@@ -59,7 +56,7 @@ export function LinkGrabber(props: { tabId: number; pageUrl: string }): JSX.Elem
       if (needle && !l.url.toLowerCase().includes(needle) && !l.text.toLowerCase().includes(needle)) return false;
       const ext = extractExtension(l.url, []);
       if (customExts.length > 0 && ext && customExts.includes(ext)) return true;
-      return groups.has(groupOf(l.url));
+      return groups.has(groupOf(l.type));
     });
   }, [links, groups, customExts, text]);
 

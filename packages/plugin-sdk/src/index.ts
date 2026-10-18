@@ -1,4 +1,4 @@
-// `@fluxdown/plugin-sdk`: types + manifest API. Importing this module brings the global
+// `fluxdown-plugin-sdk`: types + manifest API. Importing this module brings the global
 // `flux` / `console` declarations into scope.
 export * from "./manifest";
 export * from "./runtime";

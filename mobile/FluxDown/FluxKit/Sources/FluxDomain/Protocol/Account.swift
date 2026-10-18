@@ -595,6 +595,8 @@ public enum AccountRules {
         case "pairingVersionMismatch": "errReasonPairingVersionMismatch"
         case "peerNotPaired": "errReasonPeerNotPaired"
         case "peerOffline": "errReasonPeerOffline"
+        case "peerOutdated": "errReasonPeerOutdated"
+        case "linkUnavailable": "errReasonLinkUnavailable"
         case "targetDeviceOffline": "errReasonTargetDeviceOffline"
         case "taskStateConflict": "errReasonTaskStateConflict"
         case "taskDeviceMismatch": "errReasonTaskDeviceMismatch"

@@ -12,7 +12,7 @@ import { copyText } from '../../../../lib/copy'
 import { RpcError, rpc } from '../../../../lib/rpc'
 import type { PluginDto, SettingFieldDto } from '../../../../lib/rpc'
 import { Button, Dialog, DialogFooter, FieldError, FormField, Icon, Input, OptionGroup, OptionRow, SegmentedTabs, Select, Switch, Textarea, toast } from '../../../../ui'
-import { pluginUsable, settingsViewOf } from '../../../plugins/contributions'
+import { activeSettingsViewOf } from '../../../plugins/contributions'
 import { PluginViewHost } from '../../../plugins/view/PluginViewHost'
 import { extensionErrorText } from './errors'
 import { initialFieldValue, rangeHint, validateField } from './logic'
@@ -135,7 +135,7 @@ function SettingsBody({ plugin, onClose }: { plugin: PluginDto; onClose: () => v
   const [serverError, setServerError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   // 插件的设置视图（可移植实现）：有则以分段标签与「基础设置」表单并列。
-  const settingsView = pluginUsable(plugin) ? settingsViewOf(plugin) : undefined
+  const settingsView = activeSettingsViewOf(plugin)
   const hasBasic = plugin.settings.length > 0
   const [tab, setTab] = useState<'view' | 'basic'>(settingsView ? 'view' : 'basic')
   const activeTab = settingsView && hasBasic ? tab : settingsView ? 'view' : 'basic'

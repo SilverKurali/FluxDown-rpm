@@ -5470,6 +5470,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     task_id: task_id.clone(),
                     downloaded_bytes: final_total,
                     download_baseline: None,
+                    transfer_bytes: None,
                     total_bytes: final_total,
                     status: STATUS_COMPLETED,
                     error_message: String::new(),

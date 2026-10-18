@@ -42,6 +42,28 @@ describe("formToRule / ruleToForm", () => {
     expect(ruleToForm(result.rule)).toEqual(form);
   });
 
+  test("priority / exclude 往返一致", () => {
+    const form = { ...emptyForm(), host: ["example.com"], priority: "-3", excludeHost: ["ads.example.com"], excludeUrl: ["*/ad/*"] };
+    const result = formToRule(form, { id: "local.t-1", version: 1 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rule.priority).toBe(-3);
+    expect(result.rule.exclude).toEqual([{ host: ["ads.example.com"] }, { url: ["*/ad/*"] }]);
+    expect(ruleToForm(result.rule)).toEqual(form);
+  });
+
+  test("priority 非整数时拒绝", () => {
+    const form = { ...emptyForm(), host: ["example.com"], priority: "1.5" };
+    expect(formToRule(form, { id: "local.t-1", version: 1 })).toEqual({ ok: false, errorKey: "rules.form.errPriority" });
+  });
+
+  test("多键 exclude 条目只能走 JSON", () => {
+    const form = { ...emptyForm(), host: ["example.com"] };
+    const result = formToRule(form, { id: "local.t-1", version: 1 });
+    if (!result.ok) throw new Error("form should be valid");
+    expect(ruleToForm({ ...result.rule, exclude: [{ host: ["a.com"], ext: ["js"] }] })).toBeNull();
+  });
+
   test("没有任何匹配条件时拒绝", () => {
     const result = formToRule(emptyForm(), { id: "local.x-1", version: 1 });
     expect(result).toEqual({ ok: false, errorKey: "rules.form.errNoMatch" });

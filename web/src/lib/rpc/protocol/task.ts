@@ -282,3 +282,22 @@ export interface DownloadRequest {
   body?: RequestBody | null;
   audioUrl?: string | null;
 }
+
+/** `daemon.task.speedHistory` 参数。 */
+export interface TaskSpeedHistoryQuery {
+  taskId: string;
+}
+
+/** 任务全生命周期速度曲线与统计；结果为 null = 无记录。平均速度 = transferredBytes / activeSecs。 */
+export interface TaskSpeedHistoryDto {
+  taskId: string;
+  /** 每点覆盖秒数（1、2、4…，服务端点数封顶后相邻合并、宽度翻倍）。 */
+  bucketSecs: number;
+  /** 每点平均 bytes/s，最旧在前；末点可能是尚在累计的不完整桶。 */
+  samples: number[];
+  /** 处于下载态的总秒数（暂停 / 排队 / 做种不计）。 */
+  activeSecs: number;
+  transferredBytes: number;
+  /** 逐秒峰值速度。 */
+  peakBps: number;
+}

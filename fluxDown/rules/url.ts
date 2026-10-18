@@ -1,9 +1,55 @@
 /** 规则引擎使用的 URL 小工具（纯函数）。 */
 
-/** 小写 hostname；无法解析返回空串。 */
+/** 规范化 hostname：小写并去掉 FQDN 末尾的点（`example.com.` 与 `example.com` 等价）。 */
+function normalizeHost(hostname: string): string {
+  const h = hostname.toLowerCase();
+  return h.endsWith(".") ? h.slice(0, -1) : h;
+}
+
+/** 扩展名合法形态：1–10 位小写字母 / 数字。 */
+const EXT_RE = /^[a-z0-9]{1,10}$/;
+
+/**
+ * pathname 末段的扩展名（小写、不带点）：先去掉 `;jsessionid=…` 之类的路径参数，
+ * 点号不能在段首 / 段尾，结果必须是 1–10 位字母数字，否则视为无扩展名。
+ */
+function extensionOfPath(pathname: string): string {
+  let seg = pathname.slice(pathname.lastIndexOf("/") + 1);
+  const semi = seg.indexOf(";");
+  if (semi >= 0) seg = seg.slice(0, semi);
+  const dot = seg.lastIndexOf(".");
+  if (dot <= 0 || dot >= seg.length - 1) return "";
+  const ext = seg.slice(dot + 1).toLowerCase();
+  return EXT_RE.test(ext) ? ext : "";
+}
+
+/** 无法解析为 URL 时的兜底：直接在文本里找 `.ext` 后跟 `?` `#` `;` 或结尾。 */
+const RAW_EXT_RE = /\.([a-zA-Z0-9]{1,10})(?:[?#;]|$)/;
+
+export interface UrlParts {
+  /** 小写 hostname，无末尾点；无法解析为空串 */
+  host: string;
+  /** pathname（未解码）；无法解析为空串 */
+  path: string;
+  /** path 扩展名（小写、不带点） */
+  ext: string;
+}
+
+/** 一次 `new URL` 取出 host / path / ext（热路径用，避免各自重复解析）。 */
+export function parseUrlParts(url: string): UrlParts {
+  try {
+    const u = new URL(url);
+    return { host: normalizeHost(u.hostname), path: u.pathname, ext: extensionOfPath(u.pathname) };
+  } catch {
+    const m = url.match(RAW_EXT_RE);
+    return { host: "", path: "", ext: m ? m[1].toLowerCase() : "" };
+  }
+}
+
+/** 小写 hostname（去末尾点）；无法解析返回空串。 */
 export function hostOf(url: string): string {
   try {
-    return new URL(url).hostname.toLowerCase();
+    return normalizeHost(new URL(url).hostname);
   } catch {
     return "";
   }
@@ -16,20 +62,6 @@ export function pathOf(url: string): string {
   } catch {
     return "";
   }
-}
-
-function pathExtension(url: string): string {
-  try {
-    const lastSegment = new URL(url).pathname.split("/").pop() || "";
-    const dot = lastSegment.lastIndexOf(".");
-    if (dot > 0 && dot < lastSegment.length - 1) {
-      return lastSegment.substring(dot + 1).toLowerCase();
-    }
-  } catch {
-    const m = url.match(/\.([a-zA-Z0-9]{1,10})(?:[?#]|$)/);
-    if (m) return m[1].toLowerCase();
-  }
-  return "";
 }
 
 /**
@@ -46,7 +78,7 @@ export function extractExtension(
   queryKeys: readonly string[] = [],
   known?: ReadonlySet<string>,
 ): string {
-  const fromPath = pathExtension(url);
+  const fromPath = parseUrlParts(url).ext;
   if (fromPath || queryKeys.length === 0) return fromPath;
 
   let params: URLSearchParams;

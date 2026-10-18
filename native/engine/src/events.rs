@@ -85,6 +85,12 @@ pub enum EngineEvent {
         previous_downloaded_bytes: Option<i64>,
     },
 
+    /// 自上一帧以来从网络读到的 body 字节（下载器上报了
+    /// `ProgressUpdate::transfer_bytes` 时才有），紧排在对应进度帧之前。
+    /// 宿主据此统计流量，并忽略该任务进度帧的落盘增量，直到任务离开活动态。
+    /// Host-local accounting only: this is not a wire event.
+    TaskTransferred { task_id: String, bytes: i64 },
+
     /// 分段级进度，用于下载可视化（IDM 风格）。
     SegmentProgress {
         task_id: String,

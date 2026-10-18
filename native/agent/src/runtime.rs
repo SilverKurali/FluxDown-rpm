@@ -118,6 +118,10 @@ pub(crate) async fn run_with(
     )
     .await?;
     let bound = listener.local_addr()?;
+    // 本次运行的网关是否实际可被局域网访问：监听了非回环地址，或 server 模式（由
+    // `FLUXDOWN_BIND` 决定、通常在容器 / 反代后面）。与持久化的 `lan_enabled`（下次启动才
+    // 生效）区分开，界面据此决定是否展示配对码或提示「重启后生效」。
+    state.gateway.lan_active = server_config.is_some() || !bound.ip().is_loopback();
     let bearer_override = std::env::var_os("FLUXDOWN_AGENT_TOKEN_FILE").map(PathBuf::from);
     let bearer = load_or_create_bearer(store.data_dir(), bearer_override.as_deref()).await?;
     let endpoint_dir = server.is_none().then(|| match bearer_override.as_deref() {
@@ -218,6 +222,7 @@ pub(crate) async fn run_with(
         tasks: Arc::new(crate::link::DaemonTaskCreator::new(daemon.clone())),
         bound,
         server_mode: server.is_some(),
+        network: crate::link::LinkNetworkOptions::from_env(),
     });
     let link_task = tokio::spawn(link.clone().run(cancel.clone()));
     let analytics_task = tokio::spawn(

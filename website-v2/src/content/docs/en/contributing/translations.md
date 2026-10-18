@@ -2,7 +2,7 @@
 title: Translating FluxDown
 description: Help translate the app and the web UI by contributing on GitHub.
 section: contributing
-order: 2
+order: 4
 ---
 
 FluxDown translations are maintained in the public [zerx-lab/FluxDown](https://github.com/zerx-lab/FluxDown) repository. Community members contribute language updates through GitHub pull requests.

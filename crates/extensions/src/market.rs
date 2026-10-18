@@ -171,6 +171,7 @@ pub fn risk_of(permissions: &[String]) -> &'static str {
         "tasks",
         "browserRules",
         "background",
+        "intercept",
     ]
     .iter()
     .any(|name| has(name))

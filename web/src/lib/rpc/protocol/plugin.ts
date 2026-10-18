@@ -73,9 +73,13 @@ export interface PluginSiteDefaultDto {
   automatic: boolean;
 }
 
-/** plugin 层嗅探规则包；`pack` 为 null 表示从未有过插件规则（sequence 为 0）。 */
+/**
+ * plugin 层嗅探规则包；`pack` 为 null 表示从未有过插件规则（sequence 为 0）。
+ * `epoch` 是随序号持久化的实例标识，数据库重置后必变。
+ */
 export interface PluginSniffRulesDto {
   sequence: number;
+  epoch: string;
   pack: Record<string, unknown> | null;
 }
 

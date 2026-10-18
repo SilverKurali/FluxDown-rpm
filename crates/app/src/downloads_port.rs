@@ -259,6 +259,12 @@ impl AgentDownloadsPort {
                         .await?;
                     return Ok(DownloadsResult::TaskActivity(page));
                 }
+                DownloadsCommand::TaskSpeedHistory(query) => {
+                    let history = client
+                        .call(method::DAEMON_TASK_SPEED_HISTORY, Some(query))
+                        .await?;
+                    return Ok(DownloadsResult::TaskSpeedHistory(history));
+                }
                 DownloadsCommand::FileIcon(params) => {
                     let icon: fluxdown_protocol::PlatformFileIconDto = client
                         .call(method::AGENT_PLATFORM_FILE_ICON, Some(params))

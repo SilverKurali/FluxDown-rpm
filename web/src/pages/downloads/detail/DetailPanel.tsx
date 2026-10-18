@@ -24,7 +24,7 @@ function TaskDetail({ view }: { view: DownloadTaskView }) {
   const pluginTab = pluginTabs.find((item) => item.value === tab)
   // 插件 tab 随插件卸载 / 禁用消失时回到常规；seeding 仅 BT 任务有。
   const active: DetailTab = (tab === 'seeding' && !isBt) || (tab.startsWith('plugin:') && !pluginTab) ? 'general' : tab
-  const speedHistory = useSpeedHistory(view, active === 'speed')
+  const speedHistory = useSpeedHistory(view.taskId, view.state === 'downloading', active === 'speed')
   const items = [
     { value: 'general' as const, label: t('detailTabGeneral') },
     { value: 'speed' as const, label: t('detailTabSpeed') },

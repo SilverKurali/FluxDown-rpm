@@ -12,7 +12,7 @@ import {
 } from "@/utils/download-dispatch";
 import { nmhCall } from "@/utils/native-messaging";
 import type { CaptureState } from "./capture-logic";
-import type { HostCapabilities, ResolverInfo } from "./protocol";
+import type { HostCapabilities, HostSyncStatus, ResolverInfo } from "./protocol";
 
 const CAPABILITIES_TTL_MS = 60_000;
 /** 未连接时的结果只缓存很短时间，App 一启动就能被感知。 */
@@ -24,6 +24,8 @@ export interface SniffRulesHave {
   official?: number;
   community?: number;
   plugin?: number;
+  /** 持有的 plugin 包所属 epoch；与桌面端当前 epoch 不同则桌面端无视 `plugin` 序号。 */
+  pluginEpoch?: string;
   revocations?: number;
 }
 
@@ -32,7 +34,13 @@ export interface SniffRulesReply {
   community: RulePack | null;
   revocations: RevocationDoc | null;
   plugin: RulePack | null;
-  status: { lastFetchUnix: number | null; lastError: string | null };
+  /** 桌面端 plugin 层当前序号 / epoch；桌面端未答复 plugin 查询时为 null（此时不得改动 plugin 层）。 */
+  pluginSequence: number | null;
+  pluginEpoch: string | null;
+  /** 因应答体积上限本轮被推迟的文档（置 null）；处理完已收到的部分后再次查询。 */
+  deferred?: Array<"official" | "community" | "revocations" | "plugin">;
+  /** `pluginOnly` 请求时为 null。 */
+  status: HostSyncStatus | null;
 }
 
 interface CapabilitiesData {
@@ -40,6 +48,7 @@ interface CapabilitiesData {
   pluginsSupported?: boolean;
   resolvers?: ResolverInfo[];
   pluginRulesSequence?: number;
+  pluginRulesEpoch?: string | null;
 }
 
 const PROTOCOL_ONE_OFFLINE: HostCapabilities = {
@@ -81,6 +90,10 @@ async function probeCapabilities(): Promise<HostCapabilities> {
         typeof data.pluginRulesSequence === "number" && data.pluginRulesSequence > 0
           ? data.pluginRulesSequence
           : 0,
+      pluginRulesEpoch:
+        typeof data.pluginRulesEpoch === "string" && data.pluginRulesEpoch !== ""
+          ? data.pluginRulesEpoch
+          : null,
     };
     return caps;
   }
@@ -141,9 +154,26 @@ export async function captureStatus(ids: string[]): Promise<Record<string, Captu
   return out;
 }
 
+/** `force` 时桌面端最多等 15 s 刷新完成，请求超时必须更长。 */
+const FORCED_SNIFF_RULES_TIMEOUT_MS = 20_000;
+
+export interface SniffRulesOptions {
+  /** 用户手动同步：忽略桌面端退避并等它拉取完成再应答。 */
+  force?: boolean;
+  /** 只取 plugin 层（本机聚合，桌面端不会联网拉远程包）。 */
+  pluginOnly?: boolean;
+}
+
 /** 向桌面端拉取规则包增量；失败返回 null。 */
-export async function fetchSniffRules(have: SniffRulesHave): Promise<SniffRulesReply | null> {
-  const reply = await nmhCall<SniffRulesReply>("sniff_rules", { have });
+export async function fetchSniffRules(
+  have: SniffRulesHave,
+  options: SniffRulesOptions = {},
+): Promise<SniffRulesReply | null> {
+  const reply = await nmhCall<SniffRulesReply>(
+    "sniff_rules",
+    { have, force: options.force === true, pluginOnly: options.pluginOnly === true },
+    options.force ? FORCED_SNIFF_RULES_TIMEOUT_MS : undefined,
+  );
   if (!reply.success || !reply.data) return null;
   return reply.data;
 }

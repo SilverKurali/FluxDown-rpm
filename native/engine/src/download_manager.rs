@@ -26,7 +26,7 @@ use crate::downloader::{self, DownloadParams, ProgressUpdate, SegmentProgressInf
 use crate::events::{EngineEvent, EventSink};
 use crate::ftp_downloader;
 use crate::hls_downloader;
-use crate::logger::log_info;
+use crate::logger::{log_info, log_warn};
 use crate::model::{
     MAIN_QUEUE_ID, QueueInfo, QueuePosition, SegmentDetail, TaskInfo, is_always_running_queue,
     is_builtin_queue,
@@ -231,6 +231,10 @@ const CANCELLED_ERROR_MESSAGE: &str = "cancelled";
 /// [`DownloadManager::set_max_auto_retries`] 注入）：
 /// `-1` = 无限重试，`0` = 关闭自动重试，`1..=10` = 重试次数上限。
 const DEFAULT_MAX_TASK_AUTO_RETRIES: i32 = 3;
+
+/// failed 阶段插件重试的独立额度（每个手动周期），不占用 `max_auto_retries`。
+#[cfg(feature = "plugins")]
+const INTERCEPT_RETRY_LIMIT: u32 = 5;
 
 /// Auto 模式最大连接数上限的默认值（config `auto_max_connections`，经
 /// [`DownloadManager::set_auto_max_connections`] 注入）。
@@ -533,7 +537,7 @@ fn auto_failover_target(
 }
 
 /// Determine if a URL uses the FTP protocol (case-insensitive).
-fn is_ftp_url(url: &str) -> bool {
+pub(crate) fn is_ftp_url(url: &str) -> bool {
     url.get(..6)
         .map(|prefix| prefix.eq_ignore_ascii_case("ftp://"))
         .unwrap_or(false)
@@ -1997,6 +2001,8 @@ struct HttpFamilyRun {
     reserved_set: Arc<Mutex<HashSet<std::path::PathBuf>>>,
     done_tx: mpsc::Sender<TaskDone>,
     spawn_gen: u64,
+    /// resolver 下发的请求补丁；每次运行起跑前应用。
+    resolver_patch: Option<(String, crate::intercept::RequestPatch)>,
 }
 
 async fn send_task_done(done_tx: &mpsc::Sender<TaskDone>, done: TaskDone) -> bool {
@@ -2066,6 +2072,70 @@ async fn complete_skipped_task(params: &DownloadParams, size: i64) {
     }
 }
 
+/// 起跑前的请求改写：resolver 补丁（失败即任务失败）→ `prepare` 阶段 → 镜像字段回填。
+/// `first_run` 为真（有启动序幕、尚未定名）时允许改写文件名。
+async fn prepare_request(
+    params: &mut DownloadParams,
+    first_run: bool,
+    resolver_patch: Option<(String, crate::intercept::RequestPatch)>,
+) -> Result<(), String> {
+    use crate::intercept::{InterceptStage, drive, protocol_kind, wants};
+    let run_prepare = wants(params.interceptor.as_ref(), InterceptStage::Prepare);
+    if resolver_patch.is_some() || run_prepare {
+        let interceptor = Arc::clone(&params.interceptor);
+        let cancel = params.cancel_token.clone();
+        let run_meta = params.run_meta.clone();
+        let auto_max = params.auto_max_connections;
+        let kind = protocol_kind(&params.url, params.audio_url.is_some());
+        let has_audio_track = params.audio_url.is_some();
+        let task_ctx = crate::intercept::ctx::task_ctx(params, kind);
+        let notes = crate::intercept::ActivityNotes::of(params);
+        let is_resume = params.is_resume;
+        let mut target = crate::intercept::RequestTarget {
+            url: &mut params.url,
+            spec: &mut params.spec,
+            file_name: first_run.then_some(&mut params.file_name),
+            segment_count: Some(&mut params.segment_count),
+            connection_cap: Some(&mut params.connection_cap),
+            hint_file_size: Some(&mut params.hint_file_size),
+            range_verified: Some(&mut params.range_verified),
+            is_resume,
+            kind,
+            has_audio_track,
+        };
+        if let Some((identity, patch)) = &resolver_patch {
+            drive::apply_resolver_patch(&notes, identity, patch, &mut target).await?;
+        }
+        if run_prepare
+            && let Err(abort) = drive::run_prepare(
+                interceptor.as_ref(),
+                &notes,
+                &cancel,
+                &task_ctx,
+                &run_meta,
+                auto_max,
+                &mut target,
+            )
+            .await
+        {
+            return Err(abort.to_string());
+        }
+        params.sync_request_mirrors();
+        // 续传声明 ephemeral 却未给大小：沿用库中已知大小，避免以「大小未知」续传。
+        if params.is_resume && params.hint_file_size == -1 {
+            match params.db.load_task_by_id(&params.task_id).await {
+                Ok(Some(task)) if task.total_bytes > 0 => params.hint_file_size = task.total_bytes,
+                Ok(_) => {}
+                Err(e) => log_warn!(
+                    "[intercept] task {} ephemeral resume: failed to load known size: {e}",
+                    params.task_id
+                ),
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_http_family_task(run: HttpFamilyRun) {
     let HttpFamilyRun {
         params,
@@ -2073,15 +2143,30 @@ async fn run_http_family_task(run: HttpFamilyRun) {
         use_hls,
         use_dash,
         use_ed2k,
-        prelude,
+        mut prelude,
         reserved_set,
         done_tx,
         spawn_gen,
+        resolver_patch,
     } = run;
     let task_id = params.task_id.clone();
     let panic_db = params.db.clone();
     let panic_progress_tx = params.progress_tx.clone();
     let mut params = params;
+    if !use_ed2k
+        && let Err(message) = prepare_request(&mut params, prelude.is_some(), resolver_patch).await
+    {
+        persist_task_failure(&task_id, message, &panic_db, &panic_progress_tx).await;
+        send_task_done(&done_tx, TaskDone::finished(task_id, spawn_gen, None)).await;
+        return;
+    }
+    if let Some(ctx) = prelude.as_mut() {
+        ctx.support = ask_support(
+            &params.url,
+            params.audio_url.is_some(),
+            params.spec.method != reqwest::Method::GET || params.spec.body.is_some(),
+        );
+    }
     let prelude = match prelude {
         Some(ctx) => finalize_start_file_name(&mut params, &reserved_set, ctx).await,
         None => StartPrelude::Proceed(None),
@@ -2218,11 +2303,21 @@ async fn run_http_family_task(run: HttpFamilyRun) {
 struct TaskSpeedState {
     /// EMA-smoothed speed in bytes/sec.
     ema_speed: f64,
-    /// downloaded_bytes at the start of the current sampling window.
+    /// Speed counter at the start of the current sampling window (see
+    /// `speed_from_transfer`).
     sample_bytes: i64,
     /// Timestamp of the current sampling window start.
     sample_time: std::time::Instant,
-    /// Latest downloaded_bytes seen (for non-monotonic detection).
+    /// Latest speed counter seen (for non-monotonic detection).
+    latest_speed_bytes: i64,
+    /// 测速计数器是否为传输层接收字节（`ProgressUpdate::transfer_bytes`），否则为
+    /// 落盘字节。两种计数不可相减：来源切换时重设测量基线。
+    speed_from_transfer: bool,
+    /// 最近一次观测到的 `transfer_bytes`（同一次运行内单调）。
+    last_transfer_bytes: Option<i64>,
+    /// 已观测、尚未随转发帧交给宿主（`EngineEvent::TaskTransferred`）的接收字节。
+    unsent_transfer_bytes: i64,
+    /// Latest downloaded_bytes seen (transfer-baseline settlement).
     latest_bytes: i64,
     /// Resolved file_name (latched from the first non-empty update).
     file_name: String,
@@ -2777,6 +2872,10 @@ struct QueuedTask {
     /// 空 = 初段解析。始终存在（feature 关时恒空且不读取）。
     #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     resolver_item: String,
+    /// 任务持久化的原始 URL（插件拦截上下文的 `sourceUrl`；resolver 改写前）。
+    source_url: String,
+    /// resolver 下发的请求补丁（`(插件 ID, 补丁)`），每次运行起跑前应用。
+    resolver_patch: Option<(String, crate::intercept::RequestPatch)>,
 }
 
 impl QueuedTask {
@@ -2808,6 +2907,8 @@ impl QueuedTask {
             resolved: false,
             range_supported: false,
             resolver_item: String::new(),
+            source_url: String::new(),
+            resolver_patch: None,
         }
     }
 }
@@ -3055,8 +3156,12 @@ fn apply_resolve_to_queued(queued: &mut QueuedTask, res: crate::plugin::ResolveR
     {
         queued.file_name = name;
     }
-    if let Some(headers) = res.extra_headers {
-        queued.extra_headers = headers;
+    if res.extra_headers.is_some() || res.request.is_some() {
+        let patch = crate::intercept::RequestPatch {
+            replace_headers: res.extra_headers,
+            ..res.request.unwrap_or_default()
+        };
+        queued.resolver_patch = Some((queued.resolver_plugin_id.clone(), patch));
     }
     if res.audio_url.is_some() {
         queued.audio_url = res.audio_url;
@@ -3206,6 +3311,12 @@ pub struct DownloadManager {
     /// key = task_id，value = 已自动重试次数。
     /// 超过 `max_auto_retries` 后不再重试，保持 error 状态等用户手动恢复。
     auto_retry_counts: HashMap<String, u32>,
+    /// 拦截器 failed 阶段插件重试的独立额度账本（与 `auto_retry_counts` 互不影响）。
+    #[cfg(feature = "plugins")]
+    intercept_retry_counts: HashMap<String, u32>,
+    /// 由 failed 阶段发出、尚未被 `plugin_request_retry` 取走的重试标记。
+    #[cfg(feature = "plugins")]
+    intercept_retry_marks: Arc<std::sync::Mutex<HashSet<String>>>,
     /// 上次落库做种时长的时刻（单调时钟）。`account_seeding_tick` 据此判定兜底
     /// 落库是否到点，见 [`seed_times_persist_due`]。
     #[cfg(feature = "bt")]
@@ -3404,6 +3515,10 @@ impl DownloadManager {
             priority_task_id: None,
             auto_paused_ids: Vec::new(),
             auto_retry_counts: HashMap::new(),
+            #[cfg(feature = "plugins")]
+            intercept_retry_counts: HashMap::new(),
+            #[cfg(feature = "plugins")]
+            intercept_retry_marks: Arc::new(std::sync::Mutex::new(HashSet::new())),
             max_auto_retries: DEFAULT_MAX_TASK_AUTO_RETRIES,
             auto_retry_delay_secs: DEFAULT_AUTO_RETRY_BASE_DELAY_SECS,
             retry_tx,
@@ -4061,6 +4176,8 @@ impl DownloadManager {
                 resolved: false,
                 range_supported: false,
                 resolver_item,
+                source_url: task.url.clone(),
+                resolver_patch: None,
             };
             self.begin_resolve_start(new_queued).await;
             self.send_tasks_snapshot().await;
@@ -4182,6 +4299,8 @@ impl DownloadManager {
                 resolved: false,
                 range_supported: false,
                 resolver_item: mother_resolver_item,
+                source_url: task.url.clone(),
+                resolver_patch: None,
             };
             self.begin_resolve_start(mother_queued).await;
 
@@ -4214,6 +4333,8 @@ impl DownloadManager {
                     resolved: false,
                     range_supported: false,
                     resolver_item: sib.resolver_item,
+                    source_url: task.url.clone(),
+                    resolver_patch: None,
                 };
                 self.enqueue_persisted_task(sib_queued, true).await;
             }
@@ -4251,8 +4372,13 @@ impl DownloadManager {
     /// 插件 onError 命令式重试（actor 上下文，复用 auto_retry 账本限流）。
     #[cfg(feature = "plugins")]
     pub async fn plugin_request_retry(&mut self, task_id: &str, delay_ms: u64) {
+        let from_interceptor = self
+            .intercept_retry_marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(task_id);
         let max_retries = self.max_auto_retries;
-        if max_retries == 0 {
+        if !from_interceptor && max_retries == 0 {
             return;
         }
         // 引擎自动重试/备用链路已为这次失败排程：插件再排一次会双倍扣配额并重复恢复。
@@ -4275,15 +4401,27 @@ impl DownloadManager {
         let Some(queue_id) = task.filter(|t| t.status == 4).map(|t| t.queue_id) else {
             return;
         };
-        let count = self
-            .auto_retry_counts
-            .entry(task_id.to_string())
-            .or_insert(0);
-        if max_retries != -1 && (*count as i32) >= max_retries {
-            log_info!("[plugin] task {} 重试已达上限，忽略 requestRetry", task_id);
-            return;
+        if from_interceptor {
+            let count = self
+                .intercept_retry_counts
+                .entry(task_id.to_string())
+                .or_insert(0);
+            if *count >= INTERCEPT_RETRY_LIMIT {
+                log_info!("[plugin] task {} 拦截器重试已达上限，忽略", task_id);
+                return;
+            }
+            *count += 1;
+        } else {
+            let count = self
+                .auto_retry_counts
+                .entry(task_id.to_string())
+                .or_insert(0);
+            if max_retries != -1 && (*count as i32) >= max_retries {
+                log_info!("[plugin] task {} 重试已达上限，忽略 requestRetry", task_id);
+                return;
+            }
+            *count += 1;
         }
-        *count += 1;
         self.retry_schedule(task_id, queue_id);
         let tx = self.retry_tx.clone();
         let tid = task_id.to_string();
@@ -4431,7 +4569,7 @@ impl DownloadManager {
         pm.notify(crate::plugin::PluginEvent::Cancel {
             task_id: task_id.to_string(),
             url,
-            reason: Some(reason),
+            reason,
         })
         .await;
     }
@@ -6224,6 +6362,8 @@ impl DownloadManager {
                     owner_id
                 );
                 self.auto_retry_counts.remove(task_id);
+                #[cfg(feature = "plugins")]
+                self.intercept_retry_counts.remove(task_id);
                 self.retry_unschedule(task_id);
                 self.auto_failover_pending.remove(task_id);
                 self.auto_failover_attempts.remove(task_id);
@@ -6390,6 +6530,8 @@ impl DownloadManager {
                 self.retry_unschedule(task_id);
                 // 成功完成：结束本轮通用重试与一次性备用链路状态。
                 self.auto_retry_counts.remove(task_id);
+                #[cfg(feature = "plugins")]
+                self.intercept_retry_counts.remove(task_id);
                 self.auto_failover_pending.remove(task_id);
                 self.auto_failover_attempts.remove(task_id);
                 // 来源标记：插件 onDone 可能移动/改写文件，须在通知前打上。后台执行，
@@ -6454,6 +6596,55 @@ impl DownloadManager {
                         message: task.error_message.clone(),
                     })
                     .await;
+                    if !is_bt_url(&task.url) && !is_ed2k_url(&task.url) {
+                        let ic = self.task_interceptor(task_id, &task.url, &task.url).await;
+                        if crate::intercept::wants(
+                            ic.as_ref(),
+                            crate::intercept::InterceptStage::Failed,
+                        ) {
+                            let retry_tx = self.plugin_retry_tx.clone();
+                            let retry_marks = self.intercept_retry_marks.clone();
+                            let ctx = crate::intercept::ctx::task_ctx_from_row(
+                                &task,
+                                &task.url,
+                                crate::intercept::protocol_kind(&task.url, false),
+                            );
+                            let error_message = task.error_message.clone();
+                            let http_status = extract_http_status(&task.error_message);
+                            let retry_count =
+                                self.auto_retry_counts.get(task_id).copied().unwrap_or(0);
+                            let notes = crate::intercept::ActivityNotes::new(
+                                self.db.clone(),
+                                self.sink.clone(),
+                                task_id.to_string(),
+                            );
+                            let retry_task_id = task_id.to_string();
+                            pm.runtime_handle().spawn(async move {
+                                let delay = crate::intercept::drive::run_failed(
+                                    ic.as_ref(),
+                                    &notes,
+                                    &ctx,
+                                    error_message,
+                                    http_status,
+                                    retry_count,
+                                )
+                                .await;
+                                if let Some(delay) = delay {
+                                    retry_marks
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .insert(retry_task_id.clone());
+                                    if retry_tx.send((retry_task_id.clone(), delay)).is_err() {
+                                        retry_marks
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .remove(&retry_task_id);
+                                        tracing::debug!("plugin retry receiver closed");
+                                    }
+                                }
+                            });
+                        }
+                    }
                 }
             }
 
@@ -7943,6 +8134,18 @@ impl DownloadManager {
                     extra_headers,
                     body,
                 );
+                let (interceptor, task_ctx, run_meta) = self
+                    .meta_probe_extras(
+                        &task_id,
+                        &db_url,
+                        &file_name,
+                        &save_dir,
+                        &proxy_url,
+                        ignore_tls_errors,
+                        &user_agent,
+                        &queue_id,
+                    )
+                    .await;
                 self.spawn_meta_probe(
                     task_id,
                     db_url,
@@ -7950,6 +8153,9 @@ impl DownloadManager {
                     probe_spec,
                     probe_client,
                     probe_proxy,
+                    interceptor,
+                    task_ctx,
+                    run_meta,
                 );
             }
             return;
@@ -7957,7 +8163,7 @@ impl DownloadManager {
 
         let queued = QueuedTask {
             task_id,
-            url: db_url,
+            url: db_url.clone(),
             save_dir,
             file_name,
             segments,
@@ -7980,6 +8186,8 @@ impl DownloadManager {
             resolved: false,
             range_supported: false,
             resolver_item,
+            source_url: db_url,
+            resolver_patch: None,
         };
         self.enqueue_persisted_task(queued, has_resolver).await;
     }
@@ -8028,6 +8236,23 @@ impl DownloadManager {
                 );
                 (spec, client, proxy)
             });
+            let probe_extras = if probe_context.is_some() {
+                Some(
+                    self.meta_probe_extras(
+                        &queued.task_id,
+                        &queued.url,
+                        &queued.file_name,
+                        &queued.save_dir,
+                        &queued.proxy_url,
+                        queued.ignore_tls_errors,
+                        &queued.user_agent,
+                        &queued.queue_id,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            };
             // 新增只会使此队列变为占用，不必重扫全部待启动项。
             self.occupied_queues.insert(queued.queue_id.clone());
             self.pending_queue.push_back(queued);
@@ -8040,7 +8265,9 @@ impl DownloadManager {
             if !has_resolver && queued_hint != 0 {
                 self.fill_provisional_name(&probe_tid, &probe_url, &probe_name)
                     .await;
-            } else if let Some((probe_spec, probe_client, probe_proxy)) = probe_context {
+            } else if let Some((probe_spec, probe_client, probe_proxy)) = probe_context
+                && let Some((interceptor, task_ctx, run_meta)) = probe_extras
+            {
                 self.spawn_meta_probe(
                     probe_tid,
                     probe_url,
@@ -8048,6 +8275,9 @@ impl DownloadManager {
                     probe_spec,
                     probe_client,
                     probe_proxy,
+                    interceptor,
+                    task_ctx,
+                    run_meta,
                 );
             }
         }
@@ -8369,6 +8599,58 @@ impl DownloadManager {
         });
     }
 
+    /// 元数据探测的拦截输入：拦截器、任务信息、只读网络信息。
+    #[allow(clippy::too_many_arguments)]
+    async fn meta_probe_extras(
+        &self,
+        task_id: &str,
+        url: &str,
+        file_name: &str,
+        save_dir: &str,
+        proxy_url: &str,
+        ignore_tls_errors: bool,
+        user_agent: &str,
+        queue_id: &str,
+    ) -> (
+        Arc<dyn crate::intercept::TaskInterceptor>,
+        crate::intercept::TaskCtx,
+        crate::intercept::RunMeta,
+    ) {
+        let interceptor = self.task_interceptor(task_id, url, url).await;
+        let task_ctx = crate::intercept::TaskCtx {
+            id: task_id.to_string(),
+            url: url.to_string(),
+            source_url: url.to_string(),
+            file_name: file_name.to_string(),
+            save_dir: save_dir.to_string(),
+            protocol: crate::intercept::protocol_kind(url, false).as_str(),
+            track_pair: false,
+            is_resume: false,
+        };
+        let run_meta = crate::intercept::RunMeta {
+            proxy_url: proxy_url.to_string(),
+            ignore_tls_errors,
+            user_agent: self.resolved_task_ua(user_agent, queue_id).to_string(),
+        };
+        (interceptor, task_ctx, run_meta)
+    }
+
+    /// 构造任务的拦截器：插件启用且有匹配项时为插件实现，否则为空实现。
+    async fn task_interceptor(
+        &self,
+        task_id: &str,
+        source_url: &str,
+        current_url: &str,
+    ) -> Arc<dyn crate::intercept::TaskInterceptor> {
+        #[cfg(feature = "plugins")]
+        if let Some(pm) = &self.plugin_manager {
+            return pm.task_interceptor(task_id, source_url, current_url).await;
+        }
+        #[cfg(not(feature = "plugins"))]
+        let _ = (task_id, source_url, current_url);
+        crate::intercept::noop()
+    }
+
     /// 后台元数据探测（HEAD → GET Range:0-0，非阻塞）：探得文件名/大小后
     /// 更新 DB 并广播 [`EngineEvent::TaskMetaProbed`]；失败静默。
     ///
@@ -8376,6 +8658,7 @@ impl DownloadManager {
     /// 的 `RequestSpec`，使背景 HEAD probe 与真正下载请求一致，避免鉴权站点
     /// 把缺鉴权的裸 HEAD 重定向到登录页污染 DB 文件名。带 resolver 的任务
     /// 不应调用（探测原始页面 URL 无意义）。
+    #[allow(clippy::too_many_arguments)]
     fn spawn_meta_probe(
         &self,
         task_id: String,
@@ -8384,6 +8667,9 @@ impl DownloadManager {
         probe_spec: downloader::RequestSpec,
         probe_client: Client,
         probe_proxy: ProxyConfig,
+        interceptor: Arc<dyn crate::intercept::TaskInterceptor>,
+        task_ctx: crate::intercept::TaskCtx,
+        run_meta: crate::intercept::RunMeta,
     ) {
         let probe_db = self.db.clone();
         let probe_sink = self.sink.clone();
@@ -8396,6 +8682,56 @@ impl DownloadManager {
                 tracing::debug!("meta probe gate closed before probe started");
                 return;
             };
+            let mut probe_url = probe_url;
+            let mut probe_spec = probe_spec;
+            if crate::intercept::wants(
+                interceptor.as_ref(),
+                crate::intercept::InterceptStage::Prepare,
+            ) {
+                let notes = crate::intercept::ActivityNotes::new(
+                    probe_db.clone(),
+                    probe_sink.clone(),
+                    task_id.clone(),
+                );
+                let never = CancellationToken::new();
+                let kind = crate::intercept::protocol_kind(&probe_url, false);
+                let mut target = crate::intercept::RequestTarget {
+                    url: &mut probe_url,
+                    spec: &mut probe_spec,
+                    file_name: None,
+                    segment_count: None,
+                    connection_cap: None,
+                    hint_file_size: None,
+                    range_verified: None,
+                    is_resume: false,
+                    kind,
+                    has_audio_track: false,
+                };
+                match crate::intercept::drive::run_prepare(
+                    interceptor.as_ref(),
+                    &notes,
+                    &never,
+                    &task_ctx,
+                    &run_meta,
+                    0,
+                    &mut target,
+                )
+                .await
+                {
+                    Err(abort) => {
+                        log_warn!("[intercept] task {task_id} meta probe aborted: {abort}");
+                        return;
+                    }
+                    // 一次性凭据：探测会作废它，元数据留待真正下载时获得。
+                    Ok(outcome) if outcome.ephemeral => {
+                        log_info!(
+                            "[intercept] task {task_id} meta probe skipped: plugin declared ephemeral"
+                        );
+                        return;
+                    }
+                    Ok(_) => {}
+                }
+            }
             let probed = crate::meta_prober::probe_task_meta(
                 &probe_url,
                 &current_name,
@@ -8482,6 +8818,8 @@ impl DownloadManager {
             resolved: _,
             range_supported,
             resolver_item: _,
+            source_url,
+            resolver_patch,
         } = queued;
 
         // Four-tier segment count priority:
@@ -8852,6 +9190,12 @@ impl DownloadManager {
                 audio_url.is_some(),
                 spec.method != reqwest::Method::GET || spec.body.is_some(),
             );
+            let interceptor = self.task_interceptor(&task_id, &source_url, &url).await;
+            let run_meta = crate::intercept::RunMeta {
+                proxy_url: proxy_url.clone(),
+                ignore_tls_errors,
+                user_agent: self.resolved_task_ua(&user_agent, &queue_id).to_string(),
+            };
             let params = DownloadParams {
                 task_id: task_id.clone(),
                 url,
@@ -8890,6 +9234,9 @@ impl DownloadManager {
                 multi_nic,
                 unattended: task_unattended,
                 preprobed: None,
+                interceptor,
+                connection_cap: 0,
+                run_meta,
             };
 
             let reserved_set = Arc::clone(&self.reserved_temp_paths);
@@ -8907,6 +9254,7 @@ impl DownloadManager {
                     reserved_set,
                     done_tx,
                     spawn_gen,
+                    resolver_patch,
                 })
                 .instrument(task_span),
             )
@@ -9259,6 +9607,8 @@ impl DownloadManager {
         // 用户手动恢复开启新一轮重试预算。若备用链路已排程但尚未回流，
         // 保留其目标与单次守卫；否则允许新的手动周期再换路一次。
         self.auto_retry_counts.remove(task_id);
+        #[cfg(feature = "plugins")]
+        self.intercept_retry_counts.remove(task_id);
         if !self.auto_failover_pending.contains_key(task_id) {
             self.auto_failover_attempts.remove(task_id);
         }
@@ -9391,6 +9741,9 @@ impl DownloadManager {
                 e
             );
         }
+        if let Err(error) = self.db.reset_task_speed_history(task_id).await {
+            crate::logger::report_error("download-manager", "reset speed history", &error);
+        }
         if let Err(e) = self.db.update_task_progress(task_id, 0).await {
             log_info!(
                 "[manager] restart_task {}: reset progress error: {}",
@@ -9423,6 +9776,8 @@ impl DownloadManager {
 
         // 4. 内存态复位：重试配额/failover 标记/退避占用全部作废。
         self.auto_retry_counts.remove(task_id);
+        #[cfg(feature = "plugins")]
+        self.intercept_retry_counts.remove(task_id);
         self.auto_failover_pending.remove(task_id);
         self.auto_failover_attempts.remove(task_id);
         self.retry_unschedule(task_id);
@@ -9679,11 +10034,14 @@ impl DownloadManager {
         // 插件惰性解析守卫（体首，协议判定前）：命中 resolver 且非再入 → off-actor
         // resolve 后经 resume_applied 再入；对称占位防 resumeAll 并发双 resolve。
         #[cfg(feature = "plugins")]
+        let mut resolver_identity = String::new();
+        #[cfg(feature = "plugins")]
         let plugin_applied: Option<crate::plugin::ResolveResult> = {
             let resolver = self.db.get_task_resolver(task_id).await.unwrap_or_default();
             if resolver.is_empty() {
                 None
             } else if let Some(res) = self.resume_applied.remove(task_id) {
+                resolver_identity = resolver;
                 Some(res) // 再入
             } else {
                 self.begin_resolve_resume(task_id, resolver).await;
@@ -9724,6 +10082,8 @@ impl DownloadManager {
                 return;
             }
         };
+        // 任务持久化的原始 URL（拦截上下文 `sourceUrl`），早于 resolver 改写。
+        let source_url = task.url.clone();
 
         // 应用 resolve 改写；空 url = 放行（用原 url）。后续协议判定与下载均以
         // task.url 为准，因而自动重算 use_bt/hls/dash/ftp/ed2k。extra_headers/
@@ -9734,7 +10094,7 @@ impl DownloadManager {
         let plugin_resolved = plugin_applied.is_some();
         #[cfg(feature = "plugins")]
         let (
-            plugin_extra_headers,
+            plugin_patch,
             plugin_audio_url,
             plugin_ephemeral,
             plugin_total_bytes,
@@ -9749,7 +10109,15 @@ impl DownloadManager {
                 task.file_name = name;
             }
             (
-                res.extra_headers,
+                (res.extra_headers.is_some() || res.request.is_some()).then(|| {
+                    (
+                        resolver_identity.clone(),
+                        crate::intercept::RequestPatch {
+                            replace_headers: res.extra_headers,
+                            ..res.request.unwrap_or_default()
+                        },
+                    )
+                }),
                 res.audio_url.filter(|a| !a.is_empty()),
                 res.ephemeral,
                 res.total_bytes.unwrap_or(0),
@@ -9800,10 +10168,8 @@ impl DownloadManager {
                 }
             };
 
-        // resolve 的新鲜 extra_headers 优先于 DB 快照（轮换签名头场景）。
-        #[cfg(feature = "plugins")]
-        let resume_extra_headers = plugin_extra_headers.unwrap_or(resume_extra_headers);
-
+        // resolver 的 extraHeaders / request 补丁在 run_http_family_task 起跑前应用；
+        // 这里的 resume_extra_headers 只来自 DB 中的基础请求上下文。
         // Read actual segment count from DB.  0 means "auto" — the downloader
         // will dynamically calculate the optimal count.
         let seg_count: i32 = self.db.get_task_segments(task_id).await.unwrap_or_default();
@@ -10288,6 +10654,16 @@ impl DownloadManager {
                 crate::file_exists::OverwritePolicy::Never
             };
             let support = ask_support(&task.url, audio_url.is_some(), false);
+            let interceptor = self.task_interceptor(&tid, &source_url, &task.url).await;
+            let run_meta = crate::intercept::RunMeta {
+                proxy_url: task.proxy_url.clone(),
+                ignore_tls_errors: task.ignore_tls_errors,
+                user_agent: resume_user_agent.clone(),
+            };
+            #[cfg(feature = "plugins")]
+            let resolver_patch = plugin_patch;
+            #[cfg(not(feature = "plugins"))]
+            let resolver_patch: Option<(String, crate::intercept::RequestPatch)> = None;
             let params = DownloadParams {
                 task_id: tid.clone(),
                 url: task.url,
@@ -10330,6 +10706,9 @@ impl DownloadManager {
                 multi_nic,
                 unattended: task_unattended,
                 preprobed: None,
+                interceptor,
+                connection_cap: 0,
+                run_meta,
             };
 
             let reserved_set = Arc::clone(&self.reserved_temp_paths);
@@ -10347,6 +10726,7 @@ impl DownloadManager {
                     reserved_set,
                     done_tx,
                     spawn_gen,
+                    resolver_patch,
                 })
                 .instrument(task_span),
             )
@@ -10360,6 +10740,8 @@ impl DownloadManager {
         // 清除自动重试计数，与 delete_task / resume_task 对齐。取消是用户的
         // 明确意图，必须从自动重试状态中移除，使后续 create/resume 干净起步。
         self.auto_retry_counts.remove(task_id);
+        #[cfg(feature = "plugins")]
+        self.intercept_retry_counts.remove(task_id);
         self.auto_failover_pending.remove(task_id);
         self.auto_failover_attempts.remove(task_id);
         self.clear_pending_resolve(task_id);
@@ -10482,7 +10864,7 @@ impl DownloadManager {
             pm.notify(crate::plugin::PluginEvent::Cancel {
                 task_id: task_id.to_string(),
                 url,
-                reason: Some(crate::plugin::CancelReason::UserCancelled),
+                reason: crate::plugin::CancelReason::UserCancelled,
             })
             .await;
         }
@@ -10511,6 +10893,8 @@ impl DownloadManager {
     /// network connections and file handles are released before deletion.
     pub async fn delete_task(&mut self, task_id: &str, delete_files: bool) {
         self.auto_retry_counts.remove(task_id);
+        #[cfg(feature = "plugins")]
+        self.intercept_retry_counts.remove(task_id);
         self.auto_failover_pending.remove(task_id);
         self.auto_failover_attempts.remove(task_id);
         self.retry_unschedule(task_id);
@@ -11548,6 +11932,8 @@ impl DownloadManager {
         // 恢复后，下次可重试错误会立刻命中"已耗尽"分支、停在 error，与单任务
         // 手动恢复行为不一致（BUG-BATCH-RESUME-NO-RETRY-RESET）。
         self.auto_retry_counts.remove(task_id);
+        #[cfg(feature = "plugins")]
+        self.intercept_retry_counts.remove(task_id);
         self.retry_unschedule(task_id);
         if let Some(pending) = self.pending_pauses.get_mut(task_id) {
             pending.resume_requested = true;
@@ -12405,6 +12791,8 @@ impl DownloadManager {
             );
         }
         self.auto_retry_counts.remove(task_id);
+        #[cfg(feature = "plugins")]
+        self.intercept_retry_counts.remove(task_id);
         self.auto_failover_pending.remove(task_id);
         self.auto_failover_attempts.remove(task_id);
         log_info!(
@@ -12666,18 +13054,31 @@ impl DownloadManager {
         self.rss.refresh_now(source_id, &proxy, &ua)
     }
 
-    /// 只读验证一个 feed 地址（新建订阅向导）。结果经 RSS 回流通道返回。
+    /// 只读验证一个订阅地址（新建订阅向导）。结果经 RSS 回流通道返回。
+    /// `provider_id` 为空按内置 RSS 处理，其余走插件订阅 provider。
+    #[allow(clippy::too_many_arguments)]
     pub fn validate_rss_feed(
         &self,
         request_id: String,
+        provider_id: String,
+        provider_config: String,
         url: String,
         cookies: String,
         user_agent: String,
         proxy_url: String,
     ) {
         let (proxy, ua) = (self.proxy_config.clone(), self.global_user_agent.clone());
-        self.rss
-            .validate(request_id, url, cookies, user_agent, proxy_url, &proxy, &ua);
+        self.rss.validate(
+            request_id,
+            provider_id,
+            provider_config,
+            url,
+            cookies,
+            user_agent,
+            proxy_url,
+            &proxy,
+            &ua,
+        );
     }
 
     /// 只读验证的**请求-应答**变体（REST `POST /api/v1/rss/validate`、CLI）。
@@ -12687,14 +13088,18 @@ impl DownloadManager {
     /// （与 `spawn_resolve_preview` 的先例同款）。
     pub fn rss_validate_future(
         &self,
+        provider_id: String,
+        provider_config: String,
         url: String,
         cookies: String,
         user_agent: String,
         proxy_url: String,
-    ) -> impl std::future::Future<Output = crate::rss::RssValidateOutcome> + Send + use<> {
+    ) -> impl Future<Output = crate::rss::RssValidateOutcome> + Send + use<> {
         let (proxy, ua) = (self.proxy_config.clone(), self.global_user_agent.clone());
         self.rss.validate_future(
             String::new(),
+            provider_id,
+            provider_config,
             url,
             cookies,
             user_agent,
@@ -13285,6 +13690,7 @@ pub async fn progress_reporter(
                 last_db_save.remove(task_id);
                 bt_finish_notified.remove(task_id);
             }
+            crate::speed_history::forget(&db, &deleted).await;
             // 与终态帧同理：必须排在任何「删除前读库」的快照之后，否则快照会让已删任务复活。
             let _order = db.lock_event_order().await;
             sink.emit(EngineEvent::TasksDeleted(deleted));
@@ -13295,12 +13701,20 @@ pub async fn progress_reporter(
             .download_baseline
             .and_then(|_| states.get(&update.task_id).map(|state| state.latest_bytes));
 
+        // 测速计数器：下载器上报了传输层接收字节时用它，否则用落盘字节。
+        let speed_counter = update.transfer_bytes.unwrap_or(update.downloaded_bytes);
+        let speed_from_transfer = update.transfer_bytes.is_some();
+
         // Latch file_name: once we get a non-empty name, remember it.
         let state = states.entry(update.task_id.clone()).or_insert_with(|| {
             TaskSpeedState {
                 ema_speed: 0.0,
-                sample_bytes: update.downloaded_bytes,
+                sample_bytes: speed_counter,
                 sample_time: now,
+                latest_speed_bytes: speed_counter,
+                speed_from_transfer,
+                last_transfer_bytes: None,
+                unsent_transfer_bytes: 0,
                 latest_bytes: update.downloaded_bytes,
                 file_name: String::new(),
                 cached_segments: None,
@@ -13337,6 +13751,17 @@ pub async fn progress_reporter(
             state.cached_runtime = Some(runtime.clone());
         }
 
+        // 接收字节在同一次运行内单调；比上次小 = 新一轮运行的计数器（从 0 起）。
+        // 未转发的部分攒着，随下一次转发的进度帧交给宿主统计流量。
+        if let Some(transfer) = update.transfer_bytes {
+            let fresh = match state.last_transfer_bytes {
+                Some(previous) if transfer >= previous => transfer - previous,
+                _ => transfer,
+            };
+            state.unsent_transfer_bytes = state.unsent_transfer_bytes.saturating_add(fresh.max(0));
+            state.last_transfer_bytes = Some(transfer);
+        }
+
         // -----------------------------------------------------------------
         // Fixed-window speed calculation
         //
@@ -13355,30 +13780,34 @@ pub async fn progress_reporter(
         let entered_downloading = update.status == 1 && state.last_raw_status != 1;
         if entered_downloading {
             state.ema_speed = 0.0;
-            state.sample_bytes = update.downloaded_bytes;
+            state.sample_bytes = speed_counter;
             state.sample_time = now;
             state.awaiting_first_growth = true;
             state.sent_nonzero_speed = false;
         }
 
         if update.status == 1 {
-            // Non-monotonic check (e.g. server reset, re-probe).
-            if update.downloaded_bytes < state.latest_bytes {
+            // Non-monotonic check (e.g. server reset, re-probe); switching
+            // between written and received counters is a new baseline too.
+            if speed_counter < state.latest_speed_bytes
+                || speed_from_transfer != state.speed_from_transfer
+            {
                 state.ema_speed = 0.0;
-                state.sample_bytes = update.downloaded_bytes;
+                state.sample_bytes = speed_counter;
                 state.sample_time = now;
                 state.awaiting_first_growth = true;
             }
 
-            state.latest_bytes = update.downloaded_bytes;
+            state.latest_speed_bytes = speed_counter;
+            state.speed_from_transfer = speed_from_transfer;
 
             // 首增长基线吸收：进入下载态后第一个「有增长」的更新可能携带
             // resume 基线跳变，其 delta 不代表真实传输。把它仅用作测量基线
             // （代价：丢弃至多一条更新 ≈ 200ms 的真实增量），后续增量即纯
             // 传输字节。
-            if state.awaiting_first_growth && update.downloaded_bytes > state.sample_bytes {
+            if state.awaiting_first_growth && speed_counter > state.sample_bytes {
                 state.awaiting_first_growth = false;
-                state.sample_bytes = update.downloaded_bytes;
+                state.sample_bytes = speed_counter;
                 state.sample_time = now;
             }
 
@@ -13393,7 +13822,7 @@ pub async fn progress_reporter(
             let window_elapsed_ms = now.duration_since(state.sample_time).as_millis();
             if window_elapsed_ms >= window_ms {
                 let dt = now.duration_since(state.sample_time).as_secs_f64();
-                let delta = update.downloaded_bytes - state.sample_bytes;
+                let delta = speed_counter - state.sample_bytes;
 
                 if delta > 0 && dt > 0.01 {
                     let window_speed = delta as f64 / dt;
@@ -13414,7 +13843,7 @@ pub async fn progress_reporter(
                 }
 
                 // Advance sampling window baseline.
-                state.sample_bytes = update.downloaded_bytes;
+                state.sample_bytes = speed_counter;
                 state.sample_time = now;
             }
             // Within the window: just accumulate bytes, no speed recalc.
@@ -13423,10 +13852,12 @@ pub async fn progress_reporter(
             state.ema_speed = 0.0;
             state.awaiting_first_growth = false;
             state.sent_nonzero_speed = false;
-            state.sample_bytes = update.downloaded_bytes;
+            state.sample_bytes = speed_counter;
             state.sample_time = now;
-            state.latest_bytes = update.downloaded_bytes;
+            state.latest_speed_bytes = speed_counter;
+            state.speed_from_transfer = speed_from_transfer;
         }
+        state.latest_bytes = update.downloaded_bytes;
         state.last_raw_status = update.status;
         state.upload_bps = update.upload_speed_bps;
 
@@ -13487,6 +13918,15 @@ pub async fn progress_reporter(
         }
 
         let smoothed_speed = state.ema_speed as i64;
+        // 任务速度曲线：下载态逐秒累计平滑速度（与界面显示同源），离开下载态落库。
+        crate::speed_history::observe(
+            &db,
+            &update.task_id,
+            update.status == 1,
+            smoothed_speed,
+            now,
+        )
+        .await;
         let resolved_name = state.file_name.clone();
 
         // For terminal states (completed / error / paused) always send immediately.
@@ -13534,6 +13974,12 @@ pub async fn progress_reporter(
                         task_id: update.task_id.clone(),
                         downloaded_bytes,
                         previous_downloaded_bytes,
+                    });
+                }
+                if state.unsent_transfer_bytes > 0 {
+                    sink.emit(EngineEvent::TaskTransferred {
+                        task_id: update.task_id.clone(),
+                        bytes: std::mem::take(&mut state.unsent_transfer_bytes),
                     });
                 }
                 sink.emit(EngineEvent::TaskProgress {
@@ -13923,6 +14369,8 @@ mod tests {
                 resolved: false,
                 range_supported: false,
                 resolver_item: String::new(),
+                source_url: String::new(),
+                resolver_patch: None,
             }
         }
 
@@ -15042,6 +15490,8 @@ mod tests {
             resolved: false,
             range_supported: false,
             resolver_item: String::new(),
+            source_url: String::new(),
+            resolver_patch: None,
         };
         let status_of = |db: &Db, id: &str| {
             let db = db.clone();
@@ -16282,6 +16732,8 @@ mod tests {
             resolved: false,
             range_supported: false,
             resolver_item: String::new(),
+            source_url: String::new(),
+            resolver_patch: None,
         })
         .await;
 
@@ -16371,6 +16823,48 @@ mod tests {
         mgr.plugin_request_retry("a", 10_000).await;
         assert_eq!(mgr.auto_retry_counts.get("a"), Some(&1));
         assert!(mgr.retry_scheduled.contains_key("a"));
+    }
+
+    /// failed 阶段的插件重试不受 `max_auto_retries == 0` 门控，且走独立额度。
+    #[cfg(feature = "plugins")]
+    #[tokio::test]
+    async fn interceptor_retry_uses_independent_quota() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        db.seed_builtin_queues().await.expect("seed");
+        insert_paused_task_in_queue(&db, "a", "").await;
+        db.update_task_status("a", 4, "HTTP 403")
+            .await
+            .expect("error");
+        let mut mgr = sched_manager(&db, 1);
+        mgr.set_max_auto_retries(0);
+
+        // 无标记（onError requestRetry）在关闭自动重试时不排程。
+        mgr.plugin_request_retry("a", 10_000).await;
+        assert!(!mgr.retry_scheduled.contains_key("a"));
+
+        for round in 1..=INTERCEPT_RETRY_LIMIT {
+            mgr.intercept_retry_marks
+                .lock()
+                .expect("marks")
+                .insert("a".into());
+            mgr.plugin_request_retry("a", 10_000).await;
+            assert!(mgr.retry_scheduled.contains_key("a"), "第 {round} 次应排程");
+            assert!(mgr.intercept_retry_marks.lock().expect("marks").is_empty());
+            mgr.retry_scheduled.clear();
+        }
+        mgr.intercept_retry_marks
+            .lock()
+            .expect("marks")
+            .insert("a".into());
+        mgr.plugin_request_retry("a", 10_000).await;
+        assert!(!mgr.retry_scheduled.contains_key("a"), "额度用尽后不再排程");
+        assert!(!mgr.auto_retry_counts.contains_key("a"));
+        assert_eq!(
+            mgr.intercept_retry_counts.get("a"),
+            Some(&INTERCEPT_RETRY_LIMIT)
+        );
     }
 
     /// 调大队列并发上限必须立即放行被旧上限卡住的排队任务，
@@ -18137,6 +18631,81 @@ mod tests {
                 (33 * MIB, Some(33 * MIB)),
             ]
         );
+    }
+
+    /// 落盘字节按段跳变(HLS 整段缓冲后写盘)时,速度与宿主流量都跟随接收字节:
+    /// 落盘计数不动,速度照样出现;接收增量全部在对应进度帧之前交给宿主,总量守恒,
+    /// 整段落盘的跳变不再计一次。
+    #[tokio::test]
+    async fn received_bytes_drive_speed_and_host_traffic() {
+        let (tx, rx) = mpsc::channel(16);
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let handle = tokio::spawn(progress_reporter(rx, db, sink.clone()));
+        let received = |downloaded_bytes, transfer| ProgressUpdate {
+            task_id: "hls".into(),
+            status: 1,
+            downloaded_bytes,
+            transfer_bytes: Some(transfer),
+            ..Default::default()
+        };
+        for (step, transfer) in [0_i64, 200_000, 400_000, 600_000].into_iter().enumerate() {
+            if step > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
+            tx.send(received(0, transfer))
+                .await
+                .expect("enqueue received sample");
+        }
+        tx.send(received(600_000, 600_000))
+            .await
+            .expect("enqueue segment write");
+        tx.send(ProgressUpdate {
+            task_id: "hls".into(),
+            status: 3,
+            downloaded_bytes: 600_000,
+            total_bytes: 600_000,
+            ..Default::default()
+        })
+        .await
+        .expect("enqueue completion");
+        drop(tx);
+        handle.await.expect("reporter task");
+
+        let events = sink.events();
+        let transferred: i64 = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::TaskTransferred { bytes, .. } => Some(*bytes),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(transferred, 600_000);
+        for pair in events.windows(2) {
+            if let EngineEvent::TaskTransferred { task_id, .. } = &pair[0] {
+                assert!(
+                    matches!(&pair[1], EngineEvent::TaskProgress { task_id: id, .. } if id == task_id),
+                    "received bytes must precede their progress frame"
+                );
+            }
+        }
+        // 200 KB / 400 ms = 500 KB/s,而落盘计数在测速期间一直是 0。
+        let peak = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::TaskProgress {
+                    status: 1,
+                    downloaded_bytes: 0,
+                    speed,
+                    ..
+                } => Some(*speed),
+                _ => None,
+            })
+            .max()
+            .unwrap_or_default();
+        assert!((250_000..=1_000_000).contains(&peak), "peak speed {peak}");
     }
 
     /// 在途整表快照期间，终态进度帧必须等快照发出后再发：读库早于落库的旧快照

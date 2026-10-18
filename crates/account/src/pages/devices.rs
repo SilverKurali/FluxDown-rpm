@@ -308,7 +308,7 @@ fn render_linked(
     let title = t(translator, "linkedDevicesTitle");
     let desc = t(translator, "linkedDevicesDesc");
     let empty_label = t(translator, "linkedDevicesEmpty");
-    let refresh_label = t(translator, "localPairingRetryScan");
+    let refresh_label = t(translator, "linkedDeviceRefresh");
     let extended = active_theme(cx).extended().clone();
     let host = state.host.clone();
     let disabled = state.disabled;
@@ -561,7 +561,26 @@ pub(crate) fn device_row(
         )
 }
 
-/// 局域网已配对设备一行：在线点 + 名称 + 平台，右侧「解除配对」。
+/// 小徽标（与云设备行的「本机」徽标同款）。
+fn tag_badge(text: SharedString, cx: &App) -> impl IntoElement {
+    let theme = active_theme(cx);
+    let tokens = theme.tokens().clone();
+    let extended = theme.extended().clone();
+    div()
+        .flex_none()
+        .px(tokens.spacing.xs)
+        .py(tokens.spacing.xxs)
+        .rounded(theme.components().badge_radius)
+        .bg(tokens.colors.accent)
+        .text_size(extended.caption.size)
+        .line_height(extended.caption.line_height)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(tokens.colors.accent_foreground)
+        .child(text)
+}
+
+/// 局域网已配对设备一行：在线点 + 名称（备注名优先）+ 标签（对方已解除 / 同一账号）+ 平台，
+/// 右侧「重命名」「解除配对」。对方已解除配对的记录只能删除。
 fn linked_row(
     host: &Entity<AccountHost>,
     device: &LinkDeviceInfo,
@@ -570,28 +589,42 @@ fn linked_row(
     cx: &App,
 ) -> impl IntoElement {
     let tokens = active_theme(cx).tokens().clone();
+    let stale = host.read(cx).controller.is_stale();
+    let same_account = device.cloud_device_id.as_deref().is_some_and(|cloud_id| {
+        host.read(cx)
+            .controller
+            .devices()
+            .iter()
+            .any(|cloud| cloud.id == cloud_id)
+    });
+    let status_key = if device.revoked {
+        "linkedDeviceRevokedDesc"
+    } else if stale {
+        "devicePresenceUnknown"
+    } else if device.online {
+        "deviceOnline"
+    } else {
+        "deviceOffline"
+    };
     let subtitle = [
-        t(
-            translator,
-            if host.read(cx).controller.is_stale() {
-                "devicePresenceUnknown"
-            } else if device.online {
-                "deviceOnline"
-            } else {
-                "deviceOffline"
-            },
-        )
-        .to_string(),
+        t(translator, status_key).to_string(),
         platform_text(translator, device.platform.as_deref()),
+        device.app_version.clone().unwrap_or_default(),
     ]
     .into_iter()
     .filter(|part| !part.is_empty())
     .collect::<Vec<_>>()
     .join(" · ");
     let host = host.clone();
+    let rename_host = host.clone();
     let target = device.clone();
-    let element_id = gpui::ElementId::from(SharedString::from(format!(
+    let rename_target = device.clone();
+    let remove_id = gpui::ElementId::from(SharedString::from(format!(
         "account-linked-remove-{}",
+        device.fingerprint
+    )));
+    let rename_id = gpui::ElementId::from(SharedString::from(format!(
+        "account-linked-rename-{}",
         device.fingerprint
     )));
 
@@ -611,22 +644,37 @@ fn linked_row(
                         .min_w_0()
                         .items_center()
                         .gap(tokens.spacing.sm)
-                        .child(presence_dot(
-                            !host.read(cx).controller.is_stale() && device.online,
-                            cx,
-                        ))
+                        .child(presence_dot(!stale && !device.revoked && device.online, cx))
                         .child(
                             v_flex()
                                 .min_w_0()
                                 .gap(tokens.spacing.xxs)
                                 .child(
-                                    div()
-                                        .text_size(tokens.typography.sm.size)
-                                        .line_height(tokens.typography.sm.line_height)
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(tokens.colors.foreground)
-                                        .truncate()
-                                        .child(device.name.clone()),
+                                    h_flex()
+                                        .items_center()
+                                        .gap(tokens.spacing.sm)
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .text_size(tokens.typography.sm.size)
+                                                .line_height(tokens.typography.sm.line_height)
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(tokens.colors.foreground)
+                                                .truncate()
+                                                .child(device.name.clone()),
+                                        )
+                                        .when(device.revoked, |this| {
+                                            this.child(tag_badge(
+                                                t(translator, "linkedDeviceRevokedTag"),
+                                                cx,
+                                            ))
+                                        })
+                                        .when(same_account, |this| {
+                                            this.child(tag_badge(
+                                                t(translator, "linkedDeviceSameAccountTag"),
+                                                cx,
+                                            ))
+                                        }),
                                 )
                                 .child(
                                     div()
@@ -639,15 +687,37 @@ fn linked_row(
                         ),
                 )
                 .child(
-                    button(
-                        element_id,
-                        t(translator, "linkedDeviceRemove"),
-                        ButtonVariant::Secondary,
-                        cx,
-                    )
-                    .on_click(move |_, window, cx| {
-                        confirm_unpair(&host, &target, window, cx);
-                    }),
+                    h_flex()
+                        .flex_none()
+                        .gap(tokens.spacing.xs)
+                        .when(!device.revoked, |this| {
+                            this.child(
+                                Button::new(rename_id)
+                                    .ghost()
+                                    .control_icon(cx)
+                                    .icon(FluxIcon::Pen)
+                                    .tooltip(t(translator, "linkedDeviceRename"))
+                                    .on_click(move |_, window, cx| {
+                                        crate::dialogs::device::open_link_rename(
+                                            &rename_host,
+                                            &rename_target,
+                                            window,
+                                            cx,
+                                        );
+                                    }),
+                            )
+                        })
+                        .child(
+                            button(
+                                remove_id,
+                                t(translator, "linkedDeviceRemove"),
+                                ButtonVariant::Secondary,
+                                cx,
+                            )
+                            .on_click(move |_, window, cx| {
+                                confirm_unpair(&host, &target, window, cx);
+                            }),
+                        ),
                 ),
         )
 }

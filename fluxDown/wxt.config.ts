@@ -58,6 +58,9 @@ export default defineConfig({
       // Firefox MV3 仍支持 blocking webRequest：用 onHeadersReceived {cancel:true}
       // 从源头拦截下载，避免残留"已取消"记录（issue #21）。Chrome MV3 已弃用，故仅 Firefox 加。
       ...(browser === "firefox" ? ["webRequestBlocking"] : []),
+      // 扩展安装 / 更新后给已打开的页面补注入 sensor 与 MAIN 钩子（background/probe.ts）。
+      // Firefox MV2 用 tabs.executeScript，不需要该权限。
+      ...(browser === "firefox" ? [] : ["scripting"]),
       "storage",
       "alarms",
       "notifications",

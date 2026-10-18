@@ -16,6 +16,8 @@ public enum HostMethod {
     public static let daemonTaskList = "daemon.task.list"
     public static let daemonTaskGet = "daemon.task.get"
     public static let daemonTaskActivity = "daemon.task.activity"
+    /// 任务整个生命周期的持久化速度曲线与统计（`{taskId}` → `TaskSpeedHistory?`，`null` = 无记录）。
+    public static let daemonTaskSpeedHistory = "daemon.task.speedHistory"
     public static let daemonTaskCreate = "daemon.task.create"
     public static let daemonTaskPause = "daemon.task.pause"
     public static let daemonTaskResume = "daemon.task.resume"
@@ -194,6 +196,8 @@ public enum HostMethod {
     public static let agentLinkApprove = "agent.link.approve"
     /// `LinkDeviceParams`：解除配对。
     public static let agentLinkRemove = "agent.link.remove"
+    /// `LinkRenameParams` → `LinkDeviceInfo`：设置 / 清除本机备注名。
+    public static let agentLinkRename = "agent.link.rename"
     /// 探测全部已配对设备在线状态 → `Vec<LinkDeviceInfo>`（同时推送 `LinkedDevicesChanged`）。
     public static let agentLinkRefresh = "agent.link.refresh"
     /// `LinkDispatchParams` → `LinkDispatchResult`：下发下载到已配对设备。
