@@ -154,9 +154,11 @@ The connection string's scheme (`sqlite:` vs `postgres:`) selects the backend; b
       proxy_http_version 1.1;
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
-      proxy_set_header Host $host;
+      proxy_set_header Host $http_host;
   }
   ```
+
+  The `/rpc` handshake checks the browser's `Origin`: the `Host` (or `X-Forwarded-Host`) the proxy forwards must be the hostname the browser used, not a LAN IP or `127.0.0.1`; otherwise the handshake is rejected (403) and the Web UI only shows "Cannot reach the FluxDown service." `$http_host` keeps the browser's host and port as-is; on Synology DSM add the WebSocket entries under "Custom Header", and in Nginx Proxy Manager enable "Websockets Support".
 
 - Prefer binding to a private interface (`FLUXDOWN_BIND=127.0.0.1:17800` and letting the reverse proxy sit in front, or a VPN/Tailscale address) over exposing the port directly to the public internet, even with TLS.
 

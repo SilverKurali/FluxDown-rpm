@@ -13,6 +13,22 @@ class PluginsTest {
     // ───────────── DTO ─────────────
 
     @Test
+    fun siteDefaultsDecodeAndParams() {
+        val json = Json.parseOrNull(
+            """[{"site":"bilibili.com","identity":"a","candidates":["a","b"],"automatic":true},{"site":"x.com","identity":"b"},{"identity":"z"}]""",
+        )
+        val list = PluginSiteDefault.listFromJson(json)
+        assertEquals(
+            listOf(
+                PluginSiteDefault("bilibili.com", "a", listOf("a", "b"), true),
+                PluginSiteDefault("x.com", "b", emptyList(), false),
+            ),
+            list,
+        )
+        assertEquals("""{"site":"x.com","identity":null}""", pluginSetSiteDefaultParams("x.com", null).toJson())
+    }
+
+    @Test
     fun pluginDtoDecodesWireShapeAndToleratesMissingDefaults() {
         val json = """
         [{

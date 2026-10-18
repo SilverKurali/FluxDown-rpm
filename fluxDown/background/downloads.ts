@@ -330,5 +330,12 @@ export async function handoffPage(tabId: number): Promise<SendResult> {
   }
   if (!pageUrl) return { success: false, message: "No page url" };
   const result = await sendToFluxDown({ url: pageUrl, referrer: pageUrl, fileSize: 0 });
-  return { success: result.success, message: result.message, channel: result.channel };
+  return { success: result.success, message: result.message, channel: result.channel, taskId: createdTaskId(result.data) };
+}
+
+/** 本机 `download` 应答的 `data`：直接建任务时为 `{ taskId }`，进确认框时为 `{ transactionIds }`。 */
+function createdTaskId(data: unknown): string | undefined {
+  if (typeof data !== "object" || data === null || !("taskId" in data)) return undefined;
+  const taskId = data.taskId;
+  return typeof taskId === "string" && taskId ? taskId : undefined;
 }

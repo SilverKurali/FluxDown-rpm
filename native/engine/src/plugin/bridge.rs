@@ -827,7 +827,7 @@ impl PluginBridge for EngineBridge {
         }
     }
 
-    fn request_retry(&self, task_id: &str, delay_ms: u64) {
+    fn request_retry(&self, _plugin_id: &str, task_id: &str, delay_ms: u64) {
         // fire-and-forget；限流在 actor 侧（max_auto_retries）。
         if self
             .plugin_retry_tx

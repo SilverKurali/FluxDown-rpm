@@ -31,7 +31,9 @@ import {
 import { shouldIntercept } from "@/utils/settings";
 import type { DownloadItemInfo } from "@/utils/settings";
 import { hasActiveBypass, isAppKnownDown } from "./breaker";
+import { linkCapture } from "./link-capture";
 import { sleep } from "./notify";
+import type { SendChannel } from "./protocol";
 import { sawNetworkRequest } from "./request-cache";
 import { fallbackAfterSendFailure, sendToFluxDown } from "./sender";
 import { getCachedProfiles, getCachedSettings, peekCachedProfiles, peekCachedSettings } from "./settings-cache";
@@ -193,8 +195,16 @@ type MetaResult =
   | { source: "responseCache"; data: ResponseDownloadInfo }
   | { source: "downloadMeta"; data: Browser.downloads.DownloadItem };
 
+/** 响应头缓存按响应 URL 记录：重定向下载要用 finalUrl 才能命中（原始 URL 只有 3xx）。 */
+function cachedResponseFor(item: Browser.downloads.DownloadItem): ResponseDownloadInfo | undefined {
+  const direct = responseDownloadCache.get(item.url);
+  if (direct) return direct;
+  // Chrome 54+ 才有 finalUrl，类型声明里没有：按运行时字段收窄。
+  const finalUrl = "finalUrl" in item ? item.finalUrl : undefined;
+  return typeof finalUrl === "string" ? responseDownloadCache.get(finalUrl) : undefined;
+}
+
 async function waitForMeta(
-  url: string,
   downloadId: number,
   originalItem: Browser.downloads.DownloadItem,
   deadlineMs: number,
@@ -204,7 +214,7 @@ async function waitForMeta(
     if (handledDownloads.has(downloadId)) return null;
 
     // 路径A：responseDownloadCache 到达
-    const rc = responseDownloadCache.get(url);
+    const rc = cachedResponseFor(originalItem);
     if (rc) return { source: "responseCache", data: rc };
 
     // 路径B：downloadItem 元数据就绪
@@ -236,7 +246,7 @@ async function waitForMeta(
   }
   // deadline 到达，用 bestItem 兜底（宁可用不完整数据判断也不放弃拦截）
   // 再最后检查一次缓存
-  const rc = responseDownloadCache.get(url);
+  const rc = cachedResponseFor(originalItem);
   if (rc) return { source: "responseCache", data: rc };
   return { source: "downloadMeta", data: bestItem };
 }
@@ -264,7 +274,7 @@ async function startFallbackInterception(
   console.log("[FluxDown] startFallbackInterception:", {
     id: downloadId,
     url,
-    cacheHit: responseDownloadCache.has(url),
+    cacheHit: cachedResponseFor(originalItem) !== undefined,
   });
 
   // 给第二层一个处理窗口（Chrome 有 onDeterminingFilename，suggest cancel 更干净）
@@ -273,7 +283,7 @@ async function startFallbackInterception(
   if (handledDownloads.has(downloadId)) return;
 
   // 快速路径：缓存已就绪，直接处理，不进入轮询
-  const immediateCached = responseDownloadCache.get(url);
+  const immediateCached = cachedResponseFor(originalItem);
   if (immediateCached) {
     await handleResponseCacheHit(
       downloadId,
@@ -286,12 +296,7 @@ async function startFallbackInterception(
 
   // 慢速路径：两路并发轮询，共享 deadline（Bug 1+6 修复）
   const deadline = Date.now() + META_MAX_WAIT;
-  const metaResult = await waitForMeta(
-    url,
-    downloadId,
-    originalItem,
-    deadline,
-  );
+  const metaResult = await waitForMeta(downloadId, originalItem, deadline);
   if (!metaResult) return; // 被其他层处理或 deadline 到达且结果为 null
 
   if (handledDownloads.has(downloadId)) return;
@@ -354,7 +359,7 @@ async function handleResponseCacheHit(
       resolveDownloadFilename(
         dispositionFilename,
         originalItem.filename,
-        url,
+        fallbackAUrl,
         rc.contentType,
       ) || undefined,
     referrerUrl: originalItem.referrer || undefined,
@@ -378,6 +383,7 @@ async function handleResponseCacheHit(
     );
   } finally {
     responseDownloadCache.delete(url);
+    responseDownloadCache.delete(rc.url);
   }
 }
 
@@ -582,9 +588,14 @@ const handleDeterminingFilename: DeterminingFilenameListener = (
     };
   };
 
+  /**
+   * `manual` = 右键链接经浏览器捕获（用户主动发送）：不按拦截来源跟踪桌面端取消，
+   * 沿用菜单选定的通道与失败回退语义（与菜单直接发送一致）。
+   */
   const interceptAfterCancellation = async (
     itemInfo: DownloadItemInfo,
     referrer: string | undefined,
+    manual?: { channel?: SendChannel },
   ) => {
     let cancellationSucceeded = false;
     let cleanFilename: string | undefined;
@@ -625,12 +636,13 @@ const handleDeterminingFilename: DeterminingFilenameListener = (
           // finalUrl is the engine target; original url remains a cache fallback
           // for request headers and captured form transactions.
           originalUrl: downloadUrl !== url ? url : undefined,
-          origin: "intercept",
+          origin: manual ? undefined : "intercept",
+          channel: manual?.channel,
         })
       ).success;
       if (!sendOk) {
         handledDownloads.delete(downloadItem.id);
-        await fallbackAfterSendFailure(downloadUrl, cleanFilename).catch(
+        await fallbackAfterSendFailure(downloadUrl, cleanFilename, false, manual?.channel).catch(
           (error) =>
             console.error(
               "[FluxDown] failed to restore browser download after send failure:",
@@ -645,7 +657,7 @@ const handleDeterminingFilename: DeterminingFilenameListener = (
       );
       if (cancellationSucceeded) {
         handledDownloads.delete(downloadItem.id);
-        await fallbackAfterSendFailure(downloadUrl, cleanFilename).catch(
+        await fallbackAfterSendFailure(downloadUrl, cleanFilename, false, manual?.channel).catch(
           (fallbackError) =>
             console.error(
               "[FluxDown] failed to restore browser download after interception error:",
@@ -704,6 +716,33 @@ const handleDeterminingFilename: DeterminingFilenameListener = (
   if (!isReplayableUrl(url) || !isReplayableUrl(downloadUrl)) {
     resolveFilename();
     return;
+  }
+
+  // 右键「下载链接」发起的浏览器下载：用户已明确要交给 FluxDown，跳过拦截开关 / 文件类型
+  // 过滤 / 绕过令牌，用浏览器解析出的元数据发送。浏览器拿到的是网页（多为防盗链 / 登录页：
+  // 浏览器发起的下载带不了 Referer）时交还菜单直接发送原链接，与改动前一致；事务已超时
+  // 交还直接发送的只取消。
+  if (linkCapture.owns(downloadItem)) {
+    handledDownloads.set(downloadItem.id, "primary");
+    const { itemInfo } = collectItemInfo();
+    const mime = itemInfo.mime?.toLowerCase() ?? "";
+    const isPage = mime.startsWith("text/html") || mime.startsWith("application/xhtml+xml");
+    const linkClaim = linkCapture.claim(downloadItem, !isPage);
+    if (linkClaim?.kind !== "claimed") {
+      void cancelBeforeResolvingFilename().finally(() => downloadItemCache.delete(downloadItem.id));
+      return true;
+    }
+    console.log("[FluxDown] Intercepting context-menu link capture:", {
+      url,
+      downloadUrl,
+      mime: itemInfo.mime,
+      filename: itemInfo.filename,
+      fileSize: itemInfo.fileSize,
+    });
+    void interceptAfterCancellation(itemInfo, linkClaim.request.referrer || undefined, {
+      channel: linkClaim.request.channel,
+    }).finally(() => downloadItemCache.delete(downloadItem.id));
+    return true;
   }
 
   // The onCreated fallback already owns this item. Cancel first here as well,
@@ -1067,12 +1106,17 @@ const handleDownloadCreated = (downloadItem: Browser.downloads.DownloadItem): vo
   // 字段被填充（说明浏览器已解析完响应头），就可以做出更准确的判断。
   //
   // R6-8 修复：加 .catch() 防止内部未捕获异常成为 unhandled rejection 噪音
-  startFallbackInterception(downloadId, downloadItem).catch((e) => {
-    console.error(
-      "[FluxDown] Unexpected error in startFallbackInterception:",
-      e,
-    );
-  });
+  if (linkCapture.owns(downloadItem)) {
+    // 右键链接事务只由 onDeterminingFilename 认领；响应前已中断的交还直接发送。
+    if (downloadItem.state === "interrupted") linkCapture.interrupted(downloadItem);
+  } else {
+    startFallbackInterception(downloadId, downloadItem).catch((e) => {
+      console.error(
+        "[FluxDown] Unexpected error in startFallbackInterception:",
+        e,
+      );
+    });
+  }
 
   // 30 秒后全面清理
   setTimeout(() => {
@@ -1124,6 +1168,17 @@ export function setInterceptListenersActive(active: boolean): void {
 /** 同步注册拦截监听；由 startBackground 调用一次。 */
 export function installIntercept(): void {
   setInterceptListenersActive(true);
+}
+
+/**
+ * 右键链接能否走浏览器捕获（与点击下载同一路径）：需要 onDeterminingFilename（Firefox 没有，
+ * 其 blocking 拦截只覆盖页面导航）、拦截已开启（关闭时监听已移除且浏览器下载栏可见），且 App
+ * 未处于熔断期。不满足时调用方照旧直接发送链接。
+ */
+export async function canCaptureLinkViaBrowser(): Promise<boolean> {
+  if (!hasDeterminingFilename || isAppKnownDown()) return false;
+  const settings = await getCachedSettings();
+  return settings.enabled && interceptListenersActive;
 }
 
 // ===== 同类产品核心策略：隐藏浏览器下载 UI =====

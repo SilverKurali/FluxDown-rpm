@@ -191,6 +191,8 @@ fn open_with(cx: &mut App, focus: bool) -> Option<WindowHandle<Root>> {
                 shutdown_status,
                 shutdown: shutdown_port,
                 on_user_started: Some(Rc::new(crate::progress_windows::user_started)),
+                run_plugin_command: Some(crate::plugin_contributions::command_runner()),
+                plugin_tab_view: Some(crate::plugin_contributions::tab_view_factory()),
             });
         });
 
@@ -201,6 +203,7 @@ fn open_with(cx: &mut App, focus: bool) -> Option<WindowHandle<Root>> {
             desktop.main_downloads = Some(downloads.downgrade());
             desktop.main_shell = Some(shell.downgrade());
         }
+        crate::plugin_contributions::attach_main_window(cx);
 
         let root = cx.new(|cx| Root::new(shell, window, cx));
         WindowRegistry::persist_bounds(RememberedWindow::Main, client, &root, window, cx);

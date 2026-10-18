@@ -63,6 +63,8 @@ interface Props {
   density: "compact" | "full";
   /** 快速下载输入框（连接时显示）。 */
   quickDownload?: boolean;
+  /** 未完成任务数变化（未连接视为 0）；popup 用于页签计数。 */
+  onActiveCountChange?: (count: number) => void;
 }
 
 export function TaskList(props: Props): JSX.Element {
@@ -109,6 +111,12 @@ export function TaskList(props: Props): JSX.Element {
       if (startTimer.current) clearTimeout(startTimer.current);
     };
   }, []);
+
+  const onActiveCountChange = props.onActiveCountChange;
+  const activeCount = state?.connected ? state.tasks.filter((x) => x.status !== STATUS.COMPLETED).length : 0;
+  useEffect(() => {
+    onActiveCountChange?.(activeCount);
+  }, [activeCount, onActiveCountChange]);
 
   const op = async (kind: "pause" | "resume" | "remove", taskId: string) => {
     const res = await nmhMessage({ type: "nmh-task-op", op: kind, taskId });

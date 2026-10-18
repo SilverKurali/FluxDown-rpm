@@ -239,6 +239,27 @@ impl NmhService {
         }
     }
 
+    /// plugin 层嗅探规则包；daemon 不支持（未编入插件）或查询失败时按「无插件规则」降级。
+    async fn plugin_sniff_rules(&self) -> Option<fluxdown_protocol::PluginSniffRulesDto> {
+        match self
+            .daemon
+            .call::<Value, fluxdown_protocol::PluginSniffRulesDto>(
+                fluxdown_protocol::method::DAEMON_PLUGIN_SNIFF_RULES,
+                None,
+            )
+            .await
+        {
+            Ok(dto) => Some(dto),
+            Err(error) => {
+                // Unsupported 是常态（无插件特性）；其余错误不应拖垮 capabilities / 官方规则同步。
+                if !matches!(error.code, ApplicationErrorCode::Unsupported) {
+                    tracing::warn!(code = ?error.code, "plugin sniff rules unavailable");
+                }
+                None
+            }
+        }
+    }
+
     async fn capabilities(&self, msg_id: u64) -> PipeResponse {
         let (plugins_supported, resolvers) = match self
             .daemon
@@ -251,6 +272,13 @@ impl NmhService {
             }
             Err(error) => return PipeResponse::error(msg_id, format!("{:?}", error.code)),
         };
+        let plugin_rules_sequence = if plugins_supported {
+            self.plugin_sniff_rules()
+                .await
+                .map_or(0, |dto| dto.sequence)
+        } else {
+            0
+        };
         PipeResponse::ok_data(
             msg_id,
             "ok",
@@ -259,6 +287,7 @@ impl NmhService {
                 "actions": SUPPORTED_ACTIONS,
                 "pluginsSupported": plugins_supported,
                 "resolvers": resolvers,
+                "pluginRulesSequence": plugin_rules_sequence,
             }),
         )
     }
@@ -284,7 +313,13 @@ impl NmhService {
             Ok(request) => request,
             Err(error) => return PipeResponse::error(msg_id, error.to_string()),
         };
-        PipeResponse::ok_data(msg_id, "ok", store.query(request.have).await)
+        let have_plugin = request.have.plugin();
+        let mut data = store.query(request.have).await;
+        let plugin_pack = select_plugin_pack(self.plugin_sniff_rules().await, have_plugin);
+        if let Some(object) = data.as_object_mut() {
+            object.insert("plugin".to_string(), plugin_pack);
+        }
+        PipeResponse::ok_data(msg_id, "ok", data)
     }
 
     async fn task_list(&self, msg_id: u64) -> PipeResponse {
@@ -355,6 +390,16 @@ impl NmhService {
             Err(error) => PipeResponse::error(msg_id, error.to_string()),
         }
     }
+}
+
+/// plugin 层嗅探规则包的应答值：缺省 `have` 或 daemon 序号更新时给 pack，否则 `null`。
+fn select_plugin_pack(
+    dto: Option<fluxdown_protocol::PluginSniffRulesDto>,
+    have: Option<u64>,
+) -> Value {
+    dto.filter(|dto| have.is_none_or(|known| dto.sequence > known))
+        .and_then(|dto| dto.pack)
+        .unwrap_or(Value::Null)
 }
 
 /// 只保留声明了 resolver URL 的插件；供扩展判断页面能否交给桌面端解析。
@@ -2759,5 +2804,44 @@ mod tests {
         assert_eq!(reply["success"], true);
         assert_eq!(reply["data"]["pluginsSupported"], false);
         assert_eq!(reply["data"]["resolvers"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn capabilities_reports_plugin_rules_sequence() {
+        let daemon = Arc::new(crate::daemon_client::DaemonClient::answering(|method| {
+            if method == fluxdown_protocol::method::DAEMON_PLUGIN_SNIFF_RULES {
+                Ok(json!({"sequence": 7, "pack": {"rules": []}}))
+            } else {
+                Ok(json!([]))
+            }
+        }));
+        let (service, _) = service_with(daemon);
+        let (mut client, server) = tokio::io::duplex(65536);
+        tokio::spawn(handle_stream(server, service));
+        let reply = exchange(&mut client, json!({"action": "capabilities", "msg_id": 1})).await;
+        assert_eq!(reply["data"]["pluginRulesSequence"], 7);
+    }
+
+    #[test]
+    fn plugin_pack_is_returned_only_when_newer_than_have() {
+        use super::select_plugin_pack;
+        use serde_json::Value;
+
+        let dto = |sequence, pack| fluxdown_protocol::PluginSniffRulesDto { sequence, pack };
+        let pack = json!({"packId": "plugin"});
+        assert_eq!(
+            select_plugin_pack(Some(dto(3, Some(pack.clone()))), None),
+            pack
+        );
+        assert_eq!(
+            select_plugin_pack(Some(dto(3, Some(pack.clone()))), Some(2)),
+            pack
+        );
+        assert_eq!(
+            select_plugin_pack(Some(dto(3, Some(pack.clone()))), Some(3)),
+            Value::Null
+        );
+        assert_eq!(select_plugin_pack(Some(dto(0, None)), None), Value::Null);
+        assert_eq!(select_plugin_pack(None, Some(1)), Value::Null);
     }
 }

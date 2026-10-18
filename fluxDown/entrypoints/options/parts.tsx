@@ -1,9 +1,12 @@
 /** options 各面板共用的版式组件。 */
 import type { ComponentChildren, JSX } from "preact";
 import { Button } from "@/ui/components/Button";
+import { IconButton } from "@/ui/components/IconButton";
 import { Modal } from "@/ui/components/Modal";
+import { Select } from "@/ui/components/Select";
 import { Toggle } from "@/ui/components/Toggle";
 import { useT } from "@/ui/i18n";
+import { PAGE_SIZE_OPTIONS, type PageSize, type PageSlice, pageWindow } from "./lib/pagination";
 
 export function PanelShell(props: { title: string; desc?: string; children?: ComponentChildren }): JSX.Element {
   return (
@@ -86,5 +89,75 @@ export function ConfirmModal(props: ConfirmModalProps): JSX.Element {
     >
       <div class="opt-confirm">{props.message}</div>
     </Modal>
+  );
+}
+
+interface PaginationProps {
+  total: number;
+  slice: PageSlice;
+  pageSize: PageSize;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (size: PageSize) => void;
+}
+
+/** 列表分页条；总数不超过最小每页条数时不渲染。翻页后若卡片顶部已滚出视口，滚回卡片顶部。 */
+export function Pagination(props: PaginationProps): JSX.Element | null {
+  const t = useT();
+  if (props.total <= PAGE_SIZE_OPTIONS[0]) return null;
+  const { page, pageCount, start, end } = props.slice;
+
+  const go = (target: number, e: MouseEvent) => {
+    if (target === page) return;
+    const card = (e.currentTarget as HTMLElement).closest(".opt-card");
+    props.onPageChange(target);
+    if (card && card.getBoundingClientRect().top < 0) card.scrollIntoView({ block: "start" });
+  };
+
+  return (
+    <div class="opt-pager">
+      <span class="opt-pager-summary">
+        {t("options.pager.summary", { from: String(start + 1), to: String(end), total: String(props.total) })}
+      </span>
+      <div class="opt-pager-nav">
+        <Select<`${PageSize}`>
+          value={`${props.pageSize}`}
+          label={t("options.pager.pageSize")}
+          options={PAGE_SIZE_OPTIONS.map((size) => ({
+            value: `${size}`,
+            label: t("options.pager.perPage", { count: String(size) }),
+          }))}
+          onChange={(v) => props.onPageSizeChange(Number(v) as PageSize)}
+        />
+        <IconButton
+          icon="chevronLeft"
+          label={t("options.pager.prev")}
+          disabled={page <= 1}
+          onClick={(e) => go(page - 1, e)}
+        />
+        {pageWindow(page, pageCount).map((item, i) =>
+          item === "gap" ? (
+            <span key={`gap-${i}`} class="opt-pager-gap">
+              …
+            </span>
+          ) : (
+            <button
+              key={item}
+              type="button"
+              class={`opt-pager-page${item === page ? " opt-pager-current" : ""}`}
+              aria-current={item === page ? "page" : undefined}
+              onClick={(e) => go(item, e)}
+            >
+              {item}
+            </button>
+          ),
+        )}
+        <IconButton
+          icon="chevronRight"
+          label={t("options.pager.next")}
+          disabled={page >= pageCount}
+          onClick={(e) => go(page + 1, e)}
+        />
+      </div>
+    </div>
   );
 }

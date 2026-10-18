@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use fluxdown_ui_account::{AccountView, ReferralView};
-use fluxdown_ui_extensions::ExtensionsView;
+use fluxdown_ui_extensions::{ExtensionsEvent, ExtensionsView};
 use fluxdown_ui_i18n::keys;
 use fluxdown_ui_settings::{SettingsContentSlots, SettingsTarget, SettingsView, VisibleSlot};
 use fluxdown_ui_shell::{AuxiliaryWindowView, auxiliary_window_options};
@@ -62,6 +62,19 @@ pub fn open(cx: &mut App) {
         });
         Desktop::global_mut(cx).settings_view = Some(settings.downgrade());
         attach(&session, &extensions, cx);
+        extensions.update(cx, |extensions, cx| {
+            extensions
+                .set_plugin_view_factory(crate::plugin_contributions::settings_view_factory(), cx);
+        });
+        cx.subscribe(&extensions, |_, event, cx| match event {
+            ExtensionsEvent::OpenPluginView { plugin, view } => {
+                let plugin = plugin.clone();
+                let view = view.clone();
+                // 事件在设置窗口的 update 栈内分发；开新窗口延后到栈外。
+                cx.defer(move |cx| crate::windows::plugin::open(cx, &plugin, &view));
+            }
+        })
+        .detach();
         let window_view =
             cx.new(|cx| AuxiliaryWindowView::new(translator, keys::SETTINGS, settings.into(), cx));
         let root = cx.new(|cx| Root::new(window_view, window, cx));

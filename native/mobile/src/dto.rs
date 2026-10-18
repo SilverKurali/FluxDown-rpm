@@ -233,6 +233,15 @@ pub struct VariantOptionDto {
     pub total_bytes: i64,
 }
 
+/// 多插件选择的候选插件（`PluginCandidateDto`）。
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginCandidateDto {
+    pub identity: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+}
+
 /// `FileExistsAction`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum FileExistsActionDto {
@@ -283,6 +292,12 @@ pub enum SelectionKindDto {
         rename_preview: String,
         actions: Vec<FileExistsActionDto>,
     },
+    /// 多个插件都能处理该链接，由用户选择本次使用的插件（可记为站点默认）。
+    Plugin {
+        site: String,
+        url: String,
+        candidates: Vec<PluginCandidateDto>,
+    },
 }
 
 /// `SelectionOutcome`。
@@ -292,6 +307,7 @@ pub enum SelectionOutcomeDto {
     Bt { indices: Vec<i32> },
     Variant { index: i32 },
     FileExists { action: FileExistsActionDto },
+    Plugin { identity: String, remember: bool },
     Cancelled,
 }
 
@@ -350,6 +366,23 @@ impl From<&proto::SelectionKind> for SelectionKindDto {
                 rename_preview: rename_preview.clone(),
                 actions: actions.iter().copied().map(Into::into).collect(),
             },
+            proto::SelectionKind::Plugin {
+                site,
+                url,
+                candidates,
+            } => Self::Plugin {
+                site: site.clone(),
+                url: url.clone(),
+                candidates: candidates
+                    .iter()
+                    .map(|candidate| PluginCandidateDto {
+                        identity: candidate.identity.clone(),
+                        name: candidate.name.clone(),
+                        version: candidate.version.clone(),
+                        description: candidate.description.clone(),
+                    })
+                    .collect(),
+            },
         }
     }
 }
@@ -365,6 +398,10 @@ impl From<&proto::SelectionOutcome> for SelectionOutcomeDto {
             proto::SelectionOutcome::FileExists { action } => Self::FileExists {
                 action: (*action).into(),
             },
+            proto::SelectionOutcome::Plugin { identity, remember } => Self::Plugin {
+                identity: identity.clone(),
+                remember: *remember,
+            },
             proto::SelectionOutcome::Cancelled => Self::Cancelled,
         }
     }
@@ -379,6 +416,9 @@ impl From<SelectionOutcomeDto> for proto::SelectionOutcome {
             SelectionOutcomeDto::FileExists { action } => Self::FileExists {
                 action: action.into(),
             },
+            SelectionOutcomeDto::Plugin { identity, remember } => {
+                Self::Plugin { identity, remember }
+            }
             SelectionOutcomeDto::Cancelled => Self::Cancelled,
         }
     }

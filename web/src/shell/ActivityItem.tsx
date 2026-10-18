@@ -3,6 +3,8 @@
 
 import { Link, useLocation } from '@tanstack/react-router'
 import { useT } from '../i18n'
+import { isPluginEntryActive } from '../pages/plugins/contributions'
+import type { PluginActivityEntry } from '../pages/plugins/contributions'
 import { cn } from '../lib/cn'
 import { ACTION_BUTTON, RAIL_BUTTON, resolveSide } from '../pages/downloads/statusbar/widget'
 import type { WidgetProps } from '../pages/downloads/statusbar/widget'
@@ -27,6 +29,26 @@ export function RouteItem({ entry, orientation = 'horizontal', side }: WidgetPro
       <Link
         to={entry.to ?? '/'}
         aria-label={label}
+        aria-current={active ? 'page' : undefined}
+        className={cn(rail ? RAIL_BUTTON : ACTION_BUTTON, active && BUTTON_ACTIVE)}
+      >
+        <Icon icon={entry.icon} size={rail ? 'xl' : 'lg'} className={cn(active && 'text-nav-selected-icon')} />
+      </Link>
+    </Tooltip>
+  )
+}
+
+/** 插件活动页入口：标签是插件视图标题原文，图标固定 Sparkles。 */
+export function PluginItem({ entry, orientation = 'horizontal', side }: WidgetProps & { entry: PluginActivityEntry }) {
+  const { pathname } = useLocation()
+  const active = isPluginEntryActive(entry, pathname)
+  const rail = orientation === 'rail'
+  return (
+    <Tooltip content={entry.label} side={resolveSide(orientation, side)}>
+      <Link
+        to="/plugins/$pluginId/$viewId"
+        params={{ pluginId: entry.identity, viewId: entry.viewId }}
+        aria-label={entry.label}
         aria-current={active ? 'page' : undefined}
         className={cn(rail ? RAIL_BUTTON : ACTION_BUTTON, active && BUTTON_ACTIVE)}
       >

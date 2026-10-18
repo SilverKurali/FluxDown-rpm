@@ -8,7 +8,7 @@
  *
  * 从**线上** sitemap 抓取 URL(而非本地 dist/):
  *  - 部署方式为 Docker,runtime 容器仅含 dist/,无 scripts/;从线上抓取让本脚本
- *    可在宿主机 website/ 目录直接跑,不依赖容器文件布局。
+ *    可在宿主机 website-v2/ 目录直接跑,不依赖容器文件布局。
  *  - 提交前 sitemap 已线上可访问,天然保证 key 文件(public/<KEY>.txt)也已上线,
  *    避免 IndexNow 422(key 校验失败)。
  *

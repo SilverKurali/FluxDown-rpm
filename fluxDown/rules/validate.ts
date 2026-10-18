@@ -1,5 +1,5 @@
 /** 规则包校验：整包不合格抛 PackRejectedError，单条不合格则剔除。 */
-import { parseHostPattern } from "./glob";
+import { hostMatchesPattern, parseHostPattern } from "./glob";
 import {
   FORBIDDEN_RULE_HEADERS,
   RULE_ENGINE_VERSION,
@@ -15,7 +15,7 @@ import {
 const MAX_RULES_PER_PACK = 2000;
 const MAX_REGEX_LEN = 256;
 const MAX_SELECTOR_LEN = 512;
-const ID_RE = /^(builtin|official|community|local)\.[a-z0-9][a-z0-9._-]{1,62}$/;
+const ID_RE = /^(builtin|official|plugin|community|local)\.[a-z0-9][a-z0-9._-]{1,62}$/;
 const RESOURCE_TYPES = new Set([
   "video",
   "audio",
@@ -134,6 +134,7 @@ function hasHost(m: MatchSpec): boolean {
 function checkRule(rule: SniffRuleV1, expectedTier: RuleTier): string | null {
   if (!rule || typeof rule !== "object") return "规则不是对象";
   if (typeof rule.id !== "string" || !ID_RE.test(rule.id)) return "id 非法";
+  if (rule.tier === "plugin" && rule.id.length > 64) return "id 非法";
   if (rule.tier !== expectedTier) return "tier 与 packId 不符";
   if (!rule.id.startsWith(`${rule.tier}.`)) return "id 前缀与 tier 不符";
   if (!Number.isInteger(rule.version) || rule.version < 1) return "version 非法";
@@ -154,7 +155,7 @@ function checkRule(rule: SniffRuleV1, expectedTier: RuleTier): string | null {
     if (e) return `exclude: ${e}`;
   }
 
-  if (rule.tier === "community" && !hasHost(rule.match))
+  if ((rule.tier === "community" || rule.tier === "plugin") && !hasHost(rule.match))
     return "社区规则必须限定 host 或 pageHost";
 
   const a = rule.action;
@@ -192,7 +193,7 @@ function checkRule(rule: SniffRuleV1, expectedTier: RuleTier): string | null {
       const sel = checkSelector(a.selector);
       if (sel) return sel;
       if (typeof a.attr !== "string") return "attr 缺失";
-      const err = checkEmit(a.emit, new Set(["value", "text"]), rule.tier);
+      const err = checkEmit(a.emit, new Set(["value", "text", "page"]), rule.tier);
       if (err) return err;
       break;
     }
@@ -203,6 +204,14 @@ function checkRule(rule: SniffRuleV1, expectedTier: RuleTier): string | null {
       if (!Array.isArray(a.hosts) || a.hosts.length < 2) return "mirror.hosts 至少两个";
       for (const h of a.hosts) {
         if (typeof h !== "string" || !parseHostPattern(h)) return "mirror.hosts 非法";
+      }
+      if (rule.tier === "community") {
+        const scope = [...(rule.match.host ?? []), ...(rule.match.pageHost ?? [])].flatMap((p) => parseHostPattern(p) ?? []);
+        for (const h of a.hosts) {
+          const domain = parseHostPattern(h)?.domain ?? "";
+          if (!scope.some((p) => hostMatchesPattern(domain, p)))
+            return `社区规则的 mirror.hosts 必须在 match.host / pageHost 范围内: ${h}`;
+        }
       }
       break;
     case "title":
@@ -215,6 +224,7 @@ function checkRule(rule: SniffRuleV1, expectedTier: RuleTier): string | null {
       break;
     }
     case "headers": {
+      if (rule.tier === "plugin") return "plugin 规则不得改写请求头";
       if (!a.set || typeof a.set !== "object" || Array.isArray(a.set)) return "headers.set 缺失";
       const entries = Object.entries(a.set);
       if (entries.length === 0 || entries.length > 16) return "headers.set 数量非法";

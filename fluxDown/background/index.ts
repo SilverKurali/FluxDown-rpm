@@ -17,6 +17,7 @@ import {
   setInterceptListenersActive,
   syncDownloadShelfState,
 } from "./intercept";
+import { installLinkCapture } from "./link-capture";
 import { createContextMenus, installMenus } from "./menus";
 import { downloadPlayingMedia } from "./downloads";
 import { installMessages } from "./messages";
@@ -73,6 +74,7 @@ export function startBackground(): void {
   installSniff();
   installIntercept();
   installMenus();
+  installLinkCapture();
   installTaskListeners();
   installCaptureTracker();
   installMessages();
@@ -87,7 +89,18 @@ export function startBackground(): void {
   applyInterceptState();
 
   // 快捷键切换拦截开关（替代原来的 Alt+Click 绕过机制）
-  browser.commands.onCommand.addListener(async (command) => {
+  browser.commands.onCommand.addListener(async (command, tab) => {
+    if (command === "open-side-panel") {
+      // Chromium 专用（Firefox 走内置 _execute_sidebar_action）。快捷键算用户手势，
+      // 但 sidePanel.open 必须在任何 await 之前同步调用。
+      const windowId = tab?.windowId;
+      if (windowId !== undefined && typeof browser.sidePanel?.open === "function") {
+        browser.sidePanel
+          .open({ windowId })
+          .catch((e) => console.warn("[FluxDown] open side panel failed:", e));
+      }
+      return;
+    }
     if (command === "download-playing-media") {
       await downloadPlayingMedia();
       return;

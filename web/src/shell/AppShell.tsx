@@ -8,6 +8,8 @@
 import { Outlet, useLocation } from '@tanstack/react-router'
 import { useEffect } from 'react'
 import { useT } from '../i18n'
+import { isPluginEntryActive } from '../pages/plugins/contributions'
+import { usePluginActivityEntries, usePluginShellBridge } from '../pages/plugins/usePluginContributions'
 import { useIsMobile } from '../ui'
 import { AccountGuards } from './AccountGuards'
 import { ActivityRail } from './ActivityRail'
@@ -25,6 +27,11 @@ const TITLE_ZONE = 'flex shrink-0 items-center gap-1'
 function useDefaultTitle(): string {
   const t = useT()
   const { pathname } = useLocation()
+  const pluginEntries = usePluginActivityEntries()
+  if (pathname.startsWith('/plugins/')) {
+    const entry = pluginEntries.find((item) => isPluginEntryActive(item, pathname))
+    if (entry) return entry.label
+  }
   if (pathname.startsWith('/rss')) return t('sidebarRss')
   if (pathname.startsWith('/webhooks')) return t('pushNavTitle')
   if (pathname.startsWith('/settings')) return t('settings')
@@ -52,6 +59,7 @@ export function AppShell() {
   const defaultTitle = useDefaultTitle()
   const mobile = useIsMobile()
   useExitChromeEditing(mobile)
+  usePluginShellBridge()
   const titleBar = (
     <TitleBar
       defaultTitle={defaultTitle}

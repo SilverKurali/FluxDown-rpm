@@ -210,6 +210,18 @@ export interface CreatedTask {
   taskId: string;
 }
 
+export type TaskVerifyStatus = 'intact' | 'damaged' | 'unverifiable';
+
+/** `daemon.task.verify` 结果（BT 已完成任务的分块完整性校验）。 */
+export interface TaskVerifyResult {
+  status: TaskVerifyStatus;
+  totalPieces: number;
+  verifiedPieces: number;
+  badPieces: number;
+  skippedPieces: number;
+  damagedFiles: string[];
+}
+
 /** `daemon.task.createMany` 单次调用的条目上限（`CREATE_TASKS_MAX_ITEMS`）；更大的导入须按块拆分。 */
 export const CREATE_TASKS_MAX_ITEMS = 512;
 /** `daemon.task.createMany` 幂等键 `batchId` 的最大长度（字节，`CREATE_TASKS_BATCH_ID_MAX_LEN`）。 */

@@ -31,3 +31,31 @@ export const WIDGET_LABEL_KEY: Readonly<Record<string, string>> = {
   proxy: 'statusBarProxyLabel',
   diskFree: 'chromeWidgetDiskFree',
 }
+
+// ── 动态条目（插件活动页）：与 GPUI `ShellView::set_dynamic_routes` 同 id（`plugin:<identity>:<viewId>`）、同默认位置（railTop）──
+
+type CatalogListener = () => void
+
+let pluginSpecs: readonly ChromeItemSpec[] = []
+let catalog: readonly ChromeItemSpec[] = CHROME_CATALOG
+const catalogListeners = new Set<CatalogListener>()
+
+/** 当前目录（静态条目 + 插件条目）；内容变化时引用才变。 */
+export function getChromeCatalog(): readonly ChromeItemSpec[] {
+  return catalog
+}
+
+/** 设置插件条目（全量替换）；id 序列不变时不触发更新。 */
+export function setPluginChromeSpecs(specs: readonly ChromeItemSpec[]): void {
+  if (specs.length === pluginSpecs.length && specs.every((spec, index) => spec.id === pluginSpecs[index]?.id)) return
+  pluginSpecs = specs
+  catalog = [...CHROME_CATALOG, ...specs]
+  for (const listener of catalogListeners) listener()
+}
+
+export function subscribeChromeCatalog(listener: CatalogListener): () => void {
+  catalogListeners.add(listener)
+  return () => {
+    catalogListeners.delete(listener)
+  }
+}

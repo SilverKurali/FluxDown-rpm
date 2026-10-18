@@ -34,7 +34,7 @@ import {
   type ScanContext,
 } from "@/page/dom-scan";
 import { MediaTracker } from "@/page/media-tracker";
-import { compileBuiltin } from "@/rules/engine";
+import { compileBundled } from "@/rules/engine";
 import { createFloatButton, type FloatButtonController } from "@/ui/features/FloatButton";
 import { normalizeDashManifest, parseDashManifestText } from "@/utils/dash-manifest";
 import { isHttpUrl } from "@/utils/media-sniff";
@@ -92,7 +92,7 @@ export default defineContentScript({
 
   async main(ctx) {
     const top = isTopFrame();
-    const rules = compileBuiltin();
+    const rules = compileBundled();
 
     let config: PageConfig | null = null;
     const sniffImages = (): boolean => config?.sniffImages === true;
@@ -257,8 +257,9 @@ export default defineContentScript({
         if (!config || !sniffActive() || config.dom.length === 0) return;
         const fresh: DomRuleHit[] = [];
         for (const rule of config.dom) {
-          for (const hit of runDomRule(rule)) {
-            const key = `${hit.ruleId}\0${hit.value}`;
+          for (const hit of runDomRule(rule, scanCtx.keyOf)) {
+            // 元素晚于首次扫描才被跟踪时，带上元素归属再报一次（background 合并补齐 elementKey）。
+            const key = `${hit.ruleId}\0${hit.value}\0${hit.elementKey ?? ""}`;
             if (seenDomHits.has(key)) continue;
             seenDomHits.add(key);
             fresh.push(hit);

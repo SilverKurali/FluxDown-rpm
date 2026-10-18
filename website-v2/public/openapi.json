@@ -4216,6 +4216,13 @@
           "name": {
             "type": "string"
           },
+          "networkHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "插件桌面视图声明的网络主机（授权界面展示）。"
+          },
           "permissions": {
             "type": "array",
             "items": {
@@ -4344,6 +4351,86 @@
           }
         }
       },
+      "PluginCommandDeclDto": {
+        "type": "object",
+        "description": "命令贡献声明。",
+        "required": [
+          "id",
+          "title"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "palette": {
+            "type": "boolean"
+          },
+          "taskMenu": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "PluginContributionsDto": {
+        "type": "object",
+        "description": "插件贡献点（镜像 `engine::plugin::ContributesDecl`）。",
+        "properties": {
+          "commands": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginCommandDeclDto"
+            }
+          },
+          "sniffRules": {
+            "type": "boolean",
+            "description": "是否贡献浏览器扩展嗅探规则。"
+          },
+          "views": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginViewDeclDto"
+            }
+          }
+        }
+      },
+      "PluginDesktopEntryDto": {
+        "type": "object",
+        "description": "视图的桌面增强入口。",
+        "required": [
+          "entry"
+        ],
+        "properties": {
+          "entry": {
+            "type": "string",
+            "description": "包内相对路径（`.js` / `.mjs`），默认导出继承 `View` 的类。"
+          },
+          "height": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "初始窗口高度（逻辑像素，仅 `window` 视图）。"
+          },
+          "networkHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "界面脚本可直连的网络主机（gpui-shell 网络授权只接受逐个主机名）。"
+          },
+          "width": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "初始窗口宽度（逻辑像素，仅 `window` 视图）。"
+          }
+        }
+      },
       "PluginDto": {
         "type": "object",
         "description": "已安装插件视图（列表/设置表单）。",
@@ -4362,6 +4449,24 @@
             "type": "boolean",
             "description": "是否声明平台登录入口。"
           },
+          "consentPending": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "尚未授权的权限（授权流程启用前恒为空）。"
+          },
+          "consentPendingHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "尚未授权的网络主机（授权流程启用前恒为空）。"
+          },
+          "contributions": {
+            "$ref": "#/components/schemas/PluginContributionsDto",
+            "description": "manifest `contributes`：视图 / 命令 / 嗅探规则贡献点。"
+          },
           "description": {
             "type": "string"
           },
@@ -4370,7 +4475,7 @@
           },
           "disabledReason": {
             "type": "string",
-            "description": "`None` / `Manual` / `CircuitBreaker`。"
+            "description": "`None` / `Manual` / `CircuitBreaker` / `Revoked`。"
           },
           "enabled": {
             "type": "boolean"
@@ -4392,12 +4497,37 @@
           "name": {
             "type": "string"
           },
+          "networkHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "全部桌面视图声明的网络主机（排序去重）。"
+          },
+          "packageDir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "插件包在 daemon 主机上的绝对目录（仅已加载插件有值）；本机桌面端据此读取 `desktop.entry`。"
+          },
           "permissions": {
             "type": "array",
             "items": {
               "type": "string"
             },
             "description": "manifest 声明的能力权限（如 `[\"ffmpeg\"]`，供 UI 展示授权徽章）。"
+          },
+          "resolverUrls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "manifest resolvers[0].match.urls（glob，语义见 url_glob_match）。"
+          },
+          "risk": {
+            "type": "string",
+            "description": "风险等级（由权限推导）：`standard` / `elevated` / `full`。"
           },
           "settings": {
             "type": "array",
@@ -4423,6 +4553,42 @@
             "description": "manifest 声明的订阅 provider ID，供订阅创建界面生成可选来源。"
           },
           "version": {
+            "type": "string"
+          }
+        }
+      },
+      "PluginViewDeclDto": {
+        "type": "object",
+        "description": "视图贡献声明。",
+        "required": [
+          "id",
+          "title",
+          "location"
+        ],
+        "properties": {
+          "desktop": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PluginDesktopEntryDto",
+                "description": "桌面增强实现（仅 GPUI 桌面端经 gpui-shell 运行，daemon 不执行）。"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string",
+            "description": "`activity` / `settings` / `taskDetail` / `window`。"
+          },
+          "portable": {
+            "type": "boolean",
+            "description": "是否有可移植实现（manifest 声明了 `main`，视图由 main 内的 `flux.ui.view` 提供）。"
+          },
+          "title": {
             "type": "string"
           }
         }

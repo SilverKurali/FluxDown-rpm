@@ -304,6 +304,13 @@ export function ResourceList(props: Props): JSX.Element {
             </div>
           </div>
           {isPlaying ? <Badge tone="accent">{t("list.playing")}</Badge> : null}
+          {v && isPreviewable(c.type) ? (
+            <IconButton
+              icon="play"
+              label={t("list.preview")}
+              onClick={() => setPreview({ url: v.videoUrl, title: c.title, type: c.type, mimeType: v.mimeType })}
+            />
+          ) : null}
           <IconButton
             icon="download"
             label={t("panel.download")}
@@ -317,17 +324,6 @@ export function ResourceList(props: Props): JSX.Element {
                 <button type="button" onClick={() => v && void copy(v.videoUrl)} disabled={!v}>
                   <Icon name="copy" size={13} /> {t("list.copyLink")}
                 </button>
-                {v && isPreviewable(c.type) ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMenuKey(null);
-                      setPreview({ url: v.videoUrl, title: c.title, type: c.type, mimeType: v.mimeType });
-                    }}
-                  >
-                    <Icon name="play" size={13} /> {t("list.preview")}
-                  </button>
-                ) : null}
                 {c.variants.length > 1 && c.downloadable ? (
                   <button
                     type="button"
@@ -376,6 +372,13 @@ export function ResourceList(props: Props): JSX.Element {
             <div class="fd-row-meta" title={meta.join(" · ")}>{meta.join(" · ")}</div>
           </div>
           {r.confidence === "low" ? <Badge tone="warning">{t("list.lowConfidence")}</Badge> : null}
+          {isPreviewable(r.type) ? (
+            <IconButton
+              icon="play"
+              label={t("list.preview")}
+              onClick={() => setPreview({ url: r.url, title: name, type: r.type, mimeType: r.mimeType })}
+            />
+          ) : null}
           <IconButton
             icon="download"
             label={t("panel.download")}
@@ -389,17 +392,6 @@ export function ResourceList(props: Props): JSX.Element {
                 <button type="button" onClick={() => void copy(r.url)}>
                   <Icon name="copy" size={13} /> {t("list.copyLink")}
                 </button>
-                {isPreviewable(r.type) ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMenuKey(null);
-                      setPreview({ url: r.url, title: name, type: r.type, mimeType: r.mimeType });
-                    }}
-                  >
-                    <Icon name="play" size={13} /> {t("list.preview")}
-                  </button>
-                ) : null}
               </div>
             ) : null}
           </div>

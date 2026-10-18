@@ -14,11 +14,11 @@
  *   本文件随 FluxDown 以 AGPL-3.0 分发。
  */
 
-import { compileBuiltin } from "@/rules/engine";
+import { compileBundled } from "@/rules/engine";
 import { isStreamingUrl } from "./resource-types";
 
 /** 只含内置规则的分类器：仅按扩展名判定（无 MIME），与页面上下文无关。 */
-const builtinRules = compileBuiltin();
+const builtinRules = compileBundled();
 
 /** 仅 http(s)：挡 blob: / data: / 页面 URL 被上报（引擎无法 fetch 非 http 资源）。 */
 export function isHttpUrl(url: string): boolean {

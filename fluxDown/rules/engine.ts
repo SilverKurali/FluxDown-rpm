@@ -4,6 +4,7 @@
  */
 import type { ConfidenceLevel } from "../utils/resource-types";
 import builtinJson from "./builtin.json";
+import officialJson from "./official.json";
 import {
   hostMatchesPattern,
   parseHostPattern,
@@ -135,7 +136,7 @@ export interface CompiledRules {
   renderDomEmit(
     rule: RuleRef,
     emit: EmitSpec,
-    fields: { value: string; text: string },
+    fields: { value: string; text: string; page: string },
   ): Emitted | null;
   listRules(): RuleListEntry[];
   /** 所有生效 resource 规则 match.ext 的并集（含 image），供 UI / 其它模块使用 */
@@ -459,6 +460,21 @@ export function compileRules(input: CompileInput): CompiledRules {
     for (const e of c.rule.match.ext ?? []) known.add(e.toLowerCase());
   }
 
+  // 社区规则产出的地址只能落在该规则 match.host / pageHost 声明的站点内，
+  // 防止规则把任意外部地址伪装成下载资源。
+  const communityScope = new Map<string, HostPattern[]>();
+  for (const { rule } of active) {
+    if (rule.tier === "community") {
+      communityScope.set(rule.id, compileHosts([...(rule.match.host ?? []), ...(rule.match.pageHost ?? [])]));
+    }
+  }
+  const emitAllowed = (rule: RuleRef, url: string): boolean => {
+    const scope = communityScope.get(rule.id);
+    if (scope === undefined) return true;
+    const host = hostOf(url);
+    return host !== "" && scope.some((p) => hostMatchesPattern(host, p));
+  };
+
   const globalStrip = new Set<string>();
   const scopedStrip: CRule[] = [];
   for (const c of stripRules) {
@@ -661,7 +677,7 @@ export function compileRules(input: CompileInput): CompiledRules {
         const emits: Emitted[] = [];
         for (const el of elements) {
           const e = emitOne(a.emit, scalarFields(el, a.fields));
-          if (e) emits.push(e);
+          if (e && emitAllowed(r.ref, e.url)) emits.push(e);
         }
         if (emits.length > 0) out.push({ rule: r.ref, emits });
       }
@@ -727,8 +743,9 @@ export function compileRules(input: CompileInput): CompiledRules {
       return groups;
     },
 
-    renderDomEmit(_rule, emit, fields) {
-      return emitOne(emit, { value: fields.value, text: fields.text });
+    renderDomEmit(rule, emit, fields) {
+      const e = emitOne(emit, { value: fields.value, text: fields.text, page: fields.page });
+      return e && emitAllowed(rule, e.url) ? e : null;
     },
 
     listRules() {
@@ -741,16 +758,27 @@ export function compileRules(input: CompileInput): CompiledRules {
   };
 }
 
-// ===== 内置包 =====
+// ===== 随扩展打包的规则 =====
 
 export const BUILTIN_PACK = builtinJson as unknown as RulePack;
 
-/** 仅含 builtin 包的求值器（page hooks 使用）。 */
-export function compileBuiltin(
+/**
+ * 官方包快照：规则仓 zerx-lab/fluxdown-sniff-rules 已发布的 `dist/official.json` 载荷，
+ * 由 `bun scripts/sniff-rules/sync-repo.ts seed` 生成，勿手改。远程同步到更高 sequence 时被替换。
+ */
+export const BUNDLED_OFFICIAL_PACK = officialJson as unknown as RulePack;
+
+/** 远程官方包与随包快照取 sequence 较新者（相同时用远程，二者内容一致）。 */
+export function effectiveOfficialPack(stored: RulePack | undefined): RulePack {
+  return stored && stored.sequence >= BUNDLED_OFFICIAL_PACK.sequence ? stored : BUNDLED_OFFICIAL_PACK;
+}
+
+/** 仅含随包规则（builtin + 官方包快照）的求值器：页面钩子、内容脚本与远程包加载前使用。 */
+export function compileBundled(
   options: Partial<CompileInput["options"]> = {},
 ): CompiledRules {
   return compileRules({
-    packs: [BUILTIN_PACK],
+    packs: [BUILTIN_PACK, BUNDLED_OFFICIAL_PACK],
     overrides: {},
     revocations: null,
     options: {

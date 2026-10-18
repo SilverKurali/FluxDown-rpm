@@ -22,6 +22,7 @@ mod legacy_themes;
 mod lifecycle;
 mod logging;
 mod menus;
+mod plugin_contributions;
 mod plugin_notices;
 mod power;
 mod preference_writes;

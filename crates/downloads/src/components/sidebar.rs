@@ -70,7 +70,6 @@ impl DownloadView {
     /// 折叠箭头与 `trailing` 操作按钮只在悬停标题时出现。
     fn section_header(
         &self,
-        id: &'static str,
         label: SharedString,
         section: SidebarSection,
         open_amount: f32,
@@ -92,7 +91,11 @@ impl DownloadView {
         let hide_label = self.strings.hide_section.clone();
 
         h_flex()
-            .id(id)
+            .id(match section {
+                SidebarSection::Status => "download-status-toggle",
+                SidebarSection::Queues => "download-queue-toggle",
+                SidebarSection::Devices => "download-devices-toggle",
+            })
             .group(SECTION_HEADER_GROUP)
             .h(header_height)
             .px(spacing.sm)
@@ -565,7 +568,6 @@ impl DownloadView {
 
         Self::section_container(first, cx)
             .child(self.section_header(
-                "download-status-toggle",
                 self.strings.sidebar_status.clone(),
                 SidebarSection::Status,
                 open_amount,
@@ -779,7 +781,6 @@ impl DownloadView {
         }
         Self::section_container(first, cx)
             .child(self.section_header(
-                "download-queue-toggle",
                 self.strings.sidebar_queues.clone(),
                 SidebarSection::Queues,
                 open_amount,
@@ -892,7 +893,6 @@ impl DownloadView {
         }
         Self::section_container(first, cx)
             .child(self.section_header(
-                "download-devices-toggle",
                 self.strings.sidebar_devices.clone(),
                 SidebarSection::Devices,
                 open_amount,

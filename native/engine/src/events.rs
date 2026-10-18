@@ -182,6 +182,24 @@ pub enum EngineEvent {
         running: bool,
     },
 
+    /// 常驻插件宿主渲染出一棵新的可移植视图树（未规范化的原始 JSON，由 daemon
+    /// `normalize_view` + `diff_view` 后推给 UI）。仅 `plugins` feature 下由
+    /// `PluginManager` 发出。
+    PluginViewRendered {
+        session: String,
+        tree: serde_json::Value,
+    },
+    /// 可移植视图渲染 / 事件处理失败（会话仍保持打开，下一次渲染可恢复）。
+    PluginViewFailed { session: String, message: String },
+    /// 可移植视图会话已结束（`reason`：`closed` / `expired` / `pluginUnloaded`）。
+    PluginViewClosed { session: String, reason: String },
+    /// 插件经 `flux.ui.toast` 请求的提示（`level`：info/success/warning/error）。
+    PluginToast {
+        identity: String,
+        level: String,
+        text: String,
+    },
+
     /// 全部任务组快照——组建/删除/改名/回收（GC）后发送。兼容 WebSocket
     /// 事件为 `groupsChanged`。组**进度**不在此列
     /// （仍由宿主按 `group_id` 对 `TaskProgress` 做 SUM 聚合，引擎不发组级进度）。

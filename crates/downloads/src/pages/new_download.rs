@@ -259,7 +259,7 @@ pub struct NewDownloadView {
     save_site_auth: bool,
     auth_autofill: AuthAutofill,
     hint_fill: HintAutofill,
-    /// 链接预探测（#402）：文件名 / 大小提示，仅展示，不进入提交请求。
+    /// 链接预探测（#402）：文件名 / 大小提示，并把探测名预填进「文件名」输入框供编辑。
     probe: LinkProbe,
     proxy_choice: ProxyChoice,
     custom_proxy: Entity<InputState>,
@@ -881,7 +881,7 @@ impl NewDownloadView {
             ignore_tls_errors: self.ignore_tls_errors,
             headers: self.header_map(cx),
             start_paused: later,
-            rename: self.rename.read(cx).value().trim().to_owned(),
+            rename: self.rename_value(cx),
             http_user: self.http_user.read(cx).value().trim().to_owned(),
             http_password: self.http_password.read(cx).value().to_string(),
             save_site_auth: self.save_site_auth,
@@ -1072,7 +1072,7 @@ impl NewDownloadView {
             RemoteDirCheck::Explicit(dir) => Some(dir),
         };
         let single = self.entries.len() == 1;
-        let rename = self.rename.read(cx).value().trim().to_owned();
+        let rename = self.rename_value(cx);
         let items = self
             .entries
             .iter()

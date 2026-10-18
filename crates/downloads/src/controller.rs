@@ -113,6 +113,11 @@ pub enum DownloadsCommand {
         task_id: String,
         segments: i32,
     },
+    /// 已完成 BT 任务的完整性校验（`daemon.task.verify`，慢方法）：结果为
+    /// [`DownloadsResult::TaskVerify`]；同一任务校验在途时为 `conflict`。
+    VerifyTask {
+        task_id: String,
+    },
     Delete {
         task_id: String,
         delete_files: bool,
@@ -272,6 +277,8 @@ pub enum DownloadsResult {
     FileIcon(Vec<u8>),
     /// `CreateMany` 的逐条结果（与请求条目同序）。
     CreateMany(fluxdown_protocol::DaemonCreateTasksResult),
+    /// `VerifyTask` 的校验报告。
+    TaskVerify(fluxdown_protocol::TaskVerifyResult),
 }
 
 impl DownloadsResult {

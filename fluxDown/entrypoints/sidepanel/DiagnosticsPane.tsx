@@ -196,7 +196,6 @@ export function DiagnosticsPane(props: Props): JSX.Element {
             </Row>
             <Row label={t("sidepanel.diag.official")}>{docLine(sync.official, never)}</Row>
             <Row label={t("sidepanel.diag.community")}>{docLine(sync.community, never)}</Row>
-            <Row label={t("sidepanel.diag.revocations")}>{docLine(sync.revocations, never)}</Row>
             <Row label={t("sidepanel.diag.lastSync")}>
               {sync.lastSyncAt ? new Date(sync.lastSyncAt).toLocaleString() : never}
             </Row>

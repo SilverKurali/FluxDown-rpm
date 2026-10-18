@@ -23,7 +23,7 @@ use gpui_component::{
 };
 use serde_json::Value;
 
-use crate::view::{ShellAction, ShellActionContent, ShellRoute, ShellView};
+use crate::view::{ShellAction, ShellActionContent, ShellLabel, ShellRoute, ShellView};
 use crate::{ChromeFamilies, ChromeFamily, ChromeItemSpec, ChromeLayout, ChromeZone};
 
 /// 活动栏轨宽度：32px 按钮居中 + 左右各 8px 留白。
@@ -127,6 +127,7 @@ enum Item<'a> {
 impl ShellView {
     /// 宿主偏好回流：按目录归一化后与当前布局不同才重绘。
     pub fn apply_layout(&mut self, stored: Option<&Value>, cx: &mut Context<Self>) {
+        self.stored_layout = stored.cloned();
         let layout = ChromeLayout::from_value(stored, &self.catalog);
         if layout != self.layout {
             self.layout = layout;
@@ -173,9 +174,11 @@ impl ShellView {
         }
     }
 
-    fn persist_layout(&self, cx: &mut App) {
+    fn persist_layout(&mut self, cx: &mut App) {
+        let value = self.layout.to_value();
+        self.stored_layout = Some(value.clone());
         let handler = Rc::clone(&self.on_layout_change);
-        handler(self.layout.to_value(), cx);
+        handler(value, cx);
     }
 
     fn item(&self, id: &str) -> Option<Item<'_>> {
@@ -195,6 +198,13 @@ impl ShellView {
         SharedString::from(self.translator.read(cx).text(key).to_owned())
     }
 
+    fn resolve_label(&self, label: &ShellLabel, cx: &App) -> SharedString {
+        match label {
+            ShellLabel::Key(key) => self.label(key, cx),
+            ShellLabel::Text(text) => text.clone(),
+        }
+    }
+
     /// 渲染一个条目；隐藏的路由 / 动作与（非编辑模式下）无内容的控件返回 `None`。
     fn place_item(
         &self,
@@ -204,18 +214,18 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) -> Option<Placed> {
         let rail = zone.family() == ChromeFamily::Rail;
-        let (element, selected, anchors_rail, label_key) = match self.item(id)? {
+        let (element, selected, anchors_rail, label) = match self.item(id)? {
             Item::Route(route) => {
                 if !route.visible {
                     return None;
                 }
-                let selected = self.active_route == Some(route.id);
+                let selected = self.active_route.as_ref() == Some(&route.id);
                 let element = if rail {
                     self.rail_route_button(route, selected, window, cx)
                 } else {
                     self.inline_route_button(route, zone, selected, window, cx)
                 };
-                (element, selected, route.optional, route.label_key)
+                (element, selected, route.optional, route.label.clone())
             }
             Item::Action(action) => {
                 if !action.visible {
@@ -226,7 +236,12 @@ impl ShellView {
                 } else {
                     self.inline_action_button(action, zone, cx)
                 };
-                (element, false, action.optional, action.label_key)
+                (
+                    element,
+                    false,
+                    action.optional,
+                    ShellLabel::Key(action.label_key),
+                )
             }
             Item::Widget(widget) => {
                 let render = Rc::clone(&widget.render);
@@ -236,11 +251,11 @@ impl ShellView {
                     None if self.editing => self.widget_placeholder(widget, rail, cx),
                     None => return None,
                 };
-                (element, false, true, widget.label_key)
+                (element, false, true, ShellLabel::Key(widget.label_key))
             }
         };
         let element = if self.editing {
-            self.editable(id, zone, element, self.label(label_key, cx), cx)
+            self.editable(id, zone, element, self.resolve_label(&label, cx), cx)
         } else if zone.family() == ChromeFamily::Title {
             // 顶栏条目拦截左键按下：否则冒泡到标题栏开始拖动窗口。
             div()
@@ -366,24 +381,28 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let icon_size = active_theme(cx).extended().icon.lg + ACTIVITY_ICON_EXTRA;
-        let icon_color =
-            color_transition(route.button_id, nav_icon_color(selected, cx), window, cx);
-        let label = self.label(route.label_key, cx);
+        let icon_color = color_transition(
+            route.button_id.clone(),
+            nav_icon_color(selected, cx),
+            window,
+            cx,
+        );
+        let label = self.resolve_label(&route.label, cx);
         let tooltip_label = label.clone();
-        let route_id = route.id;
+        let route_id = route.id.clone();
         rail_tile()
-            .id(route.tooltip_id)
+            .id(route.tooltip_id.clone())
             .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
             .child(
                 activity_button(
-                    route.button_id,
+                    route.button_id.clone(),
                     label,
                     route.icon.clone().size(icon_size).text_color(icon_color),
                     selected,
                     ACTIVITY_BUTTON_SIZE,
                     cx,
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.navigate(route_id, cx))),
+                .on_click(cx.listener(move |this, _, _, cx| this.navigate(route_id.clone(), cx))),
             )
             .into_any_element()
     }
@@ -401,27 +420,31 @@ impl ShellView {
         let radius = theme.components().nav_item_radius;
         let selected_bg = theme.extended().colors.nav_selected;
         let (button_size, icon_size) = inline_metrics(zone, cx);
-        let icon_color =
-            color_transition(route.button_id, nav_icon_color(selected, cx), window, cx);
-        let label = self.label(route.label_key, cx);
+        let icon_color = color_transition(
+            route.button_id.clone(),
+            nav_icon_color(selected, cx),
+            window,
+            cx,
+        );
+        let label = self.resolve_label(&route.label, cx);
         let tooltip_label = label.clone();
-        let route_id = route.id;
+        let route_id = route.id.clone();
         div()
-            .id(route.tooltip_id)
+            .id(route.tooltip_id.clone())
             .flex_none()
             .rounded(radius)
             .when(selected, |this| this.bg(selected_bg))
             .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
             .child(
                 activity_button(
-                    route.button_id,
+                    route.button_id.clone(),
                     label,
                     route.icon.clone().size(icon_size).text_color(icon_color),
                     selected,
                     button_size,
                     cx,
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.navigate(route_id, cx))),
+                .on_click(cx.listener(move |this, _, _, cx| this.navigate(route_id.clone(), cx))),
             )
             .into_any_element()
     }

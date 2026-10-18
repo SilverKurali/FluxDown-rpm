@@ -4,12 +4,16 @@
  * - `contextMenuEnabled` 为 false 时清空后不再创建（#445）；
  * - 配置了已验证的远程服务器时，每项下再建「本机 / 远程」两个子项（#262）；
  * - #407：视频/音频的 srcUrl 不是 http(s)（blob / MSE）时，改用 sensor 上报的
- *   右键命中元素，下载其绑定的首个可下载候选。
+ *   右键命中元素，下载其绑定的首个可下载候选；
+ * - http(s) 链接与点击下载同一路径：交给浏览器发起，由拦截层在拿到响应头后取消并发送
+ *   （文件名 / 大小来自浏览器自己的网络栈）；该路径不可用 / 失败 / 超时时直接发送链接。
  */
 import { browser } from "wxt/browser";
 import type { Browser } from "wxt/browser";
 import { t } from "@/utils/i18n";
 import { downloadCandidate } from "./downloads";
+import { canCaptureLinkViaBrowser } from "./intercept";
+import { linkCapture } from "./link-capture";
 import { notify } from "./notify";
 import type { SendChannel } from "./protocol";
 import { fallbackAfterSendFailure, sendToFluxDown } from "./sender";
@@ -179,6 +183,15 @@ async function handleMenuClick(info: Browser.contextMenus.OnClickData, tab?: Bro
     // blob:/MSE 源：用右键命中的元素找绑定候选，找不到才提示。
     if (tab?.id !== undefined && (await downloadContextElement(tab.id, channel))) return;
     notifyVideoUnavailable();
+    return;
+  }
+
+  if (
+    base === "fluxdown-send-link" &&
+    /^https?:/i.test(downloadUrl) &&
+    (await canCaptureLinkViaBrowser()) &&
+    (await linkCapture.capture({ url: downloadUrl, referrer, channel }))
+  ) {
     return;
   }
 

@@ -23,7 +23,7 @@ export type DebugUrlKey = (url: string) => string;
 /** 候选与播放元素的关联（来自视图模型）。 */
 export interface DebugCandidateBinding {
   elementKey: string | null;
-  binding: "exact" | "temporal" | "inferred" | "none";
+  binding: "exact" | "temporal" | "declared" | "inferred" | "none";
   playingVariantId: string | null;
 }
 

@@ -328,6 +328,22 @@ public enum SelectionKind: Sendable, Hashable {
     case bt([BtFile])
     case variant([VariantOption])
     case fileExists(FileConflict)
+    case plugin(site: String, url: String, candidates: [PluginCandidate])
+}
+
+/// 同站点多个插件命中时的候选插件（按 identity 升序）。
+public struct PluginCandidate: Sendable, Hashable {
+    public var identity: String
+    public var name: String
+    public var version: String
+    public var description: String
+
+    public init(identity: String, name: String, version: String, description: String) {
+        self.identity = identity
+        self.name = name
+        self.version = version
+        self.description = description
+    }
 }
 
 public struct HlsOption: Sendable, Hashable {
@@ -389,6 +405,7 @@ public enum SelectionOutcome: Sendable, Hashable {
     case bt(indices: [Int32])
     case variant(index: Int32)
     case fileExists(action: FileExistsAction)
+    case plugin(identity: String, remember: Bool)
     case cancelled
 }
 

@@ -97,6 +97,9 @@ pub struct MarketEntry {
     /// 供安装前展示授权。旧索引缺省 → 空，不影响安装）。
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// 插件桌面视图声明的网络主机；授权界面展示它，包内 manifest 须为其子集。
+    #[serde(default)]
+    pub network_hosts: Vec<String>,
     /// 预留：未来作者签名方案（`none` / `sigstore` / `ed25519`）。
     #[serde(default = "sig_none")]
     pub sig_scheme: String,
@@ -497,6 +500,16 @@ fn verify_package_claim(entry: &MarketEntry, manifest: &PluginManifest) -> Resul
         return Err(PluginError::ManifestInvalid(format!(
             "插件包 manifest 声明了索引条目未授权的权限 '{extra}'（manifest permissions: {:?}，索引 permissions: {:?}）",
             manifest.permissions, entry.permissions
+        )));
+    }
+    if let Some(extra) = manifest
+        .network_hosts()
+        .into_iter()
+        .find(|h| !entry.network_hosts.contains(h))
+    {
+        return Err(PluginError::ManifestInvalid(format!(
+            "插件包 manifest 声明了索引条目未授权的网络主机 '{extra}'（索引 networkHosts: {:?}）",
+            entry.network_hosts
         )));
     }
     Ok(())

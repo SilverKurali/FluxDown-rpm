@@ -3,7 +3,7 @@
 // 另含编辑态（是否在编辑、当前拖动项、悬停落点）：纯瞬时 UI 状态，不持久化。
 
 import { useSyncExternalStore } from 'react'
-import { CHROME_CATALOG } from './chromeCatalog'
+import { getChromeCatalog, subscribeChromeCatalog } from './chromeCatalog'
 import { defaultLayout, moveItem, normalizeLayout, serializeLayout } from './chromeLayout'
 import type { ChromeLayout, ChromeZone } from './chromeLayout'
 
@@ -15,24 +15,36 @@ type Listener = () => void
 
 const layoutListeners = new Set<Listener>()
 
-function readStored(): ChromeLayout {
+/** 持久化的原始布局（`undefined` = 尚未读取）；插件条目晚到 / 重装时用它重新归一化，从不因目录变化而写回。 */
+let storedRaw: unknown
+
+function readStoredRaw(): unknown {
+  if (storedRaw !== undefined) return storedRaw
   try {
     const raw = localStorage.getItem(CHROME_LAYOUT_KEY)
-    return normalizeLayout(raw === null ? null : JSON.parse(raw), CHROME_CATALOG)
+    storedRaw = raw === null ? null : JSON.parse(raw)
   } catch {
-    return defaultLayout(CHROME_CATALOG)
+    storedRaw = null
   }
+  return storedRaw
 }
 
 let layout: ChromeLayout | null = null
+let layoutCatalog: unknown = null
 
 export function getChromeLayout(): ChromeLayout {
-  layout ??= readStored()
+  const catalog = getChromeCatalog()
+  if (layout === null || layoutCatalog !== catalog) {
+    layout = normalizeLayout(readStoredRaw(), catalog)
+    layoutCatalog = catalog
+  }
   return layout
 }
 
 function persist(next: ChromeLayout): void {
   layout = next
+  layoutCatalog = getChromeCatalog()
+  storedRaw = serializeLayout(next)
   try {
     localStorage.setItem(CHROME_LAYOUT_KEY, JSON.stringify(serializeLayout(next)))
   } catch {
@@ -43,27 +55,34 @@ function persist(next: ChromeLayout): void {
 
 /** 移动一个条目并在成功时立即持久化；返回是否发生了变化。 */
 export function moveChromeItem(id: string, zone: ChromeZone, target: string | null): boolean {
-  const result = moveItem(getChromeLayout(), CHROME_CATALOG, id, zone, target)
+  const result = moveItem(getChromeLayout(), getChromeCatalog(), id, zone, target)
   if (result.changed) persist(result.layout)
   return result.changed
 }
 
 /** 重置为默认布局（写入完整默认值）。 */
 export function resetChromeLayout(): void {
-  persist(defaultLayout(CHROME_CATALOG))
+  persist(defaultLayout(getChromeCatalog()))
 }
 
 // 其他标签页改了布局：重新读取并通知（仅在内容真的变化时替换快照，避免无谓重渲染）。
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (event) => {
     if (event.key !== CHROME_LAYOUT_KEY && event.key !== null) return
-    const next = readStored()
     const current = getChromeLayout()
+    storedRaw = undefined
+    const next = normalizeLayout(readStoredRaw(), getChromeCatalog())
     if (JSON.stringify(serializeLayout(next)) === JSON.stringify(serializeLayout(current))) return
     layout = next
+    layoutCatalog = getChromeCatalog()
     for (const listener of layoutListeners) listener()
   })
 }
+
+// 插件条目变化：布局快照按新目录重新归一化，通知订阅者。
+subscribeChromeCatalog(() => {
+  for (const listener of layoutListeners) listener()
+})
 
 function subscribeLayout(listener: Listener) {
   layoutListeners.add(listener)

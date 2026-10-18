@@ -4,9 +4,10 @@
 
 import { cn } from '../lib/cn'
 import { useT } from '../i18n'
+import { usePluginActivityEntries } from '../pages/plugins/usePluginContributions'
 import type { TooltipSide } from '../pages/downloads/statusbar/widget'
 import { ACTIVITY_ENTRIES } from './activity'
-import { CHROME_CATALOG, WIDGET_LABEL_KEY } from './chromeCatalog'
+import { getChromeCatalog, WIDGET_LABEL_KEY } from './chromeCatalog'
 import { itemAllowedIn, zoneFamily } from './chromeLayout'
 import type { ChromeFamily, ChromeZone } from './chromeLayout'
 import { beginChromeDrag, endChromeDrag, hoverChromeDrop, leaveChromeDrop, moveChromeItem, useChromeEdit } from './chromeStore'
@@ -20,6 +21,7 @@ const SIDE: Record<ChromeFamily, TooltipSide> = { title: 'bottom', rail: 'right'
 export function ChromeZoneView({ zone, className, keepEmpty = false }: { zone: ChromeZone; className?: string; keepEmpty?: boolean }) {
   const t = useT()
   const items = useChromeZoneItems(zone)
+  const pluginEntries = usePluginActivityEntries()
   const { editing, dragId, hover } = useChromeEdit()
   const family = zoneFamily(zone)
   const orientation = family === 'rail' ? 'rail' : 'horizontal'
@@ -37,10 +39,12 @@ export function ChromeZoneView({ zone, className, keepEmpty = false }: { zone: C
     )
   }
 
-  const dragSpec = CHROME_CATALOG.find((spec) => spec.id === dragId)
+  const dragSpec = getChromeCatalog().find((spec) => spec.id === dragId)
   const accepts = dragSpec !== undefined && itemAllowedIn(dragSpec, zone)
   const zoneHover = hover?.zone === zone && hover.target === null
   const labelOf = (id: string) => {
+    const plugin = pluginEntries.find((entry) => entry.id === id)
+    if (plugin) return plugin.label
     const key = ACTIVITY_ENTRIES.find((entry) => entry.id === id)?.labelKey ?? WIDGET_LABEL_KEY[id]
     return key === undefined ? id : t(key)
   }

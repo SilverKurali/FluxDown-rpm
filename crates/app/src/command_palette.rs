@@ -73,6 +73,7 @@ fn build_config(translator: &Translator, cx: &mut App) -> PaletteConfig {
         english: &english,
     };
     let mut items = commands(&labels, cx);
+    items.extend(crate::plugin_contributions::palette_items(cx));
     items.extend(settings_items(&labels, cx));
 
     let usage = UsageStats::from_value(Desktop::preferences(cx).get(USAGE_PREF_KEY));
@@ -248,7 +249,7 @@ fn commands(labels: &Labels, cx: &App) -> Vec<PaletteItem> {
                     .text_with("commandPaletteGoTo", &[("page", english_page)]);
                 items.push(
                     PaletteItem::new(PaletteItemKind::Command, id, title.clone(), move |_, cx| {
-                        navigate(cx, route);
+                        navigate(cx, route.clone());
                     })
                     .icon(Icon::new(icon))
                     .aliases((english != title).then_some(english))

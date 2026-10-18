@@ -116,6 +116,7 @@ function ingestEmit(
   rule: RuleRef,
   emit: Emitted,
   detectedBy: ResourceMessagePayload["detectedBy"],
+  elementKey?: string,
 ): number {
   if (emit.mode === "preempt") {
     markPreempted(emit.url);
@@ -132,6 +133,7 @@ function ingestEmit(
         quality: emit.quality,
         detectedBy,
         pageUrl,
+        elementKey,
       },
     ],
     { frameId, ruleIds: [rule.id] },
@@ -260,8 +262,8 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
       perRule.set(hit.ruleId, count + 1);
       const entry = rules.find((r) => r.rule.id === hit.ruleId);
       if (!entry) continue;
-      const emit = engine.renderDomEmit(entry.rule, entry.emit, { value: hit.value, text: hit.text });
-      if (emit) emitted += ingestEmit(tabId, req.pageUrl, sender.frameId, entry.rule, emit, "dom-scan");
+      const emit = engine.renderDomEmit(entry.rule, entry.emit, { value: hit.value, text: hit.text, page: req.pageUrl });
+      if (emit) emitted += ingestEmit(tabId, req.pageUrl, sender.frameId, entry.rule, emit, "dom-scan", hit.elementKey);
     }
     return { emitted };
   },

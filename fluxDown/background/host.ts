@@ -23,6 +23,7 @@ const CAPTURE_STATUS_MAX_IDS = 256;
 export interface SniffRulesHave {
   official?: number;
   community?: number;
+  plugin?: number;
   revocations?: number;
 }
 
@@ -30,6 +31,7 @@ export interface SniffRulesReply {
   official: RulePack | null;
   community: RulePack | null;
   revocations: RevocationDoc | null;
+  plugin: RulePack | null;
   status: { lastFetchUnix: number | null; lastError: string | null };
 }
 
@@ -37,6 +39,7 @@ interface CapabilitiesData {
   protocol?: number;
   pluginsSupported?: boolean;
   resolvers?: ResolverInfo[];
+  pluginRulesSequence?: number;
 }
 
 const PROTOCOL_ONE_OFFLINE: HostCapabilities = {
@@ -44,10 +47,17 @@ const PROTOCOL_ONE_OFFLINE: HostCapabilities = {
   pluginsSupported: false,
   resolvers: [],
   connected: false,
+  pluginRulesSequence: 0,
 };
 
 let cached: { value: HostCapabilities; expiresAt: number } | null = null;
 let inflight: Promise<HostCapabilities> | null = null;
+const capabilityListeners: Array<(caps: HostCapabilities) => void> = [];
+
+/** 每次探测到新能力后回调（rules-store 据此发现插件规则序号变化；避免 host ↔ rules-store 循环依赖）。 */
+export function onCapabilities(listener: (caps: HostCapabilities) => void): void {
+  capabilityListeners.push(listener);
+}
 
 function isUnknownAction(message: string | undefined): boolean {
   return typeof message === "string" && message.startsWith("unknown action");
@@ -62,12 +72,17 @@ async function probeCapabilities(): Promise<HostCapabilities> {
   const reply = await nmhCall<CapabilitiesData>("capabilities", {});
   if (reply.success) {
     const data = reply.data ?? {};
-    return {
+    const caps: HostCapabilities = {
       protocol: data.protocol !== undefined && data.protocol >= 2 ? 2 : 1,
       pluginsSupported: data.pluginsSupported === true,
       resolvers: Array.isArray(data.resolvers) ? data.resolvers : [],
       connected: true,
+      pluginRulesSequence:
+        typeof data.pluginRulesSequence === "number" && data.pluginRulesSequence > 0
+          ? data.pluginRulesSequence
+          : 0,
     };
+    return caps;
   }
   if (isUnknownAction(reply.message)) {
     // 旧桌面端：已连通，但不认识 v2 动作。
@@ -77,7 +92,7 @@ async function probeCapabilities(): Promise<HostCapabilities> {
     return PROTOCOL_ONE_OFFLINE;
   }
   // 桌面端 v2 但 daemon 侧失败（如 plugin.list 报错）：已连接，解析能力未知。
-  return { protocol: 2, pluginsSupported: false, resolvers: [], connected: true };
+  return { protocol: 2, pluginsSupported: false, resolvers: [], connected: true, pluginRulesSequence: 0 };
 }
 
 /** 取桌面端能力（缓存 60 s；`force` 跳过缓存）。 */
@@ -92,6 +107,13 @@ export function getCapabilities(force = false): Promise<HostCapabilities> {
         value,
         expiresAt: Date.now() + (value.connected ? CAPABILITIES_TTL_MS : DISCONNECTED_TTL_MS),
       };
+      for (const listener of capabilityListeners) {
+        try {
+          listener(value);
+        } catch (e) {
+          console.warn("[FluxDown] capabilities listener failed:", e);
+        }
+      }
       return value;
     })
     .finally(() => {

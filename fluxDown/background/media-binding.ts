@@ -12,10 +12,11 @@ export interface CandidateBinding {
   elementKey: string;
   playingVariantId: string | null;
   /**
-   * exact：追加的数据带来源标记；temporal：按时间窗口归因；inferred：元素没有任何来源证据
-   * （播放器在 Worker 里取数据 / MSE in Worker），按「唯一正在播放的元素 ↔ 唯一可下载候选」推断。
+   * exact：追加的数据带来源标记；temporal：按时间窗口归因；declared：dom 规则命中该元素时声明的
+   * 下载源（见 view-model `bindDeclared`）；inferred：元素没有任何来源证据（播放器在 Worker 里取数据 /
+   * MSE in Worker），按「唯一正在播放的元素 ↔ 唯一可下载候选」推断。
    */
-  confidence: "exact" | "temporal" | "inferred";
+  confidence: "exact" | "temporal" | "declared" | "inferred";
 }
 
 /** 元素优先级：播放且大半可见 3；播放 2；可见且尺寸够大 1；其余 0。 */

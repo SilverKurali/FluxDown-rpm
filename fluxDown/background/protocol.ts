@@ -54,7 +54,7 @@ export interface CandidateRow {
   candidate: MediaCandidate;
   elementKey: string | null;
   playingVariantId: string | null;
-  binding: "exact" | "temporal" | "inferred" | "none";
+  binding: "exact" | "temporal" | "declared" | "inferred" | "none";
   ruleIds: string[];
 }
 
@@ -104,12 +104,15 @@ export interface HostCapabilities {
   pluginsSupported: boolean;
   resolvers: ResolverInfo[];
   connected: boolean;
+  /** 桌面端插件规则包当前序号；从未有过插件规则为 0。 */
+  pluginRulesSequence: number;
 }
 
 /** 本地已存的规则包（storage.local `fluxdown_rule_packs`）。 */
 export interface StoredRulePacks {
   official?: RulePack;
   community?: RulePack;
+  plugin?: RulePack;
   revocations?: RevocationDoc;
   lastSyncAt?: number;
   lastError?: string;
@@ -126,6 +129,7 @@ export interface RuleSyncStatus {
   communityEnabled: boolean;
   official: RuleDocSummary | null;
   community: RuleDocSummary | null;
+  plugin: RuleDocSummary | null;
   revocations: RuleDocSummary | null;
   lastSyncAt: number | null;
   lastError: string | null;
@@ -148,6 +152,8 @@ export interface SendResult {
   success: boolean;
   message?: string;
   channel?: SendChannel;
+  /** 桌面端直接建好的任务 ID；交给桌面确认框（尚未建任务）或批量发送时为空。 */
+  taskId?: string;
 }
 
 export interface PageLink {
@@ -184,7 +190,7 @@ export interface MessageMap {
   };
   /** sensor 执行 PageConfig.dom 规则的命中；background 用 engine.renderDomEmit 渲染后入库。 */
   domObserved: {
-    req: { pageUrl: string; hits: { ruleId: string; value: string; text: string }[] };
+    req: { pageUrl: string; hits: { ruleId: string; value: string; text: string; elementKey?: string }[] };
     res: { emitted: number };
   };
   /** 侧边栏诊断「导出资源调试日志」：按 tab 生成已脱敏的嗅探状态快照。 */

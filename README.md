@@ -213,7 +213,7 @@ flowchart TD
 | Web management UI | React + TypeScript + Vite | [`web/`](web) |
 | CLI | HTTP client or embedded engine | [`native/cli/`](native/cli) |
 | Browser integration | WXT + TypeScript, Native Messaging, userscript | [`fluxDown/`](fluxDown), [`native/nmh/`](native/nmh), [`userscript/`](userscript) |
-| Website | Astro + React; `website/` is the legacy archive | [`website-v2/`](website-v2) |
+| Website | Astro + React | [`website-v2/`](website-v2) |
 
 ## Building from Source
 

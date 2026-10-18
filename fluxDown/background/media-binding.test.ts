@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compileBuiltin } from "@/rules/engine";
+import { compileBundled } from "@/rules/engine";
 import type { DashManifest } from "@/utils/dash-manifest";
 import type { DetectedResource } from "@/utils/resource-types";
 import { activeElement, bindCandidates, rankElement } from "./media-binding";
@@ -7,7 +7,7 @@ import type { ElementState } from "./protocol";
 import { badgeCount, composeTabView } from "./view-model";
 import type { ViewModelInput } from "./view-model";
 
-const engine = compileBuiltin();
+const engine = compileBundled();
 const PAGE_URL = "https://www.bilibili.com/video/BV1xx";
 
 function element(overrides: Partial<ElementState> = {}): ElementState {
@@ -354,5 +354,56 @@ describe("元素事实与推断关联", () => {
     const view = composeTabView(input({ resources: [mp4(1), mp4(2)], elements: [element({ bindings: [] })] }));
     expect(view.playing).toHaveLength(0);
     expect(view.unbound).toHaveLength(2);
+  });
+
+  describe("dom 规则声明的元素归属", () => {
+    const page = (id: string, elementKey?: string): DetectedResource => ({
+      ...mp4(0),
+      id: engine.dedupeKey(`https://v.example.com/watch?v=${id}`, PAGE_URL),
+      url: `https://v.example.com/watch?v=${id}`,
+      filename: "",
+      size: -1,
+      mimeType: undefined,
+      detectedBy: "dom-scan",
+      confidence: "medium",
+      elementKey,
+    });
+    // 播放数据来自被规则忽略的 MSE 分片：元素有 exact 证据，却没有能下载的资源与之对应。
+    const mse = (key: string, playing = true) =>
+      element({
+        key,
+        playing,
+        bindings: [{ sbId: 1, mime: "video/mp4", kind: "video", exact: ["https://cdn.example.com/seg?range=0-1"], temporal: [] }],
+      });
+
+    test("资源声明的元素存在时绑定到该元素，暂停时也在浮钮行里", () => {
+      const view = composeTabView(input({ resources: [page("a", "f1:1")], elements: [mse("f1:1", false)] }));
+      const rows = [...view.playing, ...view.otherElements];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].binding).toBe("declared");
+      expect(rows[0].elementKey).toBe("f1:1");
+      expect(view.unbound).toHaveLength(0);
+    });
+
+    test("声明的元素已不在页面上、或资源没有声明元素时不绑定", () => {
+      const gone = composeTabView(input({ resources: [page("a", "f1:9")], elements: [mse("f1:1")] }));
+      expect(gone.unbound.map((r) => r.binding)).toEqual(["none"]);
+      const noKey = composeTabView(input({ resources: [page("a")], elements: [mse("f1:1")] }));
+      expect(noKey.unbound).toHaveLength(1);
+    });
+
+    test("URL 证据绑定优先于声明", () => {
+      const direct = { ...mp4(1), elementKey: "f1:2" };
+      const view = composeTabView(
+        input({
+          resources: [direct],
+          elements: [
+            element({ key: "f1:1", bindings: [{ sbId: 1, mime: "video/mp4", kind: "video", exact: [direct.url], temporal: [] }] }),
+            mse("f1:2", false),
+          ],
+        }),
+      );
+      expect(view.playing.map((r) => [r.elementKey, r.binding])).toEqual([["f1:1", "exact"]]);
+    });
   });
 });

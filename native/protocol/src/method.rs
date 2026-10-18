@@ -24,6 +24,10 @@ pub const DAEMON_TASK_PAUSE_ALL: &str = "daemon.task.pauseAll";
 pub const DAEMON_TASK_RESUME_ALL: &str = "daemon.task.resumeAll";
 pub const DAEMON_TASK_RESCAN: &str = "daemon.task.rescan";
 pub const DAEMON_TASK_SET_SEED_LIMITS: &str = "daemon.task.setSeedLimits";
+/// 已完成 BT 任务的完整性校验（`{taskId}` → `TaskVerifyResult`）：按种子 piece 表全量
+/// 重哈希落盘数据，只读。慢方法：耗时与数据量成正比，同一任务同时只跑一个（`conflict`），
+/// 非已完成 BT 任务返回 `invalidArgument`，任务不存在返回 `notFound`。
+pub const DAEMON_TASK_VERIFY: &str = "daemon.task.verify";
 /// 批量暂停 / 恢复（`{taskIds}`）：整批只推一次任务快照；未知 id 忽略，空列表为空操作。
 pub const DAEMON_TASK_PAUSE_MANY: &str = "daemon.task.pauseMany";
 pub const DAEMON_TASK_RESUME_MANY: &str = "daemon.task.resumeMany";
@@ -81,6 +85,7 @@ pub const DAEMON_RSS_VALIDATE: &str = "daemon.rss.validate";
 pub const DAEMON_LINK_PROBE: &str = "daemon.link.probe";
 
 pub const DAEMON_PLUGIN_LIST: &str = "daemon.plugin.list";
+pub const DAEMON_PLUGIN_SNIFF_RULES: &str = "daemon.plugin.sniffRules";
 pub const DAEMON_PLUGIN_AUTH: &str = "daemon.plugin.auth";
 pub const DAEMON_PLUGIN_SET_ENABLED: &str = "daemon.plugin.setEnabled";
 pub const DAEMON_PLUGIN_UPDATE_SETTINGS: &str = "daemon.plugin.updateSettings";
@@ -92,6 +97,32 @@ pub const DAEMON_PLUGIN_UNINSTALL: &str = "daemon.plugin.uninstall";
 pub const DAEMON_PLUGIN_MARKET_LIST: &str = "daemon.plugin.marketList";
 pub const DAEMON_PLUGIN_MARKET_INSTALL: &str = "daemon.plugin.marketInstall";
 pub const DAEMON_PLUGIN_IGNORE_RETRY: &str = "daemon.plugin.ignoreRetry";
+/// 列出站点默认插件（多插件冲突的记忆选择，`Vec<PluginSiteDefaultDto>`）。
+pub const DAEMON_PLUGIN_SITE_DEFAULTS: &str = "daemon.plugin.siteDefaults";
+/// 确认 / 改选 / 删除站点默认插件（`PluginSetSiteDefaultParams`）。
+pub const DAEMON_PLUGIN_SET_SITE_DEFAULT: &str = "daemon.plugin.setSiteDefault";
+/// 授权插件请求的全部能力（`{identity, permissions, networkHosts}`，集合须与请求完全一致）。
+pub const DAEMON_PLUGIN_CONSENT: &str = "daemon.plugin.consent";
+/// 分页读取插件审计（`{identity?, beforeId?, limit?}`）。
+pub const DAEMON_PLUGIN_AUDIT_LIST: &str = "daemon.plugin.audit.list";
+/// 清空插件审计（`{identity?}`）。
+pub const DAEMON_PLUGIN_AUDIT_CLEAR: &str = "daemon.plugin.audit.clear";
+/// 客户端上报桌面脚本的审计记录（`{entries}`，origin 强制 desktop）。
+pub const DAEMON_PLUGIN_AUDIT_RECORD: &str = "daemon.plugin.audit.record";
+/// 打开可移植视图会话（`PluginViewOpenParams` → `PluginViewOpenedDto`）。慢方法：可能激活宿主。
+pub const DAEMON_PLUGIN_VIEW_OPEN: &str = "daemon.plugin.view.open";
+/// 投递视图事件（`PluginViewEventParams`）；入队即返回，处理结果经 `PluginViewFrame` 事件送出。
+pub const DAEMON_PLUGIN_VIEW_EVENT: &str = "daemon.plugin.view.event";
+/// 关闭视图会话（`{session}`）。
+pub const DAEMON_PLUGIN_VIEW_CLOSE: &str = "daemon.plugin.view.close";
+/// 取会话当前 `{seq, tree}`（序号断档 / 重连后重新同步）。
+pub const DAEMON_PLUGIN_VIEW_SNAPSHOT: &str = "daemon.plugin.view.snapshot";
+/// 会话续期（`{sessions: [...]}`）；90 s 无续期的会话会被关闭。
+pub const DAEMON_PLUGIN_VIEW_KEEPALIVE: &str = "daemon.plugin.view.keepalive";
+/// 执行插件命令（`{identity, command, taskIds}`）。慢方法：可能激活宿主。
+pub const DAEMON_PLUGIN_COMMAND: &str = "daemon.plugin.command";
+/// 调用插件 `flux.rpc.handle` 注册的处理器（`{identity, name, args}`）。慢方法。
+pub const DAEMON_PLUGIN_INVOKE: &str = "daemon.plugin.invoke";
 pub const DAEMON_COMPONENT_GET: &str = "daemon.component.get";
 pub const DAEMON_COMPONENT_LIST_VERSIONS: &str = "daemon.component.listVersions";
 pub const DAEMON_COMPONENT_INSTALL: &str = "daemon.component.install";
@@ -312,6 +343,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_TASK_RESUME_ALL,
     DAEMON_TASK_RESCAN,
     DAEMON_TASK_SET_SEED_LIMITS,
+    DAEMON_TASK_VERIFY,
     DAEMON_TASK_PAUSE_MANY,
     DAEMON_TASK_RESUME_MANY,
     DAEMON_TASK_DELETE_MANY,
@@ -355,6 +387,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_RSS_VALIDATE,
     DAEMON_LINK_PROBE,
     DAEMON_PLUGIN_LIST,
+    DAEMON_PLUGIN_SNIFF_RULES,
     DAEMON_PLUGIN_AUTH,
     DAEMON_PLUGIN_SET_ENABLED,
     DAEMON_PLUGIN_UPDATE_SETTINGS,
@@ -365,6 +398,19 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_PLUGIN_MARKET_LIST,
     DAEMON_PLUGIN_MARKET_INSTALL,
     DAEMON_PLUGIN_IGNORE_RETRY,
+    DAEMON_PLUGIN_SITE_DEFAULTS,
+    DAEMON_PLUGIN_SET_SITE_DEFAULT,
+    DAEMON_PLUGIN_CONSENT,
+    DAEMON_PLUGIN_AUDIT_LIST,
+    DAEMON_PLUGIN_AUDIT_CLEAR,
+    DAEMON_PLUGIN_AUDIT_RECORD,
+    DAEMON_PLUGIN_VIEW_OPEN,
+    DAEMON_PLUGIN_VIEW_EVENT,
+    DAEMON_PLUGIN_VIEW_CLOSE,
+    DAEMON_PLUGIN_VIEW_SNAPSHOT,
+    DAEMON_PLUGIN_VIEW_KEEPALIVE,
+    DAEMON_PLUGIN_COMMAND,
+    DAEMON_PLUGIN_INVOKE,
     DAEMON_COMPONENT_GET,
     DAEMON_COMPONENT_LIST_VERSIONS,
     DAEMON_COMPONENT_INSTALL,
@@ -499,6 +545,9 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_PLUGIN_INSTALL_DEV,
     DAEMON_PLUGIN_MARKET_LIST,
     DAEMON_PLUGIN_MARKET_INSTALL,
+    DAEMON_PLUGIN_VIEW_OPEN,
+    DAEMON_PLUGIN_COMMAND,
+    DAEMON_PLUGIN_INVOKE,
     DAEMON_GROUP_RESOLVE_PREVIEW,
     DAEMON_RSS_VALIDATE,
     DAEMON_LINK_PROBE,
@@ -509,6 +558,7 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_FS_LIST,
     DAEMON_DIAGNOSTICS_PROBE,
     DAEMON_DIAGNOSTICS_FIX_COMPONENT,
+    DAEMON_TASK_VERIFY,
 ];
 
 /// 是否属于 [`SLOW_DAEMON_METHODS`]。

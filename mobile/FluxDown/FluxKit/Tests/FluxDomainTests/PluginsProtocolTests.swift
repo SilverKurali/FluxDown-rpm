@@ -63,6 +63,19 @@ struct PluginsProtocolTests {
         #expect(String(decoding: params, as: UTF8.self) == #"{"pluginId":"p"}"#)
     }
 
+    @Test func siteDefaultParamsEncodeNullWhenRemoving() throws {
+        let remove = try ProtocolJSON.encode(PluginSetSiteDefaultParams(site: "bilibili.com", identity: nil), what: "t")
+        #expect(String(decoding: remove, as: UTF8.self) == #"{"identity":null,"site":"bilibili.com"}"#)
+        let set = try ProtocolJSON.encode(PluginSetSiteDefaultParams(site: "bilibili.com", identity: "a.b"), what: "t")
+        #expect(String(decoding: set, as: UTF8.self) == #"{"identity":"a.b","site":"bilibili.com"}"#)
+        let rows = try ProtocolJSON.decode(
+            [PluginSiteDefault].self,
+            from: Data(#"[{"site":"bilibili.com","identity":"a","candidates":["a","b"],"automatic":true}]"#.utf8),
+            what: "t"
+        )
+        #expect(rows == [PluginSiteDefault(site: "bilibili.com", identity: "a", candidates: ["a", "b"], automatic: true)])
+    }
+
     @Test func componentStatusUsesAdjacentTagAndToleratesUnknownComponent() throws {
         let json = """
         [{"component":"ffmpeg","status":{"source":"managed","path":"/x/ffmpeg","version":"7.1","managedVersion":"7.1","systemPath":"","managedSupported":true}},

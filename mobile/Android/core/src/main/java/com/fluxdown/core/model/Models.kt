@@ -155,6 +155,8 @@ sealed interface SelectionKind {
     data class Hls(val options: List<HlsOption>) : SelectionKind
     data class Bt(val files: List<BtFile>) : SelectionKind
     data class Variant(val options: List<VariantOption>) : SelectionKind
+    /** 多个启用插件的解析器都匹配同一 URL：让用户选一个（`candidates` 按 identity 升序）。 */
+    data class Plugin(val site: String, val url: String, val candidates: List<PluginCandidate>) : SelectionKind
 
     /** 保存目录里已有同名普通文件（`file_exists_behavior = ask`）；字段由主机算好。 */
     data class FileExists(
@@ -176,6 +178,7 @@ enum class FileExistsAction { Rename, Overwrite, Skip }
 
 data class HlsOption(val index: Int, val bandwidth: Long, val width: Long, val height: Long)
 data class BtFile(val index: Int, val path: String, val size: Long)
+data class PluginCandidate(val identity: String, val name: String, val version: String, val description: String)
 data class VariantOption(
     val index: Int,
     val label: String,
@@ -190,6 +193,7 @@ sealed interface SelectionOutcome {
     data class Hls(val index: Int) : SelectionOutcome
     data class Bt(val indices: List<Int>) : SelectionOutcome
     data class Variant(val index: Int) : SelectionOutcome
+    data class Plugin(val identity: String, val remember: Boolean) : SelectionOutcome
     data class FileExists(val action: FileExistsAction) : SelectionOutcome
     data object Cancelled : SelectionOutcome
 }

@@ -45,6 +45,56 @@ pub enum SelectionKind {
         /// 该任务允许的动作；恒含 `rename`。
         actions: Vec<FileExistsAction>,
     },
+    /// 多个已启用插件的 resolver 同时匹配该任务链接，且该站点没有可用的默认插件：
+    /// 由用户选择本次使用的插件，可选记为站点默认插件。
+    #[serde(rename_all = "camelCase")]
+    Plugin {
+        /// 站点键（链接主机名，小写、去掉 `www.` 前缀）；也是站点默认插件的键。
+        site: String,
+        /// 任务原始链接（只用于展示）。
+        url: String,
+        /// 候选插件，按 identity 升序；默认项见 `default_choice`。
+        candidates: Vec<PluginCandidateDto>,
+    },
+}
+
+/// 多插件选择的候选项（取自插件 manifest，主机侧算好，远程客户端无需再查插件列表）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCandidateDto {
+    pub identity: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// 站点默认插件（`daemon.plugin.siteDefaults` 列表项）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSiteDefaultDto {
+    /// 站点键（主机名，小写、去掉 `www.` 前缀）。
+    pub site: String,
+    /// 该站点使用的插件。
+    pub identity: String,
+    /// 记录时的冲突插件集合（升序）；出现集合外的新插件时会重新询问。
+    pub candidates: Vec<String>,
+    /// `true` = 无人值守下载（RSS / 远程派发 / 免打扰跳过二次选择）自动选用、尚未经用户
+    /// 确认；有界面的下载仍会询问。`false` = 用户确认过的站点默认插件。
+    pub automatic: bool,
+}
+
+/// `daemon.plugin.setSiteDefault`：`identity` 为 `None` 时删除该站点记录；否则把该站点
+/// 确认为使用 `identity`（必须是记录里的候选插件之一）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSetSiteDefaultParams {
+    pub site: String,
+    #[serde(default)]
+    pub identity: Option<String>,
 }
 
 /// 文件已存在时可选的处理动作。
@@ -69,10 +119,23 @@ pub enum FileExistsAction {
     rename_all_fields = "camelCase"
 )]
 pub enum SelectionOutcome {
-    Hls { index: i32 },
-    Bt { indices: Vec<i32> },
-    Variant { index: i32 },
-    FileExists { action: FileExistsAction },
+    Hls {
+        index: i32,
+    },
+    Bt {
+        indices: Vec<i32>,
+    },
+    Variant {
+        index: i32,
+    },
+    FileExists {
+        action: FileExistsAction,
+    },
+    /// 应答 [`SelectionKind::Plugin`]：`remember` = 记为该站点的默认插件，以后不再询问。
+    Plugin {
+        identity: String,
+        remember: bool,
+    },
     Cancelled,
 }
 
@@ -705,6 +768,17 @@ pub struct SettingFieldDto {
     pub helper_label: Option<String>,
 }
 
+/// plugin 层嗅探规则包（`daemon.plugin.sniffRules`）：`pack` 为 `null` 表示从未有过插件规则
+/// （此时 `sequence == 0`）。`pack` 的形状即浏览器扩展的 `RulePack` JSON。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSniffRulesDto {
+    pub sequence: u64,
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<Object>))]
+    pub pack: Option<Value>,
+}
+
 /// 已安装插件视图（列表/设置表单）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -742,6 +816,91 @@ pub struct PluginDto {
     /// 加载失败的可读原因；成功时为空。
     #[serde(default)]
     pub load_error: String,
+    /// manifest `contributes`：视图 / 命令 / 嗅探规则贡献点。
+    #[serde(default)]
+    pub contributions: PluginContributionsDto,
+    /// 风险等级（由权限推导）：`standard` / `elevated` / `full`。
+    #[serde(default = "default_plugin_risk")]
+    pub risk: String,
+    /// 尚未授权的权限（授权流程启用前恒为空）。
+    #[serde(default)]
+    pub consent_pending: Vec<String>,
+    /// 尚未授权的网络主机（授权流程启用前恒为空）。
+    #[serde(default)]
+    pub consent_pending_hosts: Vec<String>,
+    /// 全部桌面视图声明的网络主机（排序去重）。
+    #[serde(default)]
+    pub network_hosts: Vec<String>,
+    /// 插件包在 daemon 主机上的绝对目录（仅已加载插件有值）；本机桌面端据此读取 `desktop.entry`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_dir: Option<String>,
+}
+
+/// 插件贡献点（镜像 `engine::plugin::ContributesDecl`）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginContributionsDto {
+    #[serde(default)]
+    pub views: Vec<PluginViewDeclDto>,
+    #[serde(default)]
+    pub commands: Vec<PluginCommandDeclDto>,
+    /// 是否贡献浏览器扩展嗅探规则。
+    #[serde(default)]
+    pub sniff_rules: bool,
+}
+
+/// 视图贡献声明。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginViewDeclDto {
+    pub id: String,
+    pub title: String,
+    /// `activity` / `settings` / `taskDetail` / `window`。
+    pub location: String,
+    /// 是否有可移植实现（由 main 内的 `flux.ui.view` 提供）：无 `desktop` 的视图恒为 true，
+    /// 带 `desktop` 的视图仅在 manifest 显式 `portable: true` 时为 true。
+    #[serde(default)]
+    pub portable: bool,
+    /// 桌面增强实现（仅 GPUI 桌面端经 gpui-shell 运行，daemon 不执行）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<PluginDesktopEntryDto>,
+}
+
+/// 视图的桌面增强入口。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDesktopEntryDto {
+    /// 包内相对路径（`.js` / `.mjs`），默认导出继承 `View` 的类。
+    pub entry: String,
+    /// 初始窗口宽度（逻辑像素，仅 `window` 视图）。
+    #[serde(default)]
+    pub width: Option<f32>,
+    /// 初始窗口高度（逻辑像素，仅 `window` 视图）。
+    #[serde(default)]
+    pub height: Option<f32>,
+    /// 界面脚本可直连的网络主机（gpui-shell 网络授权只接受逐个主机名）。
+    #[serde(default)]
+    pub network_hosts: Vec<String>,
+}
+
+/// 命令贡献声明。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCommandDeclDto {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub palette: bool,
+    #[serde(default)]
+    pub task_menu: bool,
+}
+
+fn default_plugin_risk() -> String {
+    "standard".to_string()
 }
 
 fn default_plugin_load_status() -> String {
@@ -835,6 +994,38 @@ pub struct SetTaskSegmentsParams {
     pub segments: i32,
 }
 
+/// `daemon.task.verify` 结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum TaskVerifyStatus {
+    /// 全部需要的 piece 哈希一致。
+    Intact,
+    /// 至少一个需要的 piece 哈希不符或数据缺失 / 截断。
+    Damaged,
+    /// 本地没有种子元数据（磁力任务未在做种且无缓存），或没有可比对的 piece。
+    Unverifiable,
+}
+
+/// `daemon.task.verify` 结果：已完成 BT 任务的完整性校验报告。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct TaskVerifyResult {
+    pub status: TaskVerifyStatus,
+    /// 种子 piece 总数（未取得元数据时为 0）。
+    pub total_pieces: u64,
+    /// 哈希一致的 piece 数。
+    pub verified_pieces: u64,
+    /// 损坏的 piece 数。
+    pub bad_pieces: u64,
+    /// 未校验的 piece 数：不属于所选文件，或缺少可比对的字节。
+    pub skipped_pieces: u64,
+    /// 被损坏 piece 覆盖的选中文件（种子内相对路径，`/` 分隔，种子顺序）。
+    #[serde(default)]
+    pub damaged_files: Vec<String>,
+}
+
 /// 设置插件启用状态请求体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -886,6 +1077,9 @@ pub struct MarketEntryDto {
     /// manifest 声明的能力权限（如 `["ffmpeg"]`，供安装前展示授权）。
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// 插件桌面视图声明的网络主机（授权界面展示）。
+    #[serde(default)]
+    pub network_hosts: Vec<String>,
 }
 
 /// 从市场安装请求体。
@@ -898,6 +1092,91 @@ pub struct MarketInstallRequest {
     /// 由客户端刷新目录后重新确认。缺省 = 不钉版本。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+}
+
+/// `daemon.plugin.consent` 参数：`permissions` / `networkHosts` 必须与插件当前请求的集合完全相等。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginConsentParams {
+    pub identity: String,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default)]
+    pub network_hosts: Vec<String>,
+}
+
+/// `daemon.plugin.audit.list` 参数。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAuditListParams {
+    /// 只看某插件；缺省 = 全部。
+    #[serde(default)]
+    pub identity: Option<String>,
+    /// 翻页游标：只返回 id 小于它的记录。
+    #[serde(default)]
+    pub before_id: Option<i64>,
+    /// 每页条数，缺省 200，上限 1000。
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// 一条插件审计记录。`origin` ∈ `daemon|desktop`，`outcome` ∈ `ok|denied|error`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAuditEntryDto {
+    pub id: i64,
+    pub at_ms: i64,
+    pub identity: String,
+    pub origin: String,
+    pub action: String,
+    pub target: String,
+    pub outcome: String,
+    pub detail: String,
+}
+
+/// `daemon.plugin.audit.list` 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAuditListDto {
+    pub entries: Vec<PluginAuditEntryDto>,
+    /// 还有更早的记录时给出下一页游标。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_before_id: Option<i64>,
+}
+
+/// `daemon.plugin.audit.clear` 参数。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAuditClearParams {
+    #[serde(default)]
+    pub identity: Option<String>,
+}
+
+/// 客户端上报的一条桌面脚本审计记录（`origin` 由 daemon 强制为 `desktop`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAuditRecordEntry {
+    pub identity: String,
+    pub action: String,
+    #[serde(default)]
+    pub target: String,
+    pub outcome: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// `daemon.plugin.audit.record` 参数（每次 ≤100 条）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAuditRecordParams {
+    pub entries: Vec<PluginAuditRecordEntry>,
 }
 
 // ---------------------------------------------------------------------------

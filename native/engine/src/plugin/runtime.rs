@@ -41,6 +41,8 @@ pub enum PluginEntryKind {
     Auth,
     /// 订阅 provider 入口：`globalThis.subscribe`。
     Subscription,
+    /// 常驻宿主入口：manifest `main.entry`，顶层脚本注册视图/命令/RPC。
+    Main,
 }
 
 // ---------------------------------------------------------------------------
@@ -554,6 +556,102 @@ pub struct HostContext {
 }
 
 // ---------------------------------------------------------------------------
+// 常驻宿主（`main`）：可移植视图 / 命令 / RPC / 事件 / 定时器。
+// ---------------------------------------------------------------------------
+
+/// `flux.tasks.*` 的出口：把任务操作转给 daemon 服务（方法白名单由实现方负责）。
+/// `params` / 返回值均为 daemon wire 形状。
+#[async_trait::async_trait]
+pub trait PluginTaskPort: Send + Sync {
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, PluginError>;
+}
+
+/// 投递给常驻宿主的一次调用。
+#[derive(Debug, Clone)]
+pub enum HostCall {
+    ViewOpen {
+        session: String,
+        view: String,
+        props: serde_json::Value,
+        task_id: Option<String>,
+        locale: String,
+    },
+    /// `event`：`{node, type, value?, key?, action?}`。
+    ViewEvent {
+        session: String,
+        event: serde_json::Value,
+    },
+    ViewRefresh {
+        session: String,
+    },
+    ViewClose {
+        session: String,
+    },
+    Command {
+        id: String,
+        task_ids: Vec<String>,
+    },
+    Invoke {
+        name: String,
+        args: serde_json::Value,
+    },
+    Event(PluginEvent),
+    Timer {
+        id: u32,
+    },
+    /// 设置值变化：`json` 为类型化设置对象，宿主就地更新 `flux.settings`。
+    Settings {
+        json: String,
+    },
+}
+
+/// 宿主调用的返回值。
+#[derive(Debug, Clone)]
+pub enum HostReply {
+    /// 视图树（未规范化的原始 JSON）。
+    Tree(serde_json::Value),
+    /// 命令 / RPC 的返回值。
+    Value(serde_json::Value),
+    None,
+}
+
+/// 宿主调用的 future。入队在 [`PluginHost::call`] 返回之前同步完成，因此调用方
+/// 先后调用 `call` 的顺序就是宿主的处理顺序。
+pub type HostFuture =
+    std::pin::Pin<Box<dyn Future<Output = Result<HostReply, PluginError>> + Send>>;
+
+/// 已启动的常驻宿主（一个插件一个，独占一份 JS 运行时与上下文，调用串行执行）。
+pub trait PluginHost: Send + Sync {
+    /// 入队一次调用；返回的 future 在处理完成时就绪。
+    fn call(&self, call: HostCall) -> HostFuture;
+    /// 停止宿主并释放 JS 运行时；排队中与进行中的调用以 `Runtime` 错误结束。
+    fn dispose(&self);
+}
+
+/// 宿主回调（JS → Rust 的异步旁路）。
+#[async_trait::async_trait]
+pub trait HostEvents: Send + Sync {
+    /// `ctx.refresh()`：请求重新渲染某个会话。
+    fn request_render(&self, session: &str);
+    /// `flux.ui.toast`。
+    fn toast(&self, identity: &str, level: &str, text: &str);
+    /// 安排一个一次性定时器：`delay` 后向宿主投递 [`HostCall::Timer`]。
+    fn timer(&self, identity: &str, id: u32, delay: Duration);
+    /// 取消尚未触发的定时器。
+    fn timer_clear(&self, identity: &str, id: u32);
+    /// `flux.settings.update`。
+    async fn settings_update(
+        &self,
+        identity: &str,
+        entries: Vec<(String, String)>,
+    ) -> Result<(), PluginError>;
+}
+
+// ---------------------------------------------------------------------------
 // trait
 // ---------------------------------------------------------------------------
 
@@ -623,6 +721,21 @@ pub trait ScriptRuntime: Send + Sync {
         host: HostContext,
     );
 
+    /// 启动一个常驻宿主：在插件 runtime 上 spawn 一个 actor，独占一份 JS 运行时，
+    /// 依次执行 flux 门面、宿主门面与 `main` 源码，之后经返回的句柄串行接收调用。
+    /// `task_port` 仅在 manifest 授予 `tasks` 权限时为 `Some`（决定是否注入
+    /// `flux.tasks`）。
+    #[allow(clippy::too_many_arguments)]
+    async fn start_host(
+        &self,
+        plugin: PluginScript,
+        settings_json: String,
+        bridge: Arc<dyn PluginBridge>,
+        host: HostContext,
+        task_port: Option<Arc<dyn PluginTaskPort>>,
+        events: Arc<dyn HostEvents>,
+    ) -> Result<Arc<dyn PluginHost>, PluginError>;
+
     /// 供 off-actor worker `spawn` 用的 tokio `Handle`（专用 multi_thread runtime）。
     /// **禁止裸 `tokio::spawn`**——那可能把 resolve future 落到宿主的
     /// current_thread runtime 唯一线程上、冻结全命令面。
@@ -679,8 +792,8 @@ pub trait PluginBridge: Send + Sync {
 
     /// 命令式重试请求（onError 钩子专用，复刻 gopeed `ctx.task.continue()`）：
     /// 内部经 `plugin_retry_tx` 通道发起延迟 resume；限流在 actor 侧
-    /// （`max_auto_retries`）；不阻塞、不返回决策。
-    fn request_retry(&self, task_id: &str, delay_ms: u64);
+    /// （`max_auto_retries`）；不阻塞、不返回决策。`plugin_id` 供审计归属。
+    fn request_retry(&self, plugin_id: &str, task_id: &str, delay_ms: u64);
 
     /// `flux.task.recordArtifact(name)`：登记任务的衍生产物文件名（同
     /// `save_dir` 下的相对文件名，如转码产物 `<stem>.mp4`）。onDone 钩子专用；

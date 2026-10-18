@@ -2536,6 +2536,8 @@ struct PreparedTask {
     resolver_item: String,
     unattended_selection: bool,
     resolver_plugin_id: String,
+    /// 多插件同时匹配且站点无确认过的默认插件（见 `plugin::routing`）。
+    resolver_choice_pending: bool,
     is_bt: bool,
 }
 
@@ -2587,6 +2589,7 @@ impl PreparedTask {
                 .filter(|audio| !audio.is_empty())
                 .unwrap_or(""),
             resolver_plugin_id: &self.resolver_plugin_id,
+            resolver_choice_pending: self.resolver_choice_pending,
             group_id: &self.group_id,
             resolver_item: &self.resolver_item,
             unattended: self.unattended_selection,
@@ -2862,8 +2865,8 @@ pub struct ResolveOutcome {
     pub kind: ResolveKind,
     pub generation: u64,
     pub result: Result<Option<crate::plugin::ResolveResult>, crate::plugin::PluginError>,
-    /// 用户在变体选择弹窗点关闭/取消 → 取消该任务（而非回退默认变体）。
-    pub cancelled: bool,
+    /// 用户关闭变体 / 插件选择框 → 以该原因取消任务（而非回退默认项）。
+    pub cancelled: Option<crate::plugin::CancelReason>,
 }
 
 /// resolve 等待中的任务状态。Start 携 `QueuedTask`（再入覆盖 res 后分派）；
@@ -3212,6 +3215,9 @@ pub struct DownloadManager {
     /// 见 [`decide_bt_session_release`]。
     #[cfg(feature = "bt")]
     bt_paused_idle_since: Option<std::time::Instant>,
+    /// 已完成 BT 任务的在途完整性校验（删除任务 / 关停时取消）。
+    #[cfg(feature = "bt")]
+    integrity_checks: crate::bt_verify::IntegrityChecks,
     /// System 代理模式下按系统代理指纹缓存的全局 client（见 `global_client`）。
     system_client: std::sync::Mutex<Option<(String, Client)>>,
     /// 专属（任务级代理 / UA / 忽略 TLS / 队列默认 UA / Auto 代理）HTTP client 缓存，
@@ -3416,6 +3422,8 @@ impl DownloadManager {
             last_seed_time_persist: Mutex::new(std::time::Instant::now()),
             #[cfg(feature = "bt")]
             bt_paused_idle_since: None,
+            #[cfg(feature = "bt")]
+            integrity_checks: crate::bt_verify::IntegrityChecks::default(),
             system_client: std::sync::Mutex::new(None),
             task_clients: std::sync::Mutex::new(HashMap::new()),
             probe_gate: Arc::new(Semaphore::new(META_PROBE_CONCURRENCY)),
@@ -3510,17 +3518,21 @@ impl DownloadManager {
         self.plugin_retry_rx.take()
     }
 
-    /// 纯 Rust glob 首匹配（同步逻辑，async 仅因读 RwLock）。feature 关时恒空。
+    /// 建任务时的 resolver 绑定：`(插件 ID, 是否待多插件选择)`；无命中为空串。
     #[cfg(feature = "plugins")]
-    async fn plugin_match_resolver(&self, url: &str) -> String {
-        match &self.plugin_manager {
-            Some(pm) => pm.match_resolver(url).await.unwrap_or_default(),
-            None => String::new(),
-        }
+    async fn plugin_route_resolver(&self, url: &str) -> (String, bool) {
+        let route = match &self.plugin_manager {
+            Some(pm) => pm.route_resolver(url).await,
+            None => None,
+        };
+        route.map_or_else(
+            || (String::new(), false),
+            |route| (route.identity, route.choice_pending),
+        )
     }
     #[cfg(not(feature = "plugins"))]
-    async fn plugin_match_resolver(&self, _url: &str) -> String {
-        String::new()
+    async fn plugin_route_resolver(&self, _url: &str) -> (String, bool) {
+        (String::new(), false)
     }
 
     /// 前置预解析（多文件清单，B2 契约）：off-actor、只读，不建任务、不写库。
@@ -3655,6 +3667,7 @@ impl DownloadManager {
         kind: ResolveKind,
         generation: u64,
         unattended: bool,
+        choice_pending: bool,
         cancel: CancellationToken,
     ) {
         use futures_util::FutureExt;
@@ -3663,11 +3676,60 @@ impl DownloadManager {
         };
         let tx = self.resolve_tx.clone();
         let handle = pm.runtime_handle();
-        let id_for_worker = identity.clone();
         let selector = self.selector.clone();
         let second_stage = !req.resolver_item.is_empty();
         handle.spawn(async move {
-            let fut = std::panic::AssertUnwindSafe(pm.resolve(&id_for_worker, req));
+            let mut identity = identity;
+            // 多插件冲突待选：首次 resolve 前定案（站点默认 / 无人值守回退 / 询问用户），
+            // 写回任务绑定后再用选中的插件解析。二段解析沿用母任务插件，绝不询问。
+            if choice_pending && !second_stage {
+                let choice = tokio::select! {
+                    c = pm.choose_task_resolver(
+                        &task_id,
+                        &req.url,
+                        &identity,
+                        unattended,
+                        selector.as_ref(),
+                    ) => c,
+                    _ = cancel.cancelled() => return,
+                };
+                match choice {
+                    Ok(crate::plugin::routing::ResolverChoice::Use(chosen)) => identity = chosen,
+                    Ok(crate::plugin::routing::ResolverChoice::Cancelled) => {
+                        if tx
+                            .send(ResolveOutcome {
+                                task_id,
+                                identity,
+                                kind,
+                                generation,
+                                result: Ok(None),
+                                cancelled: Some(crate::plugin::CancelReason::UserCancelled),
+                            })
+                            .is_err()
+                        {
+                            tracing::debug!("download-manager notification receiver closed");
+                        }
+                        return;
+                    }
+                    Err(error) => {
+                        if tx
+                            .send(ResolveOutcome {
+                                task_id,
+                                identity,
+                                kind,
+                                generation,
+                                result: Err(error),
+                                cancelled: None,
+                            })
+                            .is_err()
+                        {
+                            tracing::debug!("download-manager notification receiver closed");
+                        }
+                        return;
+                    }
+                }
+            }
+            let fut = std::panic::AssertUnwindSafe(pm.resolve(&identity, req));
             // 暂停/取消/删除会 cancel 占位 token：立即丢弃 resolve future（释放
             // resolve/yt-dlp 信号量槽位），且不回流——占位已由触发方清理。
             let resolved = tokio::select! {
@@ -3691,7 +3753,7 @@ impl DownloadManager {
             // 二段解析（resolver_item 非空）与无人值守任务（tasks.unattended，
             // RSS/免打扰接管）绝不弹选择框：静默取默认变体（引擎自动裂变场景
             // 不为 N 个子任务弹 N 个选择框，A1 契约）。
-            let mut cancelled = false;
+            let mut cancelled = None;
             if cancel.is_cancelled() {
                 return;
             }
@@ -3705,7 +3767,9 @@ impl DownloadManager {
                         c = collapse_resolve_variants(&task_id, res, selector.as_ref()) => c,
                         _ = cancel.cancelled() => return,
                     };
-                    cancelled = selected;
+                    if selected {
+                        cancelled = Some(crate::plugin::CancelReason::VariantSelectionCancelled);
+                    }
                 }
             }
             if tx
@@ -3753,19 +3817,16 @@ impl DownloadManager {
             }
             return;
         }
-        // 用户在变体选择弹窗点关闭/取消 → 取消该任务（cancel_task 会清 pending_resolve /
-        // active_tasks 占位、置 status=4、drain_queue）。放在世代守卫之后：确认本 outcome
-        // 拥有当前 pending 条目才动手。
-        if out.cancelled {
+        // 用户在变体 / 插件选择弹窗点关闭/取消 → 任务暂停（与「文件已存在」取消、BT 文件
+        // 选择取消同一语义）：请求上下文都在库里，恢复时 begin_resolve_resume 重新解析并
+        // 再次询问。放在世代守卫之后：确认本 outcome 拥有当前 pending 条目才动手。
+        if let Some(reason) = out.cancelled {
             log_info!(
-                "[plugin-resolve] task {} variant selection cancelled by user, cancelling task",
-                task_id
+                "[plugin-resolve] task {} selection cancelled by user ({:?}), pausing task",
+                task_id,
+                reason
             );
-            self.cancel_task_with_reason(
-                &task_id,
-                crate::plugin::CancelReason::VariantSelectionCancelled,
-            )
-            .await;
+            self.pause_after_selection_cancelled(&task_id, reason).await;
             return;
         }
         // 任务已从 DB 删除（兜底；delete_task 亦已清 pending_resolve）→ 放弃再入。
@@ -4264,7 +4325,11 @@ impl DownloadManager {
             auth_ref: String::new(),
             cookies: queued.cookies.clone(),
             referrer: queued.referrer.clone(),
-            user_agent: queued.user_agent.clone(),
+            user_agent: self.plugin_resolve_user_agent(
+                &queued.user_agent,
+                &queued.extra_headers,
+                &queued.queue_id,
+            ),
             extra_headers: queued.extra_headers.clone(),
             resolver_item: queued.resolver_item.clone(),
         };
@@ -4276,6 +4341,8 @@ impl DownloadManager {
             },
         );
         let unattended = self.db.is_task_unattended(&task_id).await.unwrap_or(false);
+        let choice_pending = self.resolver_choice_pending(&task_id).await;
+        self.mark_resolving(&task_id).await;
         self.spawn_resolve_worker(
             task_id,
             identity,
@@ -4283,8 +4350,90 @@ impl DownloadManager {
             ResolveKind::Start,
             spawn_gen,
             unattended,
+            choice_pending,
             resolve_token,
         );
+    }
+
+    /// 任务是否仍待多插件选择。读库失败按「不询问」处理：沿用已绑定的回退插件，
+    /// 与该插件独占匹配时的行为一致。
+    #[cfg(feature = "plugins")]
+    async fn resolver_choice_pending(&self, task_id: &str) -> bool {
+        match self.db.is_task_resolver_choice_pending(task_id).await {
+            Ok(pending) => pending,
+            Err(error) => {
+                crate::logger::report_error(
+                    "download-manager",
+                    "load plugin choice pending flag",
+                    &error,
+                );
+                false
+            }
+        }
+    }
+
+    /// 插件 resolve 上下文的 User-Agent，与该任务下载请求的身份一致：已持久化请求头里的
+    /// User-Agent（调用方捕获或单任务覆盖，创建时并入）优先，否则按单任务覆盖 → 队列 →
+    /// 全局默认解析。首次起跑与暂停 / 重启后的恢复重解析因此拿到同一个值。
+    #[cfg(feature = "plugins")]
+    fn plugin_resolve_user_agent(
+        &self,
+        explicit: &str,
+        extra_headers: &HashMap<String, String>,
+        queue_id: &str,
+    ) -> String {
+        extra_headers
+            .iter()
+            .find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("user-agent")
+                    .then(|| value.clone())
+            })
+            .unwrap_or_else(|| self.resolved_task_ua(explicit, queue_id).to_string())
+    }
+
+    /// resolve 开始：落库并广播「准备中」(5)，插件解析（yt-dlp 可能要数秒）期间各端
+    /// 显示进行中而不是「等待中」。与下载器探测阶段同一约定：重启时
+    /// `reset_incomplete_tasks_to_paused` 把 5 归为暂停并交给自动恢复。
+    /// 落库失败只记录：状态展示不阻断解析。
+    #[cfg(feature = "plugins")]
+    async fn mark_resolving(&self, task_id: &str) {
+        if let Err(error) = self.db.update_task_status(task_id, 5, "").await {
+            crate::logger::report_error("download-manager", "persist resolving state", &error);
+            return;
+        }
+        self.emit_progress_from_db(task_id, 5, 0, "", 0).await;
+    }
+
+    /// 变体 / 插件选择弹窗被用户取消：任务暂停（不发 `task.paused` webhook——这是关闭
+    /// 弹窗而非点暂停），并照常以 `reason` 通知插件 `onCancel`（593#1）。
+    #[cfg(feature = "plugins")]
+    async fn pause_after_selection_cancelled(
+        &mut self,
+        task_id: &str,
+        reason: crate::plugin::CancelReason,
+    ) {
+        self.pause_task_silent(task_id).await;
+        let Some(pm) = &self.plugin_manager else {
+            return;
+        };
+        let url = match self.db.load_task_by_id(task_id).await {
+            Ok(Some(task)) => task.url,
+            Ok(None) => return,
+            Err(error) => {
+                crate::logger::report_error(
+                    "download-manager",
+                    "load task for plugin cancel event",
+                    &error,
+                );
+                return;
+            }
+        };
+        pm.notify(crate::plugin::PluginEvent::Cancel {
+            task_id: task_id.to_string(),
+            url,
+            reason: Some(reason),
+        })
+        .await;
     }
 
     /// do_resume_task 体首守卫调用：对称占位（防 resumeAll 并发双 resolve）+ spawn。
@@ -4402,7 +4551,7 @@ impl DownloadManager {
             auth_ref: String::new(),
             cookies,
             referrer,
-            user_agent: String::new(),
+            user_agent: self.plugin_resolve_user_agent("", &extra_headers, &task.queue_id),
             extra_headers,
             resolver_item,
         };
@@ -4412,6 +4561,8 @@ impl DownloadManager {
                 generation: spawn_gen,
             },
         );
+        let choice_pending = self.resolver_choice_pending(task_id).await;
+        self.mark_resolving(task_id).await;
         self.spawn_resolve_worker(
             task_id.to_string(),
             identity,
@@ -4419,6 +4570,7 @@ impl DownloadManager {
             ResolveKind::Resume,
             spawn_gen,
             unattended,
+            choice_pending,
             resolve_token,
         );
     }
@@ -7607,7 +7759,9 @@ impl DownloadManager {
                 }
             }
         };
-        let resolver_plugin_id = self.plugin_match_resolver(&url).await;
+        let (resolver_plugin_id, choice_pending) = self.plugin_route_resolver(&url).await;
+        // 二段解析任务（resolver_item 非空）沿用来源插件，不进入多插件选择。
+        let resolver_choice_pending = choice_pending && resolver_item.is_empty();
         let is_bt = is_magnet(&url) || !torrent_file_bytes.is_empty();
         // 稍后下载的 hint 任务（一次性 URL，不探测）：名字为空时按 URL 推断占位名
         // （含预签名 URL 的 `response-content-disposition`），随创建行一并落库，
@@ -7656,6 +7810,7 @@ impl DownloadManager {
             resolver_item,
             unattended_selection,
             resolver_plugin_id,
+            resolver_choice_pending,
             is_bt,
         }))
     }
@@ -10202,30 +10357,6 @@ impl DownloadManager {
     }
 
     pub async fn cancel_task(&mut self, task_id: &str) {
-        self.cancel_task_impl(
-            task_id,
-            #[cfg(feature = "plugins")]
-            crate::plugin::CancelReason::UserCancelled,
-        )
-        .await;
-    }
-
-    /// 变体选择弹窗被取消时调用（593#1）：与普通用户取消同一条清理路径，
-    /// 仅 `onCancel` 钩子载荷的 `reason` 不同，便于插件区分场景。
-    #[cfg(feature = "plugins")]
-    pub async fn cancel_task_with_reason(
-        &mut self,
-        task_id: &str,
-        reason: crate::plugin::CancelReason,
-    ) {
-        self.cancel_task_impl(task_id, reason).await;
-    }
-
-    async fn cancel_task_impl(
-        &mut self,
-        task_id: &str,
-        #[cfg(feature = "plugins")] reason: crate::plugin::CancelReason,
-    ) {
         // 清除自动重试计数，与 delete_task / resume_task 对齐。取消是用户的
         // 明确意图，必须从自动重试状态中移除，使后续 create/resume 干净起步。
         self.auto_retry_counts.remove(task_id);
@@ -10351,7 +10482,7 @@ impl DownloadManager {
             pm.notify(crate::plugin::PluginEvent::Cancel {
                 task_id: task_id.to_string(),
                 url,
-                reason: Some(reason),
+                reason: Some(crate::plugin::CancelReason::UserCancelled),
             })
             .await;
         }
@@ -10385,6 +10516,8 @@ impl DownloadManager {
         self.retry_unschedule(task_id);
         self.clear_pending_resolve(task_id);
 
+        #[cfg(feature = "bt")]
+        self.integrity_checks.cancel(task_id);
         // Remove from pending queue if queued.
         if let Some(pos) = self.pending_queue.iter().position(|q| q.task_id == task_id) {
             self.pending_queue.remove(pos);
@@ -10812,6 +10945,8 @@ impl DownloadManager {
         let mut workers = Vec::with_capacity(task_ids.len());
         for task_id in task_ids {
             hls_downloader::request_discard(task_id);
+            #[cfg(feature = "bt")]
+            self.integrity_checks.cancel(task_id);
             let handle = self
                 .active_tasks
                 .remove(task_id.as_str())
@@ -11617,6 +11752,8 @@ impl DownloadManager {
         // 做种时长平时只在状态迁移/顺带写/30 分钟兜底时落库，正常关机在此结算。
         #[cfg(feature = "bt")]
         self.flush_seed_times().await;
+        #[cfg(feature = "bt")]
+        self.integrity_checks.cancel_all();
         let mut handles = Vec::new();
         for (_task_id, entry) in self.active_tasks.drain() {
             entry.token.cancel();
@@ -11657,6 +11794,8 @@ impl Drop for DownloadManager {
             entry.token.cancel();
         }
         self.pending_queue.clear();
+        #[cfg(feature = "bt")]
+        self.integrity_checks.cancel_all();
 
         // Shut down the BT session on a dedicated thread to avoid deadlock.
         // `SharedBtSession::shutdown()` calls `runtime.block_on()`, which
@@ -12588,6 +12727,105 @@ impl DownloadManager {
             let spec = crate::downloader::RequestSpec::empty_get();
             crate::meta_prober::probe_link_kind(&url, &client, &spec).await
         }
+    }
+
+    /// 已完成 BT 任务的完整性校验（`daemon.task.verify`）：按种子 piece 表全量重哈希
+    /// 落盘数据，只读、不改任务状态。前置校验与元数据收集在 actor 内完成，返回的
+    /// future 在阻塞线程上哈希、可在 actor 之外 `await`；同一任务同时只跑一个，
+    /// 删除任务或引擎关停时取消。
+    #[cfg(feature = "bt")]
+    pub async fn bt_integrity_check_future(
+        &self,
+        task_id: &str,
+    ) -> Result<
+        impl Future<
+            Output = Result<
+                crate::bt_verify::BtIntegrityReport,
+                crate::bt_verify::BtIntegrityError,
+            >,
+        > + Send
+        + use<>,
+        crate::bt_verify::BtIntegrityError,
+    > {
+        use crate::bt_verify::{BtIntegrityError, LandedCheck, MetadataSources};
+
+        let db_error = |error: DbError| BtIntegrityError::Internal(format!("{error:#}"));
+        let task = self
+            .db
+            .load_task_by_id(task_id)
+            .await
+            .map_err(db_error)?
+            .ok_or(BtIntegrityError::NotFound)?;
+        if task.status != 3 || !is_bt_url(&task.url) {
+            return Err(BtIntegrityError::NotEligible);
+        }
+        let guard = self
+            .integrity_checks
+            .begin(task_id)
+            .ok_or(BtIntegrityError::Busy)?;
+
+        let live = match &self.bt_session {
+            Some(bt) => match bt.cached_handle(task_id).await {
+                Some(handle) => match handle.with_metadata(|meta| meta.torrent_bytes.clone()) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) => {
+                        log_info!(
+                            "[manager] integrity check {}: live metadata unavailable: {:#}",
+                            task_id,
+                            error
+                        );
+                        None
+                    }
+                },
+                None => None,
+            },
+            None => None,
+        };
+        let stored = if live.is_none() {
+            self.db
+                .load_torrent_file_bytes(task_id)
+                .await
+                .map_err(db_error)?
+                .map(bytes::Bytes::from)
+        } else {
+            None
+        };
+        let cached = if is_magnet(&task.url) {
+            TorrentSource::Magnet(task.url.clone())
+                .info_hash_hex()
+                .map(|hash| {
+                    (
+                        crate::bt_partfile::persistence_dir(&self.app_data_dir)
+                            .join(format!("{hash}.torrent")),
+                        hash,
+                    )
+                })
+        } else {
+            None
+        };
+        let selection = self
+            .db
+            .load_bt_selected_files(task_id)
+            .await
+            .map_err(db_error)?
+            .filter(|list| !list.is_empty() && list.iter().all(|&index| index >= 0))
+            .map(|list| list.into_iter().map(|index| index as usize).collect());
+
+        Ok(crate::bt_verify::run(
+            LandedCheck {
+                task_id: task_id.to_owned(),
+                save_dir: PathBuf::from(&task.save_dir),
+                file_name: task.file_name.clone(),
+                selection,
+                sidecar_path: crate::bt_partfile::sidecar_path(&self.app_data_dir, task_id),
+                metadata: MetadataSources {
+                    live,
+                    stored,
+                    cached,
+                },
+            },
+            guard,
+        ))
     }
 
     /// RSS off-actor 回流的唯一入口（宿主 actor 的 `rss_rx` 分支调用）。

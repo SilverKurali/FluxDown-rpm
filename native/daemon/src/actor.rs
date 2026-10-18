@@ -86,6 +86,10 @@ pub enum ActorOperation {
         inactive_time_limit_minutes: i64,
         upload_limit_bps: i64,
     },
+    /// 已完成 BT 任务的完整性校验（off-actor 哈希）。
+    VerifyTask {
+        task_id: String,
+    },
     CreateQueue {
         name: String,
         speed_limit_kbps: i64,
@@ -254,6 +258,7 @@ pub enum ActorResult {
     WebhookDeliveries(Vec<fluxdown_engine::webhook::WebhookDelivery>),
     WebhookSimulation(usize),
     WebhookTest(Box<fluxdown_engine::webhook::WebhookDelivery>),
+    TaskVerify(fluxdown_protocol::TaskVerifyResult),
 }
 
 /// actor 领域错误。
@@ -267,6 +272,9 @@ pub enum ActorError {
     RevisionConflict { current: u64 },
     #[error("resource not found")]
     NotFound,
+    /// 资源正被另一操作占用（如同一任务的校验已在进行）。
+    #[error("conflict: {0}")]
+    Conflict(String),
 }
 
 /// daemon actor 命令。
@@ -718,6 +726,43 @@ async fn dispatch_operation(
                     tracing::debug!("link probe caller disconnected before result");
                 }
             });
+        }
+        #[cfg_attr(not(feature = "bt"), allow(unused_variables))]
+        ActorOperation::VerifyTask { task_id } => {
+            #[cfg(feature = "bt")]
+            {
+                let result = match engine.manager.bt_integrity_check_future(&task_id).await {
+                    Ok(future) => {
+                        tokio::spawn(async move {
+                            let result = future
+                                .await
+                                .map(|report| ActorResult::TaskVerify(task_verify_to_dto(report)))
+                                .map_err(integrity_error);
+                            if ack.send(result).is_err() {
+                                tracing::debug!(
+                                    "integrity check caller disconnected before result"
+                                );
+                            }
+                        });
+                        return;
+                    }
+                    Err(error) => Err(integrity_error(error)),
+                };
+                if ack.send(result).is_err() {
+                    tracing::debug!("integrity check caller disconnected before rejection");
+                }
+            }
+            #[cfg(not(feature = "bt"))]
+            {
+                if ack
+                    .send(Err(ActorError::InvalidArgument(
+                        UNSUPPORTED_PROTOCOL_MESSAGE.to_owned(),
+                    )))
+                    .is_err()
+                {
+                    tracing::debug!("integrity check caller disconnected before rejection");
+                }
+            }
         }
         ActorOperation::TestProxy {
             proxy_type,
@@ -1179,6 +1224,7 @@ async fn execute_operation(
         | ActorOperation::RefreshEd2kNodes
         | ActorOperation::RssValidate { .. }
         | ActorOperation::LinkProbe { .. }
+        | ActorOperation::VerifyTask { .. }
         | ActorOperation::WebhookTest { .. }
         | ActorOperation::TestProxy { .. } => unreachable!("handled off actor"),
         ActorOperation::WebhookDeliveries => {
@@ -1450,6 +1496,39 @@ async fn commit_ed2k_refresh(
         updated_at,
         error: outcome.error,
     })
+}
+
+/// 引擎完整性校验报告 → wire DTO（引擎不依赖 protocol，转换放在 daemon 边界）。
+#[cfg(feature = "bt")]
+fn task_verify_to_dto(
+    report: fluxdown_engine::bt_verify::BtIntegrityReport,
+) -> fluxdown_protocol::TaskVerifyResult {
+    use fluxdown_engine::bt_verify::BtIntegrityStatus;
+    fluxdown_protocol::TaskVerifyResult {
+        status: match report.status {
+            BtIntegrityStatus::Intact => fluxdown_protocol::TaskVerifyStatus::Intact,
+            BtIntegrityStatus::Damaged => fluxdown_protocol::TaskVerifyStatus::Damaged,
+            BtIntegrityStatus::Unverifiable => fluxdown_protocol::TaskVerifyStatus::Unverifiable,
+        },
+        total_pieces: report.total_pieces,
+        verified_pieces: report.verified_pieces,
+        bad_pieces: report.bad_pieces,
+        skipped_pieces: report.skipped_pieces,
+        damaged_files: report.damaged_files,
+    }
+}
+
+#[cfg(feature = "bt")]
+fn integrity_error(error: fluxdown_engine::bt_verify::BtIntegrityError) -> ActorError {
+    use fluxdown_engine::bt_verify::BtIntegrityError;
+    match error {
+        BtIntegrityError::NotFound => ActorError::NotFound,
+        BtIntegrityError::NotEligible => ActorError::InvalidArgument(error.to_string()),
+        BtIntegrityError::Busy => ActorError::Conflict(error.to_string()),
+        BtIntegrityError::Cancelled | BtIntegrityError::Internal(_) => {
+            ActorError::Operation(error.to_string())
+        }
+    }
 }
 
 /// 引擎探测结果 → wire DTO（引擎不依赖 protocol，转换放在 daemon 边界）。
@@ -2500,6 +2579,112 @@ mod tests {
         drop(engine);
         if let Err(error) = tokio::fs::remove_dir_all(dir).await {
             eprintln!("actor set segments test directory removal failed: {error}");
+        }
+    }
+
+    /// `daemon.task.verify`：已完成的 .torrent 任务按 DB 种子字节校验落盘文件并经回执给出
+    /// 结论；改坏数据后报告损坏文件；非 BT / 不存在的任务分别映射为参数错误 / NotFound。
+    #[cfg(feature = "bt")]
+    #[tokio::test]
+    async fn verify_task_reports_integrity_and_rejects_ineligible_tasks() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_daemon_verify_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create verify test dir");
+        let dir_text = dir.to_string_lossy().into_owned();
+        let mut engine = fluxdown_engine::Engine::new(
+            fluxdown_engine::EngineConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: dir_text.clone(),
+                app_data_dir: dir_text.clone(),
+                bt_config: fluxdown_engine::bt_config::BtConfig::default(),
+                proxy_config: fluxdown_engine::proxy_config::ProxyConfig::default(),
+                user_agent: String::new(),
+                data_dir_override: Some(dir.clone()),
+                database_url: None,
+            },
+            std::sync::Arc::new(fluxdown_engine::NoopSink),
+            std::sync::Arc::new(fluxdown_engine::NoopSelection),
+        )
+        .await
+        .expect("construct engine");
+        let events =
+            crate::event_hub::DaemonEventHub::new(fluxdown_protocol::DaemonSnapshot::default(), 32);
+        let (maintenance_tx, _maintenance_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // 单文件种子 "hello.txt"，内容 "hello"，一个 piece（SHA1 = aaf4c61d…）。
+        let mut torrent =
+            b"d4:infod6:lengthi5e4:name9:hello.txt12:piece lengthi16384e6:pieces20:".to_vec();
+        torrent.extend_from_slice(&[
+            0xaa, 0xf4, 0xc6, 0x1d, 0xdc, 0xc5, 0xe8, 0xa2, 0xda, 0xbe, 0xde, 0x0f, 0x3b, 0x48,
+            0x2c, 0xd9, 0xae, 0xa9, 0x43, 0x4d,
+        ]);
+        torrent.extend_from_slice(b"ee");
+        for (id, url) in [
+            ("bt", "torrent-file://hello.torrent"),
+            ("http", "https://example.invalid/a.bin"),
+        ] {
+            engine
+                .db
+                .insert_task(id, url, "hello.txt", &dir_text, 1, 0, "", "", "", 3)
+                .await
+                .expect("insert task");
+        }
+        engine
+            .db
+            .save_torrent_file_bytes("bt", &torrent)
+            .await
+            .expect("save torrent bytes");
+        tokio::fs::write(dir.join("hello.txt"), b"hello")
+            .await
+            .expect("write landed file");
+
+        let mut verify = async |task_id: &str| {
+            let (ack, response) = tokio::sync::oneshot::channel();
+            super::dispatch_operation(
+                ActorOperation::VerifyTask {
+                    task_id: task_id.to_owned(),
+                },
+                ack,
+                &mut engine,
+                &events,
+                &maintenance_tx,
+            )
+            .await;
+            response.await.expect("verify acknowledged")
+        };
+        match verify("bt").await {
+            Ok(super::ActorResult::TaskVerify(result)) => {
+                assert_eq!(result.status, fluxdown_protocol::TaskVerifyStatus::Intact);
+                assert_eq!((result.total_pieces, result.verified_pieces), (1, 1));
+            }
+            _ => panic!("intact data must verify"),
+        }
+        tokio::fs::write(dir.join("hello.txt"), b"jello")
+            .await
+            .expect("corrupt landed file");
+        match verify("bt").await {
+            Ok(super::ActorResult::TaskVerify(result)) => {
+                assert_eq!(result.status, fluxdown_protocol::TaskVerifyStatus::Damaged);
+                assert_eq!(result.damaged_files, vec!["hello.txt".to_owned()]);
+            }
+            _ => panic!("corrupted data must be reported"),
+        }
+        assert!(matches!(
+            verify("http").await,
+            Err(ActorError::InvalidArgument(_))
+        ));
+        assert!(matches!(verify("missing").await, Err(ActorError::NotFound)));
+
+        drop(engine);
+        if let Err(error) = tokio::fs::remove_dir_all(dir).await {
+            eprintln!("actor verify test directory removal failed: {error}");
         }
     }
 

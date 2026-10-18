@@ -219,12 +219,23 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         }
     });
     application.run(move |cx| {
-        gpui_component::init(cx);
+        // gpui-shell 组件目录的初始化内含 `gpui_component::init`，故整体替代它并先于主题初始化；
+        // 失败只让插件界面不可用（组件仍已初始化）。
+        if let Err(error) = fluxdown_ui_plugin_ui::init(
+            cx,
+            Arc::new(crate::capability_ports::AgentPluginUiPort::new(
+                agent_client.clone(),
+            )),
+            DesktopPaths::from_env().data_root.join("plugin-ui"),
+        ) {
+            log::error!("plugin desktop interfaces unavailable: {error}");
+        }
         crate::logging::install_ui_watchdog(cx);
         crate::app_icon::install();
         fluxdown_ui_theme::init(cx);
         gpui_component::set_locale(&locale);
         let translator = cx.new(|_| translator);
+        fluxdown_ui_plugin_ui::set_translator(cx, translator.clone());
         let session = cx.new(|cx| AgentSession::new(agent_client.clone(), cx));
         WindowRegistry::init(cx, agent_client.clone());
 
@@ -373,6 +384,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         crate::windows::selection::install(cx);
         crate::windows::file_conflict::install(cx);
         crate::plugin_notices::install(cx);
+        crate::plugin_contributions::install(cx);
         crate::update_notices::install(cx);
         if launch.after_update {
             after_session_settled(cx, crate::update_notices::show_installed);

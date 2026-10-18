@@ -10,7 +10,7 @@
  * cat-catch(GPL-3.0) 嗅探思路的复用：JSON 内嵌媒体 URL 深扫见 utils/media-sniff.ts 归属说明。
  * 响应体流式部分读取与 MSE 归因为 FluxDown 自研。
  */
-import { compileBuiltin } from "@/rules/engine";
+import { compileBundled } from "@/rules/engine";
 import { hostMatchesPattern, parseHostPattern, urlGlobMatch, type HostPattern } from "@/rules/glob";
 import { parseDashJson, parseDashXml } from "@/utils/dash-manifest";
 import type { DashManifest } from "@/utils/dash-manifest";
@@ -64,7 +64,7 @@ export function start(): void {
   if (w[HOOK_FLAG]) return;
   w[HOOK_FLAG] = true;
 
-  const rules = compileBuiltin();
+  const rules = compileBundled();
   const recent = new RecentResponses();
 
   // ===== 配置（EV_CONFIG） =====

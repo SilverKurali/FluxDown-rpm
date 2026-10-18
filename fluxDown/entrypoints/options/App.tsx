@@ -15,6 +15,7 @@ import { GeneralPanel } from "./panels/GeneralPanel";
 import { InterceptPanel } from "./panels/InterceptPanel";
 import { RemotePanel } from "./panels/RemotePanel";
 import { RulesPanel } from "./panels/rules/RulesPanel";
+import { ShortcutsPanel } from "./panels/ShortcutsPanel";
 import { SitesPanel } from "./panels/SitesPanel";
 import { SniffPanel } from "./panels/SniffPanel";
 
@@ -25,6 +26,7 @@ const NAV: Record<PanelId, { icon: UiIconName; label: MessageKey }> = {
   sites: { icon: "globe", label: "options.nav.sites" },
   rules: { icon: "link", label: "options.nav.rules" },
   remote: { icon: "upload", label: "options.nav.remote" },
+  shortcuts: { icon: "keyboard", label: "options.nav.shortcuts" },
   backup: { icon: "folder", label: "options.nav.backup" },
   about: { icon: "external", label: "options.nav.about" },
 };
@@ -74,6 +76,9 @@ export function App(): JSX.Element {
       break;
     case "remote":
       content = <RemotePanel />;
+      break;
+    case "shortcuts":
+      content = <ShortcutsPanel />;
       break;
     case "backup":
       content = <BackupPanel />;

@@ -1,15 +1,19 @@
 import type { JSX } from "preact";
-import { useState } from "preact/hooks";
+import { useMemo, useState } from "preact/hooks";
 import type { RulesListEntry } from "@/background/protocol";
 import type { RuleStatus } from "@/rules/engine";
-import type { RuleOverrides, RuleTier } from "@/rules/schema";
+import type { RuleOverrides, RuleTier, SniffRuleV1 } from "@/rules/schema";
 import { Badge } from "@/ui/components/Badge";
 import { Button } from "@/ui/components/Button";
 import { EmptyState } from "@/ui/components/EmptyState";
+import { IconButton } from "@/ui/components/IconButton";
+import { Modal } from "@/ui/components/Modal";
 import { Select } from "@/ui/components/Select";
 import { TextInput } from "@/ui/components/TextInput";
 import { Toggle } from "@/ui/components/Toggle";
 import { useT } from "@/ui/i18n";
+import { DEFAULT_PAGE_SIZE, type PageSize, paginate } from "../../lib/pagination";
+import { Pagination } from "../../parts";
 
 interface RuleTableProps {
   entries: RulesListEntry[];
@@ -21,11 +25,16 @@ interface RuleTableProps {
 
 type TierFilter = RuleTier | "all";
 
-const PAGE_SIZE = 100;
+/**
+ * 内置规则是否可查看原文。开发与本地构建默认可看；发布流水线（release.yml）构建时
+ * 设 `WXT_HIDE_BUILTIN_RULES=1`，商店 / Release 包不展示内置规则的真实内容。
+ */
+const BUILTIN_RULE_PREVIEW = import.meta.env.WXT_HIDE_BUILTIN_RULES !== "1";
 
 const TIER_TONES: Record<RuleTier, "neutral" | "accent" | "warning" | "success"> = {
   builtin: "neutral",
   official: "accent",
+  plugin: "accent",
   community: "warning",
   local: "success",
 };
@@ -53,11 +62,14 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
   const t = useT();
   const [tier, setTier] = useState<TierFilter>("all");
   const [query, setQuery] = useState("");
-  const [limit, setLimit] = useState(PAGE_SIZE);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
+  const [previewing, setPreviewing] = useState<SniffRuleV1 | null>(null);
 
   const tierLabels: Record<RuleTier, string> = {
     builtin: t("rules.tier.builtin"),
     official: t("rules.tier.official"),
+    plugin: t("rules.tier.plugin"),
     community: t("rules.tier.community"),
     local: t("rules.tier.local"),
   };
@@ -78,12 +90,18 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
   };
 
   const needle = query.trim().toLowerCase();
-  const filtered = props.entries.filter(({ rule }) => {
-    if (tier !== "all" && rule.tier !== tier) return false;
-    if (!needle) return true;
-    return rule.id.toLowerCase().includes(needle) || (rule.title ?? "").toLowerCase().includes(needle);
-  });
-  const visible = filtered.slice(0, limit);
+  const filtered = useMemo(
+    () =>
+      props.entries.filter(({ rule }) => {
+        if (tier !== "all" && rule.tier !== tier) return false;
+        if (!needle) return true;
+        return rule.id.toLowerCase().includes(needle) || (rule.title ?? "").toLowerCase().includes(needle);
+      }),
+    [props.entries, tier, needle],
+  );
+  // 规则列表重取 / 筛选变化后页码可能越界，渲染时钳到最后一页。
+  const slice = paginate(filtered.length, page, pageSize);
+  const visible = filtered.slice(slice.start, slice.end);
 
   const setEnabled = (id: string, enabled: boolean) => {
     const previous = props.overrides[id];
@@ -108,13 +126,14 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
             value={tier}
             onChange={(v) => {
               setTier(v);
-              setLimit(PAGE_SIZE);
+              setPage(1);
             }}
             label={t("rules.table.filterTier")}
             options={[
               { value: "all", label: t("rules.table.allTiers") },
               { value: "builtin", label: tierLabels.builtin },
               { value: "official", label: tierLabels.official },
+              { value: "plugin", label: tierLabels.plugin },
               { value: "community", label: tierLabels.community },
               { value: "local", label: tierLabels.local },
             ]}
@@ -125,7 +144,7 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
             placeholder={t("rules.table.search")}
             onInput={(v) => {
               setQuery(v);
-              setLimit(PAGE_SIZE);
+              setPage(1);
             }}
           />
         </div>
@@ -144,6 +163,7 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
                 <th>{t("rules.table.colStage")}</th>
                 <th>{t("rules.table.colVersion")}</th>
                 <th>{t("rules.table.colStatus")}</th>
+                {BUILTIN_RULE_PREVIEW ? <th class="opt-col-actions">{t("options.sites.colActions")}</th> : null}
               </tr>
             </thead>
             <tbody>
@@ -183,6 +203,13 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
                       ) : null}
                     </div>
                   </td>
+                  {BUILTIN_RULE_PREVIEW ? (
+                    <td class="opt-col-actions">
+                      {rule.tier === "builtin" ? (
+                        <IconButton icon="eye" label={t("rules.table.viewRule")} onClick={() => setPreviewing(rule)} />
+                      ) : null}
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>
@@ -190,12 +217,21 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
         </div>
       )}
 
-      {filtered.length > visible.length ? (
-        <div class="opt-actions-center">
-          <Button size="sm" onClick={() => setLimit(limit + PAGE_SIZE)}>
-            {t("rules.table.showMore", { count: String(filtered.length - visible.length) })}
-          </Button>
-        </div>
+      <Pagination
+        total={filtered.length}
+        slice={slice}
+        pageSize={pageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(size) => {
+          setPageSize(size);
+          setPage(1);
+        }}
+      />
+
+      {previewing ? (
+        <Modal title={previewing.title || previewing.id} width={640} onClose={() => setPreviewing(null)}>
+          <pre class="opt-json opt-json-view">{JSON.stringify(previewing, null, 2)}</pre>
+        </Modal>
       ) : null}
     </div>
   );

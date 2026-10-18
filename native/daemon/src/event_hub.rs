@@ -25,6 +25,8 @@ struct EventState {
 pub struct DaemonEventHub {
     state: Arc<Mutex<EventState>>,
     events: broadcast::Sender<EventFrame>,
+    /// 可移植视图会话存储：事件映射（渲染 → 帧）与 RPC（open / snapshot / close）共享。
+    plugin_views: Arc<crate::plugin_views::PluginViewStore>,
 }
 
 impl DaemonEventHub {
@@ -43,7 +45,14 @@ impl DaemonEventHub {
         Self {
             state: Arc::new(Mutex::new(state)),
             events,
+            plugin_views: Arc::default(),
         }
+    }
+
+    /// 可移植视图会话存储（与 [`DaemonEngineEventSink`] 共享同一份）。
+    #[must_use]
+    pub fn plugin_views(&self) -> &Arc<crate::plugin_views::PluginViewStore> {
+        &self.plugin_views
     }
 
     /// 只订阅增量广播（不克隆快照）；滞后时接收者自行按 [`Self::snapshot`] 复核。
@@ -177,6 +186,7 @@ impl DaemonEventHub {
         state.expiry_running = true;
         let weak = Arc::downgrade(&self.state);
         let events = self.events.clone();
+        let plugin_views = self.plugin_views.clone();
         runtime.spawn(async move {
             loop {
                 tokio::time::sleep(TRAFFIC_BUCKET).await;
@@ -186,6 +196,7 @@ impl DaemonEventHub {
                 let hub = Self {
                     state: shared,
                     events: events.clone(),
+                    plugin_views: plugin_views.clone(),
                 };
                 let mut state = lock_or_recover(&hub.state);
                 hub.expire_locked_at(&mut state, Instant::now());
@@ -806,6 +817,36 @@ impl fluxdown_engine::events::EventSink for DaemonEngineEventSink {
                 auto_cap,
             },
             EngineEvent::BtDataFinished { .. } => return,
+            EngineEvent::PluginViewRendered { session, tree } => {
+                if let Some(frame) = self.0.plugin_views.rendered(&session, &tree) {
+                    self.0.publish(DaemonEvent::PluginViewFrame(frame));
+                }
+                return;
+            }
+            EngineEvent::PluginViewFailed { session, message } => {
+                if let Some(frame) = self.0.plugin_views.failed(&session, &message) {
+                    self.0.publish(DaemonEvent::PluginViewFrame(frame));
+                }
+                return;
+            }
+            EngineEvent::PluginViewClosed { session, reason } => {
+                self.0.plugin_views.close(&session);
+                self.0
+                    .publish(DaemonEvent::PluginViewClosed { session, reason });
+                return;
+            }
+            EngineEvent::PluginToast {
+                identity,
+                level,
+                text,
+            } => {
+                self.0.publish(DaemonEvent::PluginToast {
+                    identity,
+                    level,
+                    text,
+                });
+                return;
+            }
             EngineEvent::PluginAutoDisabled { identity, reason } => {
                 WsServerMsg::PluginAutoDisabled { identity, reason }
             }

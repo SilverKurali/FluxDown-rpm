@@ -247,6 +247,33 @@ function hasNoSourceEvidence(element: ElementState): boolean {
 }
 
 /**
+ * 规则声明的归属：dom 规则命中（或包含）媒体元素时，产出的资源带着该元素的 key——如站点解析插件
+ * 把视频页本身声明为播放器的下载源（播放数据来自 MSE 分片，没有可直接下载的 URL 证据）。
+ * 只补绑没有 URL 证据的候选，且它的媒体资源只指向一个现存元素。
+ */
+function bindDeclared(
+  candidates: MediaCandidate[],
+  elements: ElementState[],
+  bindings: Map<string, CandidateBinding>,
+  byId: Map<string, DetectedResource>,
+): void {
+  const present = new Set(elements.map((e) => e.key));
+  for (const candidate of candidates) {
+    if (bindings.has(candidate.id)) continue;
+    const keys = new Set<string>();
+    for (const id of candidate.rawResourceIds) {
+      const resource = byId.get(id);
+      if (resource?.elementKey && MEDIA_TYPES.has(resource.type) && present.has(resource.elementKey)) {
+        keys.add(resource.elementKey);
+      }
+    }
+    if (keys.size !== 1) continue;
+    const [elementKey] = keys;
+    bindings.set(candidate.id, { elementKey, playingVariantId: null, confidence: "declared" });
+  }
+}
+
+/**
  * 推断关联：播放器在 Worker 里取数据（或用 MSE in Worker）时，页面钩子看不到任何来源证据，
  * 浮钮会因此永远不出现。只有在没有歧义时才推断——整页恰好一个正在播放的元素、它没有任何证据、
  * 且恰好一个尚未关联、可下载、非低可信、非换页前的候选。
@@ -305,6 +332,7 @@ export function composeTabView(input: ViewModelInput): TabView {
 
   const bindings = bindCandidates(candidates, elements, key);
   const active = activeElement(elements);
+  bindDeclared(candidates, elements, bindings, byId);
   inferBinding(candidates, elements, bindings, byId);
   const elementsByKey = new Map(elements.map((element) => [element.key, element]));
   /**

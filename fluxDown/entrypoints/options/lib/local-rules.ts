@@ -88,3 +88,41 @@ export function mergeImported(
   }
   return { rules, added, replaced };
 }
+
+/** 嗅探规则仓（官方 / 社区规则源，Issue 表单提交入口）。 */
+export const SNIFF_RULES_REPO = "https://github.com/zerx-lab/fluxdown-sniff-rules";
+/** GitHub 预填地址的安全长度；超出时规则改走剪贴板，由用户粘贴进表单。 */
+const MAX_PREFILL_URL = 8000;
+
+export type CommunitySubmission =
+  | { ok: true; url: string; prefilled: boolean; json: string }
+  | { ok: false; reason: string };
+
+/**
+ * 本地规则 → 社区规则提交：`local.x` 改写为 `community.misc.x`（规则仓托管的 misc 命名空间；
+ * 长期维护者改为在自己的仓库发布并登记）、version 从 1 开始，按社区层校验（必须限定站点、
+ * 不能用 preempt 等），再生成预填好的「提交社区规则」Issue 表单地址。
+ * 规则仓的机器人会做同样的改写与校验，这里提前拦下注定失败的提交。
+ */
+export function communitySubmission(rule: SniffRuleV1): CommunitySubmission {
+  const candidate: SniffRuleV1 = {
+    ...rule,
+    id: `community.misc.${rule.id.slice(rule.id.indexOf(".") + 1)}`,
+    tier: "community",
+    version: 1,
+  };
+  try {
+    const { rejected } = validatePack({ ...buildLocalPack([candidate], 0), packId: "community" }, "community");
+    if (rejected.length > 0) return { ok: false, reason: rejected[0].reason };
+  } catch (e) {
+    if (e instanceof PackRejectedError) return { ok: false, reason: e.message };
+    throw e;
+  }
+  const json = JSON.stringify(candidate, null, 2);
+  const params = new URLSearchParams({ template: "community-rule.yml", title: rule.title || candidate.id });
+  const base = `${SNIFF_RULES_REPO}/issues/new?${params}`;
+  const full = `${base}&${new URLSearchParams({ rule: json })}`;
+  return full.length <= MAX_PREFILL_URL
+    ? { ok: true, url: full, prefilled: true, json }
+    : { ok: true, url: base, prefilled: false, json };
+}

@@ -391,6 +391,43 @@ public struct PluginIgnoreRetryParams: Codable, Sendable, Hashable {
     }
 }
 
+/// `daemon.plugin.siteDefaults` 的一行（`PluginSiteDefaultDto`）。
+/// `automatic == true`：无人值守下载自动选定、尚未被用户确认。
+public struct PluginSiteDefault: Codable, Sendable, Hashable, Identifiable {
+    public var site: String
+    public var identity: String
+    public var candidates: [String]
+    public var automatic: Bool
+
+    public var id: String { site }
+
+    public init(site: String, identity: String, candidates: [String], automatic: Bool) {
+        self.site = site
+        self.identity = identity
+        self.candidates = candidates
+        self.automatic = automatic
+    }
+}
+
+/// `daemon.plugin.setSiteDefault`：`identity == nil` 移除条目（编码为 JSON `null`，不能省略键）。
+public struct PluginSetSiteDefaultParams: Codable, Sendable, Hashable {
+    public var site: String
+    public var identity: String?
+
+    public init(site: String, identity: String?) {
+        self.site = site
+        self.identity = identity
+    }
+
+    private enum CodingKeys: String, CodingKey { case site, identity }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(site, forKey: .site)
+        try container.encode(identity, forKey: .identity)
+    }
+}
+
 /// `WsServerMsg::PluginAutoDisabled`（`HostNoticeName.pluginAutoDisabled` 的载荷）。
 public struct PluginAutoDisabledNotice: Codable, Sendable, Hashable {
     public var identity: String

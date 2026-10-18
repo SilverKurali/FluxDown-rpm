@@ -1,7 +1,9 @@
-//! 内置验签公钥。私钥由维护者保管在 `~/.fluxdown-signing/sniff/`，不进仓库。
+//! 内置验签公钥。发布私钥存在规则仓 zerx-lab/fluxdown-sniff-rules 的 Actions Secret
+//! `SNIFF_SIGNING_KEY`（`publish` 工作流签名），备份与吊销私钥由维护者保管在
+//! `~/.fluxdown-signing/sniff/`，都不进仓库。
 //!
-//! 轮换：生成新密钥（`scripts/sniff-rules/keygen.ts`）后在此追加条目；旧条目保留到
-//! 其签发的最后一个包过期。
+//! 轮换：生成新密钥（`scripts/sniff-rules/keygen.ts`）后在此追加条目，同步规则仓 `keys.json`
+//! 与 Secret；旧条目保留到其签发的最后一个包过期。
 
 /// 签发官方 / 社区规则包（吊销列表也接受）的公钥。
 pub(crate) const RELEASE_KEYS: &[(&str, [u8; 32])] = &[(

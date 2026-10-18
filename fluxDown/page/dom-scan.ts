@@ -158,13 +158,28 @@ export interface DomRuleHit {
   ruleId: string;
   value: string;
   text: string;
+  /** 命中元素本身或其内首个已跟踪的媒体元素；产出的资源归属该元素。 */
+  elementKey?: string;
 }
 
 /** 单条 dom 规则最多取的命中数。 */
 export const MAX_DOM_HITS_PER_RULE = 200;
 
+function mediaKeyOf(el: Element, keyOf: ScanContext["keyOf"]): string | undefined {
+  const own = keyOf(el);
+  if (own) return own;
+  for (const media of el.querySelectorAll("video, audio")) {
+    const key = keyOf(media);
+    if (key) return key;
+  }
+  return undefined;
+}
+
 /** 执行一条 dom 规则（selector + attr）；非法 selector 返回空。 */
-export function runDomRule(rule: { ruleId: string; selector: string; attr: string }): DomRuleHit[] {
+export function runDomRule(
+  rule: { ruleId: string; selector: string; attr: string },
+  keyOf: ScanContext["keyOf"],
+): DomRuleHit[] {
   let nodes: NodeListOf<Element>;
   try {
     nodes = document.querySelectorAll(rule.selector);
@@ -182,7 +197,10 @@ export function runDomRule(rule: { ruleId: string; selector: string; attr: strin
       value = el.getAttribute(rule.attr) ?? "";
     }
     if (!value) continue;
-    hits.push({ ruleId: rule.ruleId, value, text: (el.textContent ?? "").trim().slice(0, 200) });
+    const hit: DomRuleHit = { ruleId: rule.ruleId, value, text: (el.textContent ?? "").trim().slice(0, 200) };
+    const elementKey = mediaKeyOf(el, keyOf);
+    if (elementKey) hit.elementKey = elementKey;
+    hits.push(hit);
   }
   return hits;
 }

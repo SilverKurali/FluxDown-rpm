@@ -7,6 +7,7 @@ export const PANELS = [
   "sites",
   "rules",
   "remote",
+  "shortcuts",
   "backup",
   "about",
 ] as const;

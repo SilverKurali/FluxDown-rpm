@@ -96,6 +96,12 @@ mod tests {
             resolver_urls: Vec::new(),
             load_status: "Loaded".into(),
             load_error: String::new(),
+            contributions: fluxdown_protocol::PluginContributionsDto::default(),
+            risk: "standard".to_owned(),
+            consent_pending: Vec::new(),
+            consent_pending_hosts: Vec::new(),
+            network_hosts: Vec::new(),
+            package_dir: None,
         }
     }
 

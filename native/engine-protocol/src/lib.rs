@@ -8,11 +8,12 @@ use fluxdown_engine::model::{
     ResolveVariantOption, SegmentDetail, SourceBytes, TaskInfo,
 };
 use fluxdown_engine::rss::model::{RssItemInfo, RssSourceInfo};
+use fluxdown_engine::selection::PluginCandidate;
 use fluxdown_engine::webhook::{PresetInfo, TaskNotice, WebhookDelivery};
 use fluxdown_protocol::daemon::{
-    BtFileDto, CdnNodeDto, GroupDto, HlsQualityOptionDto, QueueDto, QueuePositionDto, RequestBody,
-    ResolveVariantOptionDto, RssItemDto, RssSourceDto, SegmentDetailDto, TaskDto,
-    WebhookDeliveryDto, WebhookPresetDto,
+    BtFileDto, CdnNodeDto, GroupDto, HlsQualityOptionDto, PluginCandidateDto, QueueDto,
+    QueuePositionDto, RequestBody, ResolveVariantOptionDto, RssItemDto, RssSourceDto,
+    SegmentDetailDto, TaskDto, WebhookDeliveryDto, WebhookPresetDto,
 };
 #[cfg(feature = "components")]
 use fluxdown_protocol::daemon::{ComponentFfmpegStatus, ComponentVersions, ComponentYtdlpStatus};
@@ -324,6 +325,17 @@ pub fn resolve_variant_option_to_dto(option: ResolveVariantOption) -> ResolveVar
     }
 }
 
+/// 将多插件选择的候选插件转换为 wire DTO。
+#[must_use]
+pub fn plugin_candidate_to_dto(candidate: PluginCandidate) -> PluginCandidateDto {
+    PluginCandidateDto {
+        identity: candidate.identity,
+        name: candidate.name,
+        version: candidate.version,
+        description: candidate.description,
+    }
+}
+
 /// 将 Webhook 投递记录转换为 wire DTO。
 #[must_use]
 pub fn webhook_delivery_to_dto(delivery: WebhookDelivery) -> WebhookDeliveryDto {
@@ -456,6 +468,50 @@ pub fn plugin_info_to_dto(
         resolver_urls: plugin.resolver_urls,
         load_status: plugin.load_status,
         load_error: plugin.load_error,
+        contributions: plugin_contributions_to_dto(&plugin.contributions),
+        risk: plugin.risk.as_str().to_owned(),
+        consent_pending: plugin.consent_pending,
+        consent_pending_hosts: plugin.consent_pending_hosts,
+        network_hosts: plugin.network_hosts,
+        package_dir: plugin.package_dir,
+    }
+}
+
+#[cfg(feature = "plugins")]
+fn plugin_contributions_to_dto(
+    contributes: &fluxdown_engine::plugin::manifest::ContributesDecl,
+) -> fluxdown_protocol::daemon::PluginContributionsDto {
+    use fluxdown_protocol::daemon::{
+        PluginCommandDeclDto, PluginContributionsDto, PluginDesktopEntryDto, PluginViewDeclDto,
+    };
+    PluginContributionsDto {
+        views: contributes
+            .views
+            .iter()
+            .map(|view| PluginViewDeclDto {
+                id: view.id.clone(),
+                title: view.title.clone(),
+                location: view.location.as_str().to_owned(),
+                portable: view.is_portable(),
+                desktop: view.desktop.as_ref().map(|d| PluginDesktopEntryDto {
+                    entry: d.entry.clone(),
+                    width: d.width,
+                    height: d.height,
+                    network_hosts: d.network_hosts.clone(),
+                }),
+            })
+            .collect(),
+        commands: contributes
+            .commands
+            .iter()
+            .map(|cmd| PluginCommandDeclDto {
+                id: cmd.id.clone(),
+                title: cmd.title.clone(),
+                palette: cmd.palette,
+                task_menu: cmd.task_menu,
+            })
+            .collect(),
+        sniff_rules: contributes.sniff_rules.is_some(),
     }
 }
 
@@ -480,6 +536,7 @@ pub fn market_entry_to_dto(
         yanked: entry.yanked,
         tags: entry.tags,
         permissions: entry.permissions,
+        network_hosts: entry.network_hosts,
     }
 }
 

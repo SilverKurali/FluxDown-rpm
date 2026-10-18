@@ -9,14 +9,15 @@ export type { ResourceType };
 
 export const RULE_ENGINE_VERSION = 1;
 
-export type RuleTier = "builtin" | "official" | "community" | "local";
+export type RuleTier = "builtin" | "official" | "plugin" | "community" | "local";
 
 /** 层级优先级：数值越小越先求值（本地最先，内置最后）。 */
 export const TIER_RANK: Record<RuleTier, number> = {
   local: 0,
   official: 1,
-  community: 2,
-  builtin: 3,
+  plugin: 2,
+  community: 3,
+  builtin: 4,
 };
 
 /**
@@ -119,6 +120,10 @@ export type RuleAction =
       fields: Record<string, string>;
       emit: EmitSpec;
     }
+  /**
+   * 页面元素提取资源。模板字段：`value`（attr 取值；URL 型属性取解析后的绝对地址）、`text`（元素文本）、
+   * `page`（规则匹配所用的页面 URL）。命中元素是（或包含）页面媒体元素时，产出的资源归属该元素。
+   */
   | { kind: "dom"; selector: string; attr: string; emit: EmitSpec }
   /** JSON 中 `path`（缺省为根）处是 DASH 结构（video[] / audio[] 带 baseUrl），按清单处理。 */
   | { kind: "manifest"; path?: string }

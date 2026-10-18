@@ -23,9 +23,9 @@ use rquickjs::{
 use tokio::sync::Semaphore;
 
 use super::runtime::{
-    AuthRequest, AuthResult, ExecutionBudget, FfmpegSpec, HostContext, PluginBridge,
-    PluginEntryKind, PluginError, PluginEvent, PluginLogLevel, PluginScript, ResolveRequest,
-    ResolveResult, ScriptRuntime, SubscriptionRequest, YtdlpSpec,
+    AuthRequest, AuthResult, ExecutionBudget, FfmpegSpec, HostContext, HostEvents, PluginBridge,
+    PluginEntryKind, PluginError, PluginEvent, PluginHost, PluginLogLevel, PluginScript,
+    PluginTaskPort, ResolveRequest, ResolveResult, ScriptRuntime, SubscriptionRequest, YtdlpSpec,
 };
 
 /// 硬顶（**CPU/中断**预算）：单次调用的 JS 字节码执行不得跨过该墙——interrupt
@@ -553,6 +553,27 @@ impl ScriptRuntime for QuickJsScriptRuntime {
         }
     }
 
+    async fn start_host(
+        &self,
+        plugin: PluginScript,
+        settings_json: String,
+        bridge: Arc<dyn PluginBridge>,
+        host: HostContext,
+        task_port: Option<Arc<dyn PluginTaskPort>>,
+        events: Arc<dyn HostEvents>,
+    ) -> Result<Arc<dyn PluginHost>, PluginError> {
+        debug_assert_eq!(plugin.entry_fn_hint, PluginEntryKind::Main);
+        super::quickjs_host::start(
+            self.handle.clone(),
+            plugin,
+            settings_json,
+            bridge,
+            host,
+            task_port,
+            events,
+        )
+        .await
+    }
     fn spawn_handle(&self) -> tokio::runtime::Handle {
         self.handle.clone()
     }
@@ -576,7 +597,7 @@ fn reclassify_oom(e: PluginError) -> PluginError {
 }
 
 /// 构建 `flux.info` 的 JSON。
-fn info_json(identity: &str, version: &str, app_version: &str) -> String {
+pub(super) fn info_json(identity: &str, version: &str, app_version: &str) -> String {
     serde_json::json!({
         "identity": identity,
         "version": version,
@@ -586,7 +607,7 @@ fn info_json(identity: &str, version: &str, app_version: &str) -> String {
 }
 
 /// 把 JSON 字符串 parse 为 JS 值并挂到全局。
-fn set_json_global(ctx: &Ctx<'_>, name: &str, json: &str) -> Result<(), PluginError> {
+pub(super) fn set_json_global(ctx: &Ctx<'_>, name: &str, json: &str) -> Result<(), PluginError> {
     let v = ctx
         .json_parse(json.as_bytes().to_vec())
         .catch(ctx)
@@ -619,7 +640,7 @@ fn build_entry_wrapper(entry: &str, is_resolve: bool) -> String {
 /// 授权时另注入异步 `__flux_ffmpeg_*`）。`interrupt_ns` 供 ffmpeg 调用把子进程
 /// 挂起时长补进中断预算。
 #[allow(clippy::too_many_arguments)]
-fn inject_bridge(
+pub(super) fn inject_bridge(
     ctx: &Ctx<'_>,
     bridge: &Arc<dyn PluginBridge>,
     plugin_id: &str,
@@ -638,17 +659,23 @@ fn inject_bridge(
     {
         let b = bridge.clone();
         let pid = plugin_id.to_string();
+        let dl = interrupt_ns.clone();
         let f = Function::new(
             ctx.clone(),
             Async(move |opts: String| {
                 let b = b.clone();
                 let pid = pid.clone();
+                let dl = dl.clone();
                 async move {
                     let req: super::runtime::BridgeHttpRequest =
                         serde_json::from_str(&opts).unwrap_or_default();
                     let mut req = req;
                     req.auth_allowed = auth_permitted;
-                    let payload = match b.http_request(&pid, req).await {
+                    // 网络等待不烧 CPU：挂起时长补回中断预算（常驻宿主的 2 s CPU 预算依赖它）。
+                    let started = Instant::now();
+                    let outcome = b.http_request(&pid, req).await;
+                    dl.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Release);
+                    let payload = match outcome {
                         Ok(resp) => serde_json::json!({
                             "value": {
                                 "status": resp.status,
@@ -890,7 +917,7 @@ fn inject_bridge(
         let f = Function::new(ctx.clone(), move |delay: String| {
             let delay_ms = delay.parse::<u64>().unwrap_or(0);
             match &retry_task_id {
-                Some(tid) => b.request_retry(tid, delay_ms),
+                Some(tid) => b.request_retry(&pid, tid, delay_ms),
                 None => b.log(
                     &pid,
                     PluginLogLevel::Warn,
@@ -1120,7 +1147,7 @@ fn inject_bridge(
 }
 
 /// flux/console 门面（引用上面注入的 `__flux_*` 与 `__flux_settings_json`/`__flux_info`）。
-const FLUX_PRELUDE: &str = r#"
+pub(super) const FLUX_PRELUDE: &str = r#"
 (function () {
   const __args2str = (a) => a.map(x => {
     try { return typeof x === 'string' ? x : JSON.stringify(x); } catch (e) { return String(x); }
@@ -1270,7 +1297,7 @@ mod tests {
             Ok(())
         }
         fn log(&self, _plugin_id: &str, _level: PluginLogLevel, _message: &str) {}
-        fn request_retry(&self, _task_id: &str, _delay_ms: u64) {}
+        fn request_retry(&self, _plugin_id: &str, _task_id: &str, _delay_ms: u64) {}
     }
 
     /// 回归：QuickJS 内存超限必须归一为 `MemoryLimitExceeded`（而非 `Runtime`），

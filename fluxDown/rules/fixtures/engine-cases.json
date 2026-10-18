@@ -842,7 +842,7 @@
     "expect": [
       {
         "rule": {
-          "id": "builtin.extract.lanzou"
+          "id": "official.lanzou.extract"
         },
         "emits": [
           {
@@ -870,7 +870,7 @@
     "expect": [
       {
         "rule": {
-          "id": "builtin.extract.lanzou"
+          "id": "official.lanzou.extract"
         },
         "emits": [
           {
@@ -898,7 +898,7 @@
     "expect": [
       {
         "rule": {
-          "id": "builtin.extract.lanzou"
+          "id": "official.lanzou.extract"
         },
         "emits": [
           {

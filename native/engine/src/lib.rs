@@ -21,6 +21,9 @@ pub mod bt_seeding;
 /// 存储包装仅 `bt` feature 下编译。
 #[cfg(target_os = "windows")]
 pub mod bt_sparse;
+/// 已完成 BT 任务的完整性校验（按 piece 表重哈希落盘数据）。
+#[cfg(feature = "bt")]
+pub mod bt_verify;
 pub mod cdn;
 pub mod components;
 pub mod dash_downloader;
@@ -314,7 +317,12 @@ impl Engine {
         {
             let (proxy_cfg, plugin_sink, max_conc, data_dir_p) = plugin_ctx;
             let retry_tx = manager.plugin_retry_sender();
-            let bridge: Arc<dyn plugin::PluginBridge> = Arc::new(
+            let runtime: Arc<dyn plugin::ScriptRuntime> = Arc::new(
+                plugin::quickjs::QuickJsScriptRuntime::new(max_conc)
+                    .map_err(|e| EngineError::Plugin(e.to_string()))?,
+            );
+            let audit = plugin::audit::AuditLog::new(db.clone(), &runtime.spawn_handle());
+            let engine_bridge: Arc<dyn plugin::PluginBridge> = Arc::new(
                 plugin::bridge::EngineBridge::new(
                     db.clone(),
                     &proxy_cfg,
@@ -323,9 +331,8 @@ impl Engine {
                 )
                 .map_err(|e| EngineError::Plugin(e.to_string()))?,
             );
-            let runtime: Arc<dyn plugin::ScriptRuntime> = Arc::new(
-                plugin::quickjs::QuickJsScriptRuntime::new(max_conc)
-                    .map_err(|e| EngineError::Plugin(e.to_string()))?,
+            let bridge: Arc<dyn plugin::PluginBridge> = Arc::new(
+                plugin::audit::AuditingBridge::new(engine_bridge, audit.clone()),
             );
             let app_version = db
                 .get_config("app_version")
@@ -342,13 +349,14 @@ impl Engine {
                         plugins_root.display()
                     ))
                 })?;
-            let pm = Arc::new(plugin::PluginManager::new(
+            let pm = Arc::new(plugin::PluginManager::with_audit(
                 runtime,
                 bridge,
                 db.clone(),
                 plugins_root,
                 app_version,
                 plugin_sink,
+                audit,
             ));
             pm.load_all().await;
             manager.rss.set_fallback_provider(pm.subscription_router());

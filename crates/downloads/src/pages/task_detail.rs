@@ -7,7 +7,12 @@
 #[path = "task_detail_activity.rs"]
 mod activity;
 
-use std::{collections::VecDeque, rc::Rc, sync::Arc, time::Duration, time::Instant};
+use std::{
+    collections::{HashMap, VecDeque},
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use chrono::{Local, TimeZone as _};
 use fluxdown_protocol::{
@@ -20,7 +25,7 @@ use fluxdown_ui_components::{
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, App, AppContext as _, ClipboardItem, Context, Div, Entity, EventEmitter,
+    AnyElement, AnyView, App, AppContext as _, ClipboardItem, Context, Div, Entity, EventEmitter,
     FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
@@ -53,7 +58,7 @@ use crate::{
         source_composition::{SourceKind, compose, format_percent},
     },
     pages::{
-        downloads::DownloadHostActions,
+        downloads::{DownloadHostActions, PluginTaskTab},
         task_edit::{TaskEditTarget, open_change_segments_dialog, open_change_url_dialog},
     },
     strings::DownloadStrings,
@@ -88,6 +93,23 @@ enum DetailTab {
     Seeding,
     Log,
     Advanced,
+    /// 插件贡献的 tab，下标对应 `TaskDetailView::plugin_tabs`。
+    Plugin(u16),
+}
+
+/// 可见 tab 顺序：内置 tab（做种仅 BT 任务）后接全部插件 tab。
+fn visible_tabs(is_bt: bool, plugin_tabs: usize) -> Vec<DetailTab> {
+    let builtin = [
+        DetailTab::General,
+        DetailTab::Speed,
+        DetailTab::Seeding,
+        DetailTab::Log,
+        DetailTab::Advanced,
+    ]
+    .into_iter()
+    .filter(move |tab| *tab != DetailTab::Seeding || is_bt);
+    let plugin = (0..u16::try_from(plugin_tabs).unwrap_or(u16::MAX)).map(DetailTab::Plugin);
+    builtin.chain(plugin).collect()
 }
 
 /// 面板对外事件：任务被删除 / 快照中不再存在时发出，宿主据此关闭承载窗口。
@@ -106,6 +128,10 @@ pub struct TaskDetailView {
     translator: Entity<Translator>,
     strings: DownloadStrings,
     tab: DetailTab,
+    /// 插件贡献的 tab（下标即 `DetailTab::Plugin`）。
+    plugin_tabs: Vec<PluginTaskTab>,
+    /// 插件 tab 视图缓存：`(tab 下标, task_id)` → 视图。
+    plugin_views: HashMap<(u16, String), AnyView>,
     /// 完整 DTO（校验和 / 代理 / 做种详情等 `DownloadTaskView` 未覆盖的字段）。
     /// 停靠模式由宿主经 [`Self::sync`] 提供；窗口模式来自私有 controller。
     dto: Option<TaskDto>,
@@ -223,6 +249,8 @@ impl TaskDetailView {
             translator,
             strings,
             tab: DetailTab::General,
+            plugin_tabs: Vec::new(),
+            plugin_views: HashMap::new(),
             dto: None,
             queue_names: Vec::new(),
             speed_history: VecDeque::new(),
@@ -266,6 +294,7 @@ impl TaskDetailView {
         }
         self.task_id = task_id;
         self.tab = DetailTab::General;
+        self.plugin_views.clear();
         self.dto = None;
         self.activity.switch_task(self.task_id.clone());
         self.activity_stale = false;
@@ -713,33 +742,73 @@ impl TaskDetailView {
 
     // ---- rendering ----
 
+    /// 插件 tab 内容：按 `(下标, 任务 id)` 缓存宿主工厂产出的视图，任务变化后重建。
+    fn render_plugin_tab(
+        &mut self,
+        index: u16,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(factory) = self.host.plugin_tab_view.clone() else {
+            return div().into_any_element();
+        };
+        let key = (index, self.task_id.clone());
+        let view = match self.plugin_views.get(&key) {
+            Some(view) => view.clone(),
+            None => {
+                let view = factory(index, self.task_id.clone(), window, cx);
+                self.plugin_views.insert(key, view.clone());
+                view
+            }
+        };
+        div().size_full().child(view).into_any_element()
+    }
+
+    /// 替换插件贡献的 tab；旧视图缓存随之作废。当前选中的插件 tab 消失时回到「常规」。
+    pub fn set_plugin_tabs(&mut self, mut tabs: Vec<PluginTaskTab>, cx: &mut Context<Self>) {
+        tabs.truncate(usize::from(u16::MAX));
+        if self.plugin_tabs == tabs {
+            return;
+        }
+        self.plugin_tabs = tabs;
+        self.plugin_views.clear();
+        if let DetailTab::Plugin(index) = self.tab
+            && usize::from(index) >= self.plugin_tabs.len()
+        {
+            self.tab = DetailTab::General;
+        }
+        cx.notify();
+    }
+
+    fn tab_label(&self, tab: DetailTab, cx: &App) -> SharedString {
+        let key = match tab {
+            DetailTab::General => "detailTabGeneral",
+            DetailTab::Speed => "detailTabSpeed",
+            DetailTab::Seeding => "tabSeeding",
+            DetailTab::Log => "detailTabLog",
+            DetailTab::Advanced => "detailTabAdvanced",
+            DetailTab::Plugin(index) => {
+                return self
+                    .plugin_tabs
+                    .get(usize::from(index))
+                    .map_or_else(SharedString::default, |tab| tab.title.clone());
+            }
+        };
+        self.t(cx, key)
+    }
+
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = active_theme(cx).tokens().clone();
-        let is_bt = self.is_bt();
-        let candidates: [(DetailTab, &'static str); 5] = [
-            (DetailTab::General, "detailTabGeneral"),
-            (DetailTab::Speed, "detailTabSpeed"),
-            (DetailTab::Seeding, "tabSeeding"),
-            (DetailTab::Log, "detailTabLog"),
-            (DetailTab::Advanced, "detailTabAdvanced"),
-        ];
-        let visible: Vec<(DetailTab, SharedString)> = candidates
-            .into_iter()
-            .filter(|(tab, _)| *tab != DetailTab::Seeding || is_bt)
-            .map(|(tab, key)| (tab, self.t(cx, key)))
-            .collect();
-        let selected = visible
-            .iter()
-            .position(|(tab, _)| *tab == self.tab)
-            .unwrap_or(0);
-        let tabs: Vec<DetailTab> = visible.iter().map(|(tab, _)| *tab).collect();
+        let tabs = visible_tabs(self.is_bt(), self.plugin_tabs.len());
+        let labels: Vec<SharedString> = tabs.iter().map(|tab| self.tab_label(*tab, cx)).collect();
+        let selected = tabs.iter().position(|tab| *tab == self.tab).unwrap_or(0);
         let this = cx.weak_entity();
         h_flex()
             .px(tokens.spacing.md)
             .pt(tokens.spacing.md)
             .child(segmented_tabs(
                 "detail-tabs",
-                visible.into_iter().map(|(_, label)| label),
+                labels,
                 selected,
                 move |index, _, cx| {
                     if let Some(tab) = tabs.get(index).copied() {
@@ -1029,12 +1098,9 @@ impl TaskDetailView {
                 |this| {
                     this.child(detail_row(
                         self.t(cx, "infoStatus"),
-                        div().text_color(task_status_color(&row, cx)).child(
-                            self.strings
-                                .queued_label(&row)
-                                .map(SharedString::from)
-                                .unwrap_or_else(|| self.strings.task_state_label(&row)),
-                        ),
+                        div()
+                            .text_color(task_status_color(&row, cx))
+                            .child(self.strings.task_status_text(&row)),
                         cx,
                     ))
                     .when(row.size_bytes > 0, |this| {
@@ -1756,7 +1822,7 @@ impl TaskDetailView {
             let state = if entry.kind == "status" {
                 entry
                     .status
-                    .map(|status| self.strings.state_label(activity_state(status)))
+                    .map(|status| self.strings.status_code_label(status))
             } else {
                 None
             };
@@ -1875,6 +1941,14 @@ impl gpui::Render for TaskDetailView {
         if self.tab == DetailTab::Seeding {
             self.sync_seed_inputs(window, cx);
         }
+        let body = match self.tab {
+            DetailTab::General => self.render_general(cx),
+            DetailTab::Speed => self.render_speed(cx),
+            DetailTab::Seeding => self.render_seeding(cx),
+            DetailTab::Log => self.render_log(cx),
+            DetailTab::Advanced => self.render_advanced(cx),
+            DetailTab::Plugin(index) => self.render_plugin_tab(index, window, cx),
+        };
         v_flex()
             .size_full()
             .min_h_0()
@@ -1901,13 +1975,7 @@ impl gpui::Render for TaskDetailView {
                     .min_h_0()
                     .overflow_y_scroll()
                     .p(tokens.spacing.md)
-                    .child(match self.tab {
-                        DetailTab::General => self.render_general(cx),
-                        DetailTab::Speed => self.render_speed(cx),
-                        DetailTab::Seeding => self.render_seeding(cx),
-                        DetailTab::Log => self.render_log(cx),
-                        DetailTab::Advanced => self.render_advanced(cx),
-                    }),
+                    .child(body),
             )
     }
 }
@@ -1959,16 +2027,6 @@ fn format_activity_timestamp(timestamp_ms: i64) -> SharedString {
             || SharedString::from("—"),
             |at| SharedString::from(at.format("%Y-%m-%d %H:%M:%S%.3f").to_string()),
         )
-}
-
-fn activity_state(status: i32) -> TaskState {
-    match status {
-        0 | 5 => TaskState::Pending,
-        1 => TaskState::Downloading,
-        2 => TaskState::Paused,
-        3 => TaskState::Completed,
-        _ => TaskState::Failed,
-    }
 }
 
 fn activity_kind_key(kind: &str) -> &'static str {
@@ -2086,9 +2144,34 @@ mod tests {
     use chrono::{TimeZone as _, Utc};
 
     use super::{
-        SEED_LIMIT_FOLLOW_GLOBAL, SeedLimits, format_activity_timestamp, seed_form_texts,
-        seed_limits_from_form,
+        DetailTab, SEED_LIMIT_FOLLOW_GLOBAL, SeedLimits, format_activity_timestamp,
+        seed_form_texts, seed_limits_from_form, visible_tabs,
     };
+
+    #[test]
+    fn plugin_tabs_follow_builtin_tabs() {
+        assert_eq!(
+            visible_tabs(false, 2),
+            [
+                DetailTab::General,
+                DetailTab::Speed,
+                DetailTab::Log,
+                DetailTab::Advanced,
+                DetailTab::Plugin(0),
+                DetailTab::Plugin(1),
+            ]
+        );
+        assert_eq!(
+            visible_tabs(true, 0),
+            [
+                DetailTab::General,
+                DetailTab::Speed,
+                DetailTab::Seeding,
+                DetailTab::Log,
+                DetailTab::Advanced,
+            ]
+        );
+    }
 
     #[test]
     fn activity_uses_source_milliseconds_with_calendar_date() {

@@ -35,7 +35,7 @@ use crate::{
     components::{
         file_icon::task_file_icon,
         segment_progress::render_segment_progress,
-        task_table::{progress_bar_color, progress_track_color, status_color},
+        task_table::{progress_bar_color, progress_track_color, task_status_color},
     },
     controller::{DownloadsCommand, DownloadsController, DownloadsPort},
     model::{DownloadTaskView, RowKey, TaskProtocol, TaskState, format_bytes},
@@ -584,8 +584,8 @@ impl ProgressWindowView {
                                         div()
                                             .flex_none()
                                             .font_weight(FontWeight::MEDIUM)
-                                            .text_color(status_color(row.state, cx))
-                                            .child(self.strings.state_label(row.state)),
+                                            .text_color(task_status_color(row, cx))
+                                            .child(self.strings.task_status_text(row)),
                                     )
                                     .child(
                                         div()

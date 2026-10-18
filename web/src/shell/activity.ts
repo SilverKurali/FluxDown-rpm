@@ -5,7 +5,8 @@
 import { BellRing, CircleUser, Download, Rss, Settings } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
-export type ActivityId = 'downloads' | 'rss' | 'webhooks' | 'account' | 'settings'
+/** 内置入口 id 之外还有插件活动页（`plugin:<identity>:<viewId>`），故放宽为 string。 */
+export type ActivityId = string
 
 export interface ActivityEntry {
   id: ActivityId

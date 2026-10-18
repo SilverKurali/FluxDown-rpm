@@ -3,17 +3,19 @@ title: 插件系统概览
 description: FluxDown 插件是什么、能做什么、怎么运行、怎么安装。
 section: plugins
 order: 1
-sourceHash: "31bae6e83229"
+sourceHash: "32557a8a02dd"
 ---
 
 FluxDown 插件是挂进下载流程的小段 JavaScript 程序。一个插件就是一个文件夹：一份 `manifest.json` 加一两个 `.js` 文件——不需要构建工具，不需要 npm，不需要任何框架。
 
-插件只能做两类事：
+插件的核心能力有两类：
 
 1. **解析 URL（resolver）**——在下载开始前改写任务的 URL。典型用途：把一个分享页链接（视频页、网盘页）变成真正的直链。在 manifest 的 `resolvers` 里声明，脚本导出一个全局 `resolve(ctx)` 函数。
 2. **响应任务事件（hooks）**——任务开始、完成、出错、探测到元数据时收到通知。在 `hooks` 里声明，脚本导出全局的 `onStart` / `onDone` / `onError` / `onMetaProbed` 函数。
 
-插件**不能**创建任务、不能读任意文件、不能操作界面。它和外界打交道只有 `flux.*` 这一套接口（HTTP 请求、键值存储、日志、请求重试），见 [API 参考](/docs/zh/plugins/api-reference/)。
+插件还可以贡献 **界面与命令**：活动栏页面、设置页签、任务详情页签、命令面板与任务右键命令，以及浏览器扩展嗅探规则。daemon 里的常驻 `main` 脚本返回数据树，桌面端与 Web 端用原生控件渲染——见 [视图](/docs/zh/plugins/views/)。
+
+基础沙箱**不能**创建任务、不能读任意文件，只通过 `flux.*` 这套接口和外界打交道（HTTP 请求、键值存储、临时文件、日志、请求重试），见 [API 参考](/docs/zh/plugins/api-reference/)。超出这些的能力——运行 ffmpeg / yt-dlp、创建任务、后台常驻、桌面原生脚本——都是插件声明、由你授权、并记入审计日志的权限，见 [权限](/docs/zh/plugins/permissions/)。
 
 ## resolver 怎么运行
 
@@ -23,7 +25,7 @@ FluxDown 插件是挂进下载流程的小段 JavaScript 程序。一个插件�
 - **不在主循环里跑。** 解析在专用线程池上执行，脚本再慢、再卡也不会冻结应用。
 - **失败即失败（fail-closed）。** 脚本抛异常、超时、返回值不合法，任务都会进入错误状态，错误信息带 `[插件]` 前缀。FluxDown 绝不会退回去下载原始页面 URL——那会把一个 HTML 页面当视频文件存进硬盘。用户可以在失败任务上用「忽略插件重试」显式绕过出问题的插件。
 
-多个启用中的插件同时匹配一个 URL 时，`identity` 字典序最小的那个生效。
+多个启用中的插件同时匹配一个 URL 时，这类任务首次开始前 FluxDown 会询问用户使用哪个插件（列出全部匹配插件，按 `identity` 排序），并可记为该站点的默认插件；用户在「插件 → 站点默认插件」中管理这些记录。无人值守的下载（RSS、远程派发、跳过二次选择的免打扰下载）不会询问：使用站点默认插件，未设置时使用 `identity` 字典序最小的插件。
 
 惰性解析有一个附带结果：带 resolver 的任务会跳过常规的元数据探测，所以同一个插件如果又订阅了 `onMetaProbed`，这个钩子对它自己的任务永远不会触发（加载时日志里会有一条警告）。
 
@@ -64,3 +66,6 @@ hooks 是纯通知，发出后不管结果：
 - [Manifest 参考](/docs/zh/plugins/manifest/)——`manifest.json` 每个字段和校验规则。
 - [API 参考](/docs/zh/plugins/api-reference/)——钩子签名和完整的 `flux.*` 接口。
 - [打包与市场](/docs/zh/plugins/packaging/)——打 `.fxplug` 包、发布到索引。
+- [视图、命令与 UI API](/docs/zh/plugins/views/)——活动栏页面、设置页签、任务详情页签与命令，在桌面端和 Web 端原生渲染。
+- [插件 SDK 与 CLI](/docs/zh/plugins/sdk/)——TypeScript 类型、JSX 与打包工具。
+- [权限、授权与审计](/docs/zh/plugins/permissions/)——插件能做什么，以及如何授权和留痕。

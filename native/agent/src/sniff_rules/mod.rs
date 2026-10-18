@@ -34,6 +34,7 @@ pub struct Have {
     official: Option<u64>,
     community: Option<u64>,
     revocations: Option<u64>,
+    plugin: Option<u64>,
 }
 
 impl Have {
@@ -43,6 +44,13 @@ impl Have {
             DocKind::Community => self.community,
             DocKind::Revocations => self.revocations,
         }
+    }
+}
+
+impl Have {
+    /// 扩展已持有的 plugin 层规则包序号。
+    pub(crate) const fn plugin(self) -> Option<u64> {
+        self.plugin
     }
 }
 

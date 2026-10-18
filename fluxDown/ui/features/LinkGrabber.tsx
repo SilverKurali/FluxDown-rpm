@@ -2,7 +2,7 @@
 import type { JSX } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import type { PageLink } from "@/background/protocol";
-import { compileBuiltin } from "@/rules/engine";
+import { compileBundled } from "@/rules/engine";
 import { extractExtension } from "@/rules/url";
 import { sendAction } from "@/utils/messaging";
 import { Button } from "@/ui/components/Button";
@@ -16,7 +16,7 @@ type Group = "video" | "audio" | "archive" | "document" | "image" | "executable"
 const GROUPS: Group[] = ["video", "audio", "archive", "document", "image", "executable", "other"];
 const MAX_PER_BATCH = 1000;
 
-const engine = compileBuiltin({ sniffImages: true });
+const engine = compileBundled({ sniffImages: true });
 
 function groupOf(url: string): Group {
   const type = engine.classify(url);

@@ -8,13 +8,13 @@ import {
   selectQualityVideoTracks,
 } from "./media-candidates";
 import type { MediaCandidateOptions } from "./media-candidates";
-import { compileBuiltin } from "@/rules/engine";
+import { compileBundled } from "@/rules/engine";
 import { parseDashXml } from "./dash-manifest";
 import type { DashManifest } from "./dash-manifest";
 import type { DetectedResource } from "./resource-types";
 
 const PAGE_URL = "https://example.com/watch";
-const rules = compileBuiltin();
+const rules = compileBundled();
 
 /** 测试里统一用内置规则的 dedupeKey 作为 URL 键。 */
 function buildMediaCandidates(

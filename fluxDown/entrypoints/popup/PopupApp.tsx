@@ -1,5 +1,7 @@
 /**
- * Popup 根组件（380×560）：头部（连接状态 + 总拦截开关）、站点卡、资源摘要、任务、页脚。
+ * Popup 根组件（380×560），首屏不需整页滚动：
+ * 头部（连接状态 + 总拦截开关）→ 站点栏（默认收起一行）→ 资源 / 任务页签（仅页签内容区滚动）→ 页脚。
+ * 默认页签按首个 TabView 决定：本页嗅探到资源则「资源」，否则「任务」；用户切换后不再自动改。
  * 资源/预览逻辑全部由 ui/features 提供；本文件只负责组装与 popup 独有的状态。
  */
 import type { JSX } from "preact";
@@ -12,8 +14,9 @@ import { loadSettings, saveSettings } from "@/utils/settings";
 import { Button } from "@/ui/components/Button";
 import { Icon } from "@/ui/components/Icon";
 import { IconButton } from "@/ui/components/IconButton";
-import { Toggle } from "@/ui/components/Toggle";
+import { Tabs, type TabItem } from "@/ui/components/Tabs";
 import { ToastHost, showToast } from "@/ui/components/Toast";
+import { Toggle } from "@/ui/components/Toggle";
 import { ResourceList } from "@/ui/features/ResourceList";
 import { SiteCard } from "@/ui/features/SiteCard";
 import { TaskList } from "@/ui/features/TaskList";
@@ -29,6 +32,7 @@ import "./popup.css";
 const SUMMARY_EXTRA_ROWS = 5;
 
 type ConnectionState = "checking" | "connected" | "disconnected";
+type PaneKey = "resources" | "tasks";
 
 interface DailyStats {
   sent?: number;
@@ -122,8 +126,8 @@ function useInterceptEnabled(): [boolean, (next: boolean) => void] {
   return [enabled, update];
 }
 
-/** 资源摘要用的视图：playing 全留，其余候选与文件合计只取前 N 行。 */
-function summarize(view: TabView): { summary: TabView; total: number } {
+/** 资源摘要用的视图：playing 全留，其余候选与文件合计只取前 N 行；truncated = 有行被省略。 */
+function summarize(view: TabView): { summary: TabView; total: number; truncated: boolean } {
   const total =
     view.playing.length + view.otherElements.length + view.unbound.length + view.files.length;
   let budget = SUMMARY_EXTRA_ROWS;
@@ -135,7 +139,8 @@ function summarize(view: TabView): { summary: TabView; total: number } {
   const otherElements = take(view.otherElements);
   const unbound = take(view.unbound);
   const files = take(view.files);
-  return { summary: { ...view, otherElements, unbound, files }, total };
+  const truncated = total > view.playing.length + SUMMARY_EXTRA_ROWS;
+  return { summary: { ...view, otherElements, unbound, files }, total, truncated };
 }
 
 export function PopupApp(): JSX.Element {
@@ -152,6 +157,20 @@ export function PopupApp(): JSX.Element {
   const manifest = browser.runtime.getManifest();
   const version = manifest.version_name ?? `v${manifest.version}`;
   const summary = view ? summarize(view) : null;
+  const resourceTotal = summary?.total ?? 0;
+  // 扩展页、chrome:// 等非网页没有站点语义（host 会是扩展 id），不显示站点栏
+  const siteHost = view && /^https?:/i.test(view.pageUrl) ? view.site.host : "";
+  const [activeTasks, setActiveTasks] = useState(0);
+  const [pane, setPane] = useState<PaneKey | null>(null);
+  const viewLoaded = view !== null;
+  useEffect(() => {
+    if (pane === null && viewLoaded) setPane(resourceTotal > 0 ? "resources" : "tasks");
+  }, [pane, viewLoaded, resourceTotal]);
+  const current: PaneKey = pane ?? "resources";
+  const tabs: TabItem<PaneKey>[] = [
+    { key: "resources", label: t("popup.tabs.resources"), count: resourceTotal },
+    { key: "tasks", label: t("popup.tabs.tasks"), count: activeTasks },
+  ];
 
   const exportDiagnostics = async () => {
     setExporting(true);
@@ -188,18 +207,20 @@ export function PopupApp(): JSX.Element {
         </div>
       </header>
 
-      <main class="pp-content">
-        {view ? <SiteCard host={view.site.host} compact /> : null}
+      {siteHost ? (
+        <div class="pp-site">
+          <SiteCard host={siteHost} collapsible />
+        </div>
+      ) : null}
 
-        <section class="pp-section">
-          <div class="pp-section-head">
-            <span>{t("popup.tabs.resources")}</span>
-            {summary && summary.total > 0 ? <span class="pp-count">{summary.total}</span> : null}
-          </div>
+      <Tabs class="pp-tabs" items={tabs} active={current} onChange={setPane} />
+
+      <main class="pp-content">
+        <section class={`pp-pane${current === "resources" ? "" : " fd-hidden"}`}>
           {summary && summary.total > 0 ? (
             <>
               <ResourceList view={summary.summary} density="compact" showSearch={false} />
-              {sidePanel.available ? (
+              {sidePanel.available && summary.truncated ? (
                 <Button variant="ghost" size="sm" class="pp-view-all" onClick={sidePanel.open}>
                   {t("popup.viewAll", { count: String(summary.total) })}
                 </Button>
@@ -210,11 +231,9 @@ export function PopupApp(): JSX.Element {
           )}
         </section>
 
-        <section class="pp-section">
-          <div class="pp-section-head">
-            <span>{t("popup.tabs.tasks")}</span>
-          </div>
-          <TaskList density="compact" quickDownload />
+        {/* 任务页签隐藏时仍挂载：持续轮询以维持页签计数 */}
+        <section class={`pp-pane${current === "tasks" ? "" : " fd-hidden"}`}>
+          <TaskList density="compact" quickDownload onActiveCountChange={setActiveTasks} />
         </section>
       </main>
 

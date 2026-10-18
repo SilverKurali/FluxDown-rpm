@@ -55,8 +55,8 @@ Every documentation page has an "Edit this page" link that opens the GitHub web 
 
 ### 目录结构 / Directory Layout
 
-文档源文件位于 `website-v2/src/content/docs/{en,zh}/`，按语言分目录，子目录与文件名一一对应（`website/` 是 `/v1` 旧站存档，不再接收文档改动）：
-Documentation source files live under `website-v2/src/content/docs/{en,zh}/`, one directory per language, with matching subdirectory/filename structure across languages (`website/` is the archived `/v1` site and no longer accepts doc changes):
+文档源文件位于 `website-v2/src/content/docs/{en,zh}/`，按语言分目录，子目录与文件名一一对应：
+Documentation source files live under `website-v2/src/content/docs/{en,zh}/`, one directory per language, with matching subdirectory/filename structure across languages:
 
 ```text
 website-v2/src/content/docs/

@@ -155,9 +155,11 @@ FLUXDOWN_DATABASE_URL=postgres://fluxdown:password@localhost/fluxdown \
       proxy_http_version 1.1;
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
-      proxy_set_header Host $host;
+      proxy_set_header Host $http_host;
   }
   ```
+
+  `/rpc` 握手会校验浏览器的 `Origin`:代理转发的 `Host`(或 `X-Forwarded-Host`)必须是浏览器访问用的主机名,不能改写成内网 IP 或 `127.0.0.1`,否则握手被拒(403),Web 界面只显示"无法连接到 FluxDown 服务"。`$http_host` 原样保留浏览器的主机名与端口;群晖 DSM 反向代理需在「自定义标题」里加上 WebSocket,Nginx Proxy Manager 需勾选 Websockets Support。
 
 - 相比直接把端口暴露给公网(即使配了 TLS),更推荐绑定到私有接口(`FLUXDOWN_BIND=127.0.0.1:17800`,由反向代理挡在前面)或 VPN/Tailscale 地址。
 

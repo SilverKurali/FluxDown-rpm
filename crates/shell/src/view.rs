@@ -1,43 +1,68 @@
-use std::rc::Rc;
+use std::{collections::HashSet, rc::Rc};
 
-use fluxdown_ui_components::{FluxIcon, SidebarState, toolbar_action_button};
+use fluxdown_ui_components::{FluxIcon, SidebarState, sidebar_toggle_button};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, AnyView, App, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement as _,
-    Styled, Window, div, img, percentage, px,
+    AnyElement, AnyView, AnyWindowHandle, App, Context, Entity, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement, Pixels, Render, SharedString, Styled,
+    Window, div, img, px,
 };
-use gpui_component::{Icon, TitleBar, h_flex, tooltip::Tooltip, v_flex};
+use gpui_component::{Icon, TitleBar, h_flex, v_flex};
+use serde_json::Value;
 
 use crate::assets::APP_LOGO_PATH;
 use crate::chrome::{ACTIVITY_BUTTON_SIZE, LayoutChangeHandler, ShellChrome, ShellWidget};
 use crate::window_controls::FixedSizeTitleBar;
-use crate::{ChromeItemSpec, ChromeLayout, ChromeZone};
+use crate::{ChromeFamilies, ChromeItemSpec, ChromeLayout, ChromeZone};
+
+/// 动态（插件）路由 id 的固定前缀；只有该前缀的路由由 [`ShellView::set_dynamic_routes`] 管理。
+pub const DYNAMIC_ROUTE_PREFIX: &str = "plugin:";
 
 /// shell 路由的稳定标识。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RouteId(&'static str);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RouteId(SharedString);
 
 impl RouteId {
     /// 创建稳定路由标识。
     pub const fn new(value: &'static str) -> Self {
-        Self(value)
+        Self(SharedString::new_static(value))
+    }
+
+    /// 插件视图路由：`plugin:<identity>:<view>`。
+    #[must_use]
+    pub fn plugin(identity: &str, view: &str) -> Self {
+        Self(SharedString::from(format!(
+            "{DYNAMIC_ROUTE_PREFIX}{identity}:{view}"
+        )))
     }
 
     /// 标识字符串，同时是 chrome 布局里的条目 id。
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        self.0
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
     }
+
+    /// 是否为动态（插件）路由。
+    #[must_use]
+    pub fn is_dynamic(&self) -> bool {
+        self.as_str().starts_with(DYNAMIC_ROUTE_PREFIX)
+    }
+}
+
+/// 路由在活动栏中的标签：i18n 键或原文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellLabel {
+    Key(&'static str),
+    Text(SharedString),
 }
 
 /// 由应用装配并注入 shell 的路由元数据与页面内容。
 pub struct ShellRoute {
     pub(crate) id: RouteId,
-    pub(crate) button_id: &'static str,
-    pub(crate) tooltip_id: &'static str,
-    pub(crate) label_key: &'static str,
+    pub(crate) button_id: SharedString,
+    pub(crate) tooltip_id: SharedString,
+    pub(crate) label: ShellLabel,
     pub(crate) icon: Icon,
     view: AnyView,
     /// 路由活跃时渲染在统一顶栏中的插槽（靠右内容由插槽自己排布）。
@@ -47,6 +72,8 @@ pub struct ShellRoute {
     /// 可选路由参与活动栏「是否整体渲染」的判定；固定路由（如下载）不参与。
     pub(crate) optional: bool,
     pub(crate) visible: bool,
+    /// `navigate` 切到本路由时调用（经 `cx.defer`，不会重入 shell）。
+    on_activate: Option<ShellActionHandler>,
 }
 
 impl ShellRoute {
@@ -61,16 +88,42 @@ impl ShellRoute {
     ) -> Self {
         Self {
             id,
-            button_id,
-            tooltip_id,
-            label_key,
+            button_id: SharedString::new_static(button_id),
+            tooltip_id: SharedString::new_static(tooltip_id),
+            label: ShellLabel::Key(label_key),
             icon,
             view,
             title_bar: None,
             sidebar: None,
             optional: false,
             visible: true,
+            on_activate: None,
         }
+    }
+
+    /// 创建插件视图路由（`id` 须以 `plugin:` 开头），标签为原文，图标固定为 Sparkles。
+    pub fn plugin(id: RouteId, label: SharedString, view: AnyView) -> Self {
+        let button_id = SharedString::from(format!("activity-{}", id.as_str()));
+        let tooltip_id = SharedString::from(format!("activity-{}-tooltip", id.as_str()));
+        Self {
+            id,
+            button_id,
+            tooltip_id,
+            label: ShellLabel::Text(label),
+            icon: Icon::new(FluxIcon::Sparkles),
+            view,
+            title_bar: None,
+            sidebar: None,
+            optional: false,
+            visible: true,
+            on_activate: None,
+        }
+    }
+
+    /// 路由被导航激活时的回调（在 `cx.defer` 中执行）。
+    pub fn on_activate(mut self, handler: ShellActionHandler) -> Self {
+        self.on_activate = Some(handler);
+        self
     }
 
     /// 标记该路由是否为「可选」：活动栏在没有任何可见可选项时整体收起。
@@ -330,6 +383,10 @@ pub struct ShellView {
     pub(crate) editing: bool,
     /// 已应用到 macOS 交通灯的纵向偏移；标题栏随文字放大撑高时重新居中。
     traffic_light_y: Pixels,
+    /// 首帧渲染时记下的窗口句柄，用于 `on_activate` 回调。
+    window: Option<AnyWindowHandle>,
+    /// 宿主最近一次下发（或本窗口写回）的布局偏好；动态路由变化时据此重新归一化。
+    pub(crate) stored_layout: Option<Value>,
 }
 
 impl ShellView {
@@ -342,18 +399,10 @@ impl ShellView {
         chrome: ShellChrome,
         cx: &mut Context<Self>,
     ) -> Self {
-        let active_route = routes.first().map(|route| route.id);
+        let active_route = routes.first().map(|route| route.id.clone());
         cx.observe(&translator, |_, _, cx| cx.notify()).detach();
         for route in &routes {
-            if let Some(sidebar) = &route.sidebar {
-                let route_id = route.id;
-                cx.observe(sidebar, move |this, _, cx| {
-                    if this.active_route == Some(route_id) {
-                        cx.notify();
-                    }
-                })
-                .detach();
-            }
+            Self::observe_sidebar(route, cx);
         }
         let ShellChrome {
             widgets,
@@ -371,28 +420,107 @@ impl ShellView {
             on_layout_change,
             editing: false,
             traffic_light_y: crate::initial_traffic_light_y(),
+            window: None,
+            stored_layout: None,
         }
     }
 
-    /// 切换到指定路由（宿主导航入口）。
+    /// 切换到指定路由（宿主导航入口）；路由不存在时忽略。
     pub fn navigate(&mut self, route: RouteId, cx: &mut Context<Self>) {
-        if self.active_route != Some(route) {
-            self.active_route = Some(route);
-            cx.notify();
+        if self.active_route.as_ref() == Some(&route) || !self.routes.iter().any(|r| r.id == route)
+        {
+            return;
         }
+        self.active_route = Some(route.clone());
+        self.activate(&route, cx);
+        cx.notify();
+    }
+
+    /// 路由被激活：经 `cx.defer` 调用其 `on_activate`（避免重入 shell）；窗口句柄在首帧渲染时补记。
+    fn activate(&self, route: &RouteId, cx: &mut Context<Self>) {
+        let Some(handler) = self
+            .routes
+            .iter()
+            .find(|r| &r.id == route)
+            .and_then(|r| r.on_activate.clone())
+        else {
+            return;
+        };
+        let Some(window) = self.window else {
+            return;
+        };
+        cx.defer(move |cx| {
+            // 窗口已关闭时无需激活，更新失败即可忽略。
+            let Ok(()) = window.update(cx, |_, window, cx| handler(window, cx)) else {
+                // 窗口已关闭，无需激活。
+                return;
+            };
+        });
+    }
+
+    fn observe_sidebar(route: &ShellRoute, cx: &mut Context<Self>) {
+        if let Some(sidebar) = &route.sidebar {
+            let route_id = route.id.clone();
+            cx.observe(sidebar, move |this, _, cx| {
+                if this.active_route.as_ref() == Some(&route_id) {
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// 替换全部 `plugin:` 前缀的动态路由（以及活动栏目录里对应条目）；位置由已存布局偏好重新归一化，
+    /// 因此晚到或重装的插件能找回原位置。本方法从不写回偏好。
+    pub fn set_dynamic_routes(&mut self, mut routes: Vec<ShellRoute>, cx: &mut Context<Self>) {
+        let mut seen = HashSet::new();
+        routes.retain(|route| route.id.is_dynamic() && seen.insert(route.id.clone()));
+        for route in &routes {
+            Self::observe_sidebar(route, cx);
+        }
+        self.routes.retain(|route| !route.id.is_dynamic());
+        self.routes.extend(routes);
+        self.catalog
+            .retain(|spec| !spec.id.starts_with(DYNAMIC_ROUTE_PREFIX));
+        self.catalog
+            .extend(self.routes.iter().filter(|r| r.id.is_dynamic()).map(|r| {
+                ChromeItemSpec::new(
+                    r.id.0.clone(),
+                    ChromeZone::RailTop,
+                    ChromeFamilies::RAIL_TITLE,
+                )
+            }));
+        self.layout = ChromeLayout::from_value(self.stored_layout.as_ref(), &self.catalog);
+        let active_exists = self
+            .active_route
+            .as_ref()
+            .is_some_and(|active| self.routes.iter().any(|r| &r.id == active));
+        if !active_exists {
+            let next = self
+                .routes
+                .iter()
+                .find(|r| r.visible)
+                .or(self.routes.first())
+                .map(|r| r.id.clone());
+            self.active_route = next.clone();
+            if let Some(next) = next {
+                self.activate(&next, cx);
+            }
+        }
+        cx.notify();
     }
 
     /// 按活动栏按钮 id 设置可选路由或动作的可见性（宿主偏好回流入口）；
     /// 隐藏当前活跃路由时自动切到首条可见路由。
     pub fn set_entry_visible(&mut self, button_id: &str, visible: bool, cx: &mut Context<Self>) {
-        if let Some(route) = self.routes.iter_mut().find(|r| r.button_id == button_id) {
+        if let Some(route) = self.routes.iter_mut().find(|r| &*r.button_id == button_id) {
             if route.visible == visible {
                 return;
             }
             route.visible = visible;
-            let id = route.id;
-            if !visible && self.active_route == Some(id) {
-                self.active_route = self.routes.iter().find(|r| r.visible).map(|r| r.id);
+            let id = route.id.clone();
+            if !visible && self.active_route.as_ref() == Some(&id) {
+                self.active_route = self.routes.iter().find(|r| r.visible).map(|r| r.id.clone());
             }
             cx.notify();
             return;
@@ -431,7 +559,8 @@ impl ShellView {
         let title_trailing = self.render_title_zone(ChromeZone::TitleTrailing, window, cx);
         let sidebar_toggle = self
             .active_route
-            .and_then(|id| self.routes.iter().find(|route| route.id == id))
+            .as_ref()
+            .and_then(|id| self.routes.iter().find(|route| route.id == *id))
             .and_then(|route| route.sidebar.as_ref())
             .filter(|sidebar| sidebar.read(cx).is_available())
             .map(|sidebar| self.render_sidebar_toggle(sidebar, cx));
@@ -478,34 +607,14 @@ impl ShellView {
             "collapseSidebar"
         };
         let label = SharedString::from(self.translator.read(cx).text(key).to_owned());
-        let state = sidebar.clone();
-        div()
-            .id("shell-sidebar-toggle-tooltip")
-            .flex_none()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .tooltip({
-                let label = label.clone();
-                move |window, cx| Tooltip::new(label.clone()).build(window, cx)
-            })
-            .child(
-                toolbar_action_button(
-                    "shell-sidebar-toggle",
-                    label,
-                    Icon::new(FluxIcon::PanelRight)
-                        .size(active_theme(cx).extended().icon.md)
-                        .rotate(percentage(0.5)),
-                    false,
-                    false,
-                    cx,
-                )
-                .on_click(move |_, _, cx| state.update(cx, |state, cx| state.toggle(cx))),
-            )
+        sidebar_toggle_button("shell-sidebar-toggle", label, sidebar, cx)
     }
 
     /// 当前活跃路由挂载的顶栏插槽。
     fn active_title_bar(&self) -> Option<AnyView> {
         self.active_route
-            .and_then(|active| self.routes.iter().find(|route| route.id == active))
+            .as_ref()
+            .and_then(|active| self.routes.iter().find(|route| route.id == *active))
             .and_then(|route| route.title_bar.clone())
     }
 
@@ -514,7 +623,8 @@ impl ShellView {
 
     fn active_content(&self) -> AnyElement {
         self.active_route
-            .and_then(|active| self.routes.iter().find(|route| route.id == active))
+            .as_ref()
+            .and_then(|active| self.routes.iter().find(|route| route.id == *active))
             .map_or_else(
                 || div().into_any_element(),
                 |route| route.view.clone().into_any_element(),
@@ -524,6 +634,12 @@ impl ShellView {
 
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.window.is_none() {
+            self.window = Some(window.window_handle());
+            if let Some(route) = self.active_route.clone() {
+                self.activate(&route, cx);
+            }
+        }
         crate::sync_traffic_light(
             window,
             crate::title_bar_height(cx),
@@ -564,5 +680,136 @@ impl Render for ShellView {
                             .children(status_bar),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc, sync::Arc};
+
+    use fluxdown_ui_i18n::I18nCatalog;
+    use gpui::{AppContext as _, Empty, TestApp};
+    use serde_json::json;
+
+    use super::*;
+
+    struct Host {
+        shell: Entity<ShellView>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            Empty
+        }
+    }
+
+    fn view(cx: &mut App) -> AnyView {
+        cx.new(|_| Empty).into()
+    }
+
+    fn route(cx: &mut App, id: &'static str) -> ShellRoute {
+        ShellRoute::plugin(RouteId::new(id), SharedString::new_static(id), view(cx))
+    }
+
+    fn route_ids(shell: &ShellView) -> Vec<String> {
+        shell
+            .routes
+            .iter()
+            .map(|r| r.id.as_str().to_owned())
+            .collect()
+    }
+
+    fn open(app: &mut TestApp) -> gpui::TestAppWindow<Host> {
+        app.open_window(|window, cx| {
+            let catalog = Arc::new(I18nCatalog::load_embedded().expect("embedded translations"));
+            let translator = cx.new(|_| catalog.translator("en"));
+            let downloads = ShellRoute::new(
+                RouteId::new("downloads"),
+                "activity-downloads",
+                "activity-downloads-tooltip",
+                "downloads",
+                Icon::new(FluxIcon::Sparkles),
+                view(cx),
+            );
+            let chrome = ShellChrome {
+                widgets: Vec::new(),
+                catalog: vec![ChromeItemSpec::new(
+                    "downloads",
+                    ChromeZone::RailTop,
+                    ChromeFamilies::ALL,
+                )],
+                on_layout_change: Rc::new(|_, _| {}),
+            };
+            let shell =
+                cx.new(|cx| ShellView::new(translator, vec![downloads], Vec::new(), chrome, cx));
+            let handle = window.window_handle();
+            shell.update(cx, |shell, _| shell.window = Some(handle));
+            Host { shell }
+        })
+    }
+
+    #[test]
+    fn dynamic_routes_follow_plugin_entries() {
+        let mut app = TestApp::new();
+        let mut win = open(&mut app);
+        let activated = Rc::new(Cell::new(0_u32));
+
+        win.update(|host, _, cx| {
+            host.shell.update(cx, |shell, cx| {
+                let counter = Rc::clone(&activated);
+                let one = route(cx, "plugin:a:one")
+                    .on_activate(Rc::new(move |_, _| counter.set(counter.get() + 1)));
+                let two = route(cx, "plugin:a:two");
+                // 非 `plugin:` 前缀的路由必须被丢弃。
+                let foreign = route(cx, "foreign");
+                shell.set_dynamic_routes(vec![one, two, foreign], cx);
+                assert_eq!(
+                    route_ids(shell),
+                    ["downloads", "plugin:a:one", "plugin:a:two"]
+                );
+                assert!(shell.catalog.iter().any(|s| s.id == "plugin:a:one"));
+                assert!(shell.layout.zone_of("plugin:a:two").is_some());
+                shell.navigate(RouteId::new("plugin:a:one"), cx);
+                assert_eq!(shell.active_route, Some(RouteId::new("plugin:a:one")));
+                // 不存在的路由被忽略。
+                shell.navigate(RouteId::new("plugin:zzz"), cx);
+                assert_eq!(shell.active_route, Some(RouteId::new("plugin:a:one")));
+            });
+        });
+        assert_eq!(activated.get(), 1);
+
+        win.update(|host, _, cx| {
+            host.shell.update(cx, |shell, cx| {
+                let two = route(cx, "plugin:a:two");
+                shell.set_dynamic_routes(vec![two], cx);
+                assert_eq!(route_ids(shell), ["downloads", "plugin:a:two"]);
+                assert_eq!(shell.active_route, Some(RouteId::new("downloads")));
+                assert!(!shell.catalog.iter().any(|s| s.id == "plugin:a:one"));
+                assert_eq!(shell.layout.zone_of("plugin:a:one"), None);
+
+                shell.set_dynamic_routes(Vec::new(), cx);
+                assert_eq!(route_ids(shell), ["downloads"]);
+                assert_eq!(shell.catalog.len(), 1);
+            });
+        });
+        assert_eq!(activated.get(), 1);
+    }
+
+    #[test]
+    fn stored_preference_restores_position_after_reinstall() {
+        let mut app = TestApp::new();
+        let mut win = open(&mut app);
+        win.update(|host, _, cx| {
+            host.shell.update(cx, |shell, cx| {
+                shell.apply_layout(Some(&json!({"railBottom": ["plugin:a:one"]})), cx);
+                assert_eq!(shell.layout.zone_of("plugin:a:one"), None);
+                let one = route(cx, "plugin:a:one");
+                shell.set_dynamic_routes(vec![one], cx);
+                assert_eq!(
+                    shell.layout.zone_of("plugin:a:one"),
+                    Some(ChromeZone::RailBottom)
+                );
+            });
+        });
     }
 }

@@ -213,7 +213,7 @@ flowchart TD
 | Web 管理界面 | React + TypeScript + Vite | [`web/`](web) |
 | CLI | HTTP 客户端或内嵌引擎 | [`native/cli/`](native/cli) |
 | 浏览器集成 | WXT + TypeScript、Native Messaging、用户脚本 | [`fluxDown/`](fluxDown)、[`native/nmh/`](native/nmh)、[`userscript/`](userscript) |
-| 官网 | Astro + React；`website/` 为旧站存档 | [`website-v2/`](website-v2) |
+| 官网 | Astro + React | [`website-v2/`](website-v2) |
 
 ## 从源码构建
 
