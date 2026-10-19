@@ -214,5 +214,5 @@ export function communitySubmission(rule: SniffRuleV1, extras: SubmissionExtras 
 
 /** 嗅探规则字段参考文档（随界面语言：中文 / 英文）。 */
 export function sniffRulesDocsUrl(locale: string): string {
-  return `https://fluxdown.zerx.dev/docs/${locale.startsWith("zh") ? "zh" : "en"}/browser-extension/sniff-rules/`;
+  return `https://fluxdown.com/docs/${locale.startsWith("zh") ? "zh" : "en"}/browser-extension/sniff-rules/`;
 }

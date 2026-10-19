@@ -227,7 +227,7 @@ function displayTab(state) {
       text: "这是一段 **markdown**。\n\n第二段落。\n\n```js\nconsole.log('代码块');\n```",
     }),
     h("code", { text: "const answer = 42;" }),
-    h("link", { text: "打开 FluxDown 官网", href: "https://fluxdown.zerx.dev" }),
+    h("link", { text: "打开 FluxDown 官网", href: "https://fluxdown.com" }),
     h("image", { src: PIXEL, alt: "1×1 像素图", width: 48, height: 48 }),
     h("empty", { title: "空状态", description: "empty 节点示例" }),
     h(

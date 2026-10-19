@@ -14,7 +14,7 @@ use crate::{
     windows::{WindowKey, WindowRegistry, confirm_active_tasks},
 };
 
-const WEBSITE_URL: &str = "https://fluxdown.zerx.dev";
+const WEBSITE_URL: &str = "https://fluxdown.com";
 
 fn t(translator: &Translator, key: &str) -> SharedString {
     SharedString::from(translator.text(key).to_owned())

@@ -40,13 +40,13 @@ After editing running code, exit the affected processes before launching again; 
 
 ## 反馈问题 / Reporting Issues
 
-请通过 [GitHub Issues](https://github.com/zerx-lab/FluxDown/issues) 或官网 [反馈页面](https://fluxdown.zerx.dev/feedback) 提交问题。
-Please report problems via [GitHub Issues](https://github.com/zerx-lab/FluxDown/issues) or the [feedback page](https://fluxdown.zerx.dev/feedback) on the official site.
+请通过 [GitHub Issues](https://github.com/zerx-lab/FluxDown/issues) 或官网 [反馈页面](https://fluxdown.com/feedback) 提交问题。
+Please report problems via [GitHub Issues](https://github.com/zerx-lab/FluxDown/issues) or the [feedback page](https://fluxdown.com/feedback) on the official site.
 
 ## 文档贡献 / Documentation Contributions
 
-FluxDown 官网文档（<https://fluxdown.zerx.dev/docs/>）与源码同仓库维护，欢迎通过 Pull Request 贡献或翻译。
-The FluxDown documentation site (<https://fluxdown.zerx.dev/docs/>) is maintained in this repository — contributions and translations via Pull Request are welcome.
+FluxDown 官网文档（<https://fluxdown.com/docs/>）与源码同仓库维护，欢迎通过 Pull Request 贡献或翻译。
+The FluxDown documentation site (<https://fluxdown.com/docs/>) is maintained in this repository — contributions and translations via Pull Request are welcome.
 
 ### 快速编辑 / Quick Edit
 

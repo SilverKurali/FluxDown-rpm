@@ -3,7 +3,7 @@
   "name": "功能演示 Feature Demo",
   "version": "1.0.0",
   "description": "覆盖插件平台全部能力的演示插件：可移植视图、桌面脚本、命令、任务右键、详情 tab、设置视图、事件、定时器、任务 API、嗅探规则、resolver 与 hook。",
-  "homepage": "https://fluxdown.zerx.dev/docs/plugins/sdk",
+  "homepage": "https://fluxdown.com/docs/plugins/sdk",
   "resolvers": [
     {
       "match": { "urls": ["*://fluxdown-demo.invalid/*"] },

@@ -3,7 +3,7 @@
   "name": "YouTube 下载 YouTube Down",
   "version": "1.0.0",
   "description": "经 FluxDown yt-dlp 组件把 YouTube 视频 / Shorts / 直播回放 / 播放列表解析为直链，交回引擎多段下载、音视频自动合并；下载时按清晰度弹框选择。附带浏览器扩展嗅探规则：在 YouTube 播放器上直接出现下载浮钮。",
-  "homepage": "https://fluxdown.zerx.dev/docs/plugins/sdk",
+  "homepage": "https://fluxdown.com/docs/plugins/sdk",
   "resolvers": [
     {
       "match": {

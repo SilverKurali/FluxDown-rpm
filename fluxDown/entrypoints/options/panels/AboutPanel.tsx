@@ -5,10 +5,10 @@ import { useT } from "@/ui/i18n";
 import { PanelShell, SettingRow } from "../parts";
 
 const LINKS = [
-  { key: "options.about.website", href: "https://fluxdown.zerx.dev/" },
+  { key: "options.about.website", href: "https://fluxdown.com/" },
   { key: "options.about.github", href: "https://github.com/zerx-lab/FluxDown" },
   { key: "options.about.releases", href: "https://github.com/zerx-lab/FluxDown/releases/latest" },
-  { key: "options.about.feedback", href: "https://fluxdown.zerx.dev/feedback" },
+  { key: "options.about.feedback", href: "https://fluxdown.com/feedback" },
 ] as const;
 
 export function AboutPanel(): JSX.Element {

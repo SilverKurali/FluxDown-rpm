@@ -350,7 +350,7 @@ async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String, Compo
 /// 24h 缓存，规避 GitHub 匿名 API 每 IP 60/h 限流与直连 api.github.com 的
 /// 网络问题），失败依次回退用户配置的镜像（若有）与直连 GitHub。
 #[cfg(feature = "components")]
-const MIRROR_BASE: &str = "https://fluxdown.zerx.dev/api/components";
+const MIRROR_BASE: &str = "https://fluxdown.com/api/components";
 
 /// 版本列表专用：优先经官网镜像 `MIRROR_BASE/<component>` 拉取（返回原样
 /// GitHub JSON）；失败则经 [`fetch_github_json_with_mirror`] 依次尝试用户
@@ -628,7 +628,7 @@ mod tests {
     // 不匹配已知前缀的 URL 原样透传（不误伤第三方镜像/官网 URL）。
     #[test]
     fn apply_component_mirror_leaves_unrelated_urls_untouched() {
-        let url = "https://fluxdown.zerx.dev/api/components/ffmpeg";
+        let url = "https://fluxdown.com/api/components/ffmpeg";
         assert_eq!(
             apply_component_mirror(url, "https://ghproxy.example.com/gh"),
             url

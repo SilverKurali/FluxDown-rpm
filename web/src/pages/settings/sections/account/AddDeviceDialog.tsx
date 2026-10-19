@@ -38,8 +38,10 @@ const NO_REQUESTS: readonly { sessionId: string }[] = []
 const SEARCH_WINDOW_MS = 8000
 
 /**
- * 本机配对码：供对端输入；Web 场景的「本机」即服务器。三态：未开启局域网 / 已开启未生效 → 只提示，
- * 不生成码；lanActive → 自动生成、到期自动续码、入站请求出现后换新码。卸载时撤回广播。
+ * 本机配对码：供对端输入；Web 场景的「本机」即服务器。以 lanActive（本次运行实际可达）为准：
+ * 可达 → 自动生成、到期自动续码、入站请求出现后换新码；不可达时才按 lanEnabled 区分「未开启 /
+ * 已开启未生效」只提示。server 模式监听地址只由 FLUXDOWN_BIND 决定、lanActive 恒为 true，
+ * 持久化的 lanEnabled 与之无关（同 GPUI `render_own_code`）。卸载时撤回广播。
  */
 function OwnCodePanel() {
   const t = useT()
@@ -102,7 +104,7 @@ function OwnCodePanel() {
     if ([...ids].some((id) => !previous.has(id))) void renew()
   }, [requests, lanActive, renew])
 
-  const gateHint = !lanEnabled ? 'localPairingLanDisabledHint' : !lanActive ? 'localPairingLanRestartHint' : null
+  const gateHint = lanActive ? null : lanEnabled ? 'localPairingLanRestartHint' : 'localPairingLanDisabledHint'
 
   return (
     <div className="flex flex-col gap-2 rounded-md border border-hairline p-3">

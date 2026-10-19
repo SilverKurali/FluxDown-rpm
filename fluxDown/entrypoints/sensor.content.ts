@@ -10,7 +10,6 @@
  */
 import { browser } from "wxt/browser";
 import { defineContentScript } from "wxt/utils/define-content-script";
-import { injectScript } from "wxt/utils/inject-script";
 import type { ContentMessage, HooksInfo, ProbeReply } from "@/background/protocol";
 import {
   EV_CONFIG,
@@ -82,6 +81,19 @@ function swallow(p: Promise<unknown>): void {
   p.catch(() => {
     // 扩展可能已失效
   });
+}
+
+/**
+ * Firefox：把 MAIN world 钩子作为内联脚本插入页面。内联脚本在插入时同步执行，没有 load 事件可等；
+ * 插入后即移除节点，钩子已装在页面全局上。
+ */
+async function injectPageHooks(): Promise<void> {
+  const response = await fetch(browser.runtime.getURL("/page-hooks-main.js"));
+  if (!response.ok) throw new Error(`page hooks fetch failed: HTTP ${response.status}`);
+  const script = document.createElement("script");
+  script.text = await response.text();
+  (document.head ?? document.documentElement).append(script);
+  script.remove();
 }
 
 export default defineContentScript({
@@ -609,10 +621,12 @@ export default defineContentScript({
     });
 
     // ===== 启动序列 =====
-    // 1. Firefox：MV2 不支持 world: MAIN，经 unlisted script 注入页面环境
+    // 1. Firefox：MV2 不支持 world: MAIN，把 unlisted script 作为内联脚本注入页面环境。
+    //    不能用 WXT 的 injectScript：MV2 下它写 script.text 后还等 load 事件，内联脚本从不触发
+    //    load / error，main 会永远挂在这里——浮钮从不创建，配置要等后台 probe 兜底才拉取。
     if (import.meta.env.FIREFOX) {
       try {
-        await injectScript("/page-hooks-main.js", { keepInDom: true });
+        await injectPageHooks();
       } catch (e) {
         console.warn("[FluxDown] Failed to inject page hooks:", e);
       }

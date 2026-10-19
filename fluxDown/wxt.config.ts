@@ -70,7 +70,7 @@ export default defineConfig({
       "contextMenus",
     ],
     host_permissions: ["<all_urls>"],
-    // 仅 Firefox：sensor 以 injectScript 注入 /page-hooks-main.js（MV2 无 world: MAIN）。
+    // 仅 Firefox：sensor 取回 /page-hooks-main.js 以内联脚本注入页面（MV2 无 world: MAIN）。
     // Chrome 由 page-hooks.content.ts 直接以 MAIN world 注入，无需暴露任何资源。
     ...(browser === "firefox"
       ? {

@@ -121,7 +121,7 @@ Package: fluxdown
 Version: ${VERSION/-/\~}
 Architecture: amd64
 Maintainer: FluxDown Team <contact@fluxdown.app>
-Homepage: https://fluxdown.zerx.dev
+Homepage: https://fluxdown.com
 Section: net
 Priority: optional
 Installed-Size: ${INSTALLED_KB}
@@ -150,7 +150,7 @@ INSTALLED_BYTES=$(du -sb "$ARCHPKG/opt" "$ARCHPKG/usr" | awk '{s+=$1} END {print
   echo "pkgname = fluxdown"
   echo "pkgver = ${VERSION//-/_}-1"
   echo "pkgdesc = Free IDM-alternative download manager"
-  echo "url = https://fluxdown.zerx.dev"
+  echo "url = https://fluxdown.com"
   echo "builddate = $(date +%s)"
   echo "packager = FluxDown CI <ci@fluxdown.app>"
   echo "size = ${INSTALLED_BYTES}"

@@ -1155,6 +1155,7 @@ mod tests {
     use fluxdown_protocol::{AgentSnapshot, UpdateInstallKind};
 
     use super::install::ReleaseComponent;
+    use super::release::FALLBACK_STAGGER;
     use super::*;
 
     fn temp_dir() -> PathBuf {
@@ -1184,7 +1185,7 @@ mod tests {
         Arc::new(UpdateService::with_version(
             parts,
             current,
-            Endpoint::with_base(base, true),
+            Endpoint::with_bases(&[base], true, FALLBACK_STAGGER),
         ))
     }
 
@@ -1286,7 +1287,7 @@ mod tests {
         let (service, _delegate) = delegated(
             &dir,
             "1.0.0",
-            Endpoint::with_base(&base, true),
+            Endpoint::with_bases(&[&base], true, FALLBACK_STAGGER),
             &["arm64-v8a"],
         );
         service.check("stable").await.unwrap();
@@ -1312,7 +1313,7 @@ mod tests {
         let (offline, _delegate) = delegated(
             &dir,
             "1.0.0",
-            Endpoint::with_base(&dead_base().await, true),
+            Endpoint::with_bases(&[&dead_base().await], true, FALLBACK_STAGGER),
             &["arm64-v8a"],
         );
         offline.lock().status = service.status();
@@ -1402,7 +1403,7 @@ mod tests {
         let (service, delegate) = delegated(
             &dir,
             "1.0.0",
-            Endpoint::with_base(&base, true),
+            Endpoint::with_bases(&[&base], true, FALLBACK_STAGGER),
             &["arm64-v8a"],
         );
         let status = service.check("stable").await.unwrap();
@@ -1509,7 +1510,7 @@ mod tests {
                 user_agent_product: "fluxdown-test",
                 egress: Egress::dynamic(move || Some(source.clone())),
             },
-            Endpoint::with_base(&base, true),
+            Endpoint::with_bases(&[&base], true, FALLBACK_STAGGER),
         ));
 
         assert_eq!(
@@ -1531,7 +1532,7 @@ mod tests {
         let (service, _delegate) = delegated(
             &dir,
             "dev",
-            Endpoint::with_base(&base, true),
+            Endpoint::with_bases(&[&base], true, FALLBACK_STAGGER),
             &["arm64-v8a"],
         );
         assert_eq!(

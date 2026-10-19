@@ -16,11 +16,11 @@ use crate::ui::{Control, SettingsPage, SettingsRow, SettingsSection, body_text, 
 use crate::update_view;
 
 pub(crate) const APP_VERSION: &str = fluxdown_protocol::APP_VERSION;
-const WEBSITE: &str = "https://fluxdown.zerx.dev";
+const WEBSITE: &str = "https://fluxdown.com";
 const CHROME_STORE: &str = "https://chromewebstore.google.com/search/FluxDown";
 const FIREFOX_STORE: &str = "https://addons.mozilla.org/firefox/addon/fluxdown/";
 const EDGE_STORE: &str = "https://microsoftedge.microsoft.com/addons/search/FluxDown";
-const DONATE: &str = "https://fluxdown.zerx.dev/sponsor";
+const DONATE: &str = "https://fluxdown.com/sponsor";
 /// 更新说明正文的行高（字号倍数）：多行列表项与中文长句比控件文字需要更宽松的行距。
 const RELEASE_NOTES_LINE_HEIGHT: f32 = 1.6;
 
