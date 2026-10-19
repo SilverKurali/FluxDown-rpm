@@ -123,6 +123,7 @@ public enum HostMethod {
     public static let daemonCdnReportsPeek = "daemon.cdnReports.peek"
     public static let daemonCdnReportsAck = "daemon.cdnReports.ack"
     public static let daemonCdnConfigApply = "daemon.cdnConfig.apply"
+    public static let daemonEgressPlan = "daemon.egress.plan"
     public static let daemonBtTrackerSubscriptionRefresh = "daemon.bt.trackerSubscription.refresh"
     public static let daemonEd2kServerSubscriptionRefresh = "daemon.ed2k.serverSubscription.refresh"
     public static let daemonDiagnosticsDescribe = "daemon.diagnostics.describe"

@@ -317,6 +317,7 @@ pub(crate) async fn run_with(
             .with_task_events(task_events)
             .with_sniff_rules(Arc::new(crate::sniff_rules::SniffRuleStore::new(
                 store.data_dir().join("sniff-rules"),
+                crate::egress::Egress::daemon(daemon.clone()),
             )));
         let nmh_cancel = cancel.clone();
         let (endpoint_ready, endpoint_live) = tokio::sync::oneshot::channel();
@@ -364,6 +365,7 @@ pub(crate) async fn run_with(
             events: events.clone(),
             data_dir: store.data_dir().to_path_buf(),
             target: update_target,
+            egress: crate::egress::Egress::daemon(daemon.clone()),
             request_restart: {
                 let lifecycle = lifecycle.clone();
                 Box::new(move || lifecycle.request_restart())

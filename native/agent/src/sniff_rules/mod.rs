@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, watch};
 
-use crate::http_client::LazyHttpClient;
+use crate::egress::{Egress, EgressAttempt, EgressClient};
 use verify::{DocKind, KeySet, MAX_ENVELOPE_BYTES, VerifiedDoc, verify_envelope};
 
 pub use verify::SniffRuleError;
@@ -108,7 +108,9 @@ struct Inner {
     dir: PathBuf,
     keys: KeySet,
     sources: Vec<String>,
-    http: LazyHttpClient,
+    /// 宿主自身下载的统一出口：信封带 ed25519 签名，来源可交给插件改写（如 GitHub 加速）。
+    egress: Egress,
+    http: EgressClient,
     state: Mutex<State>,
     /// 每完成一次刷新（含追加的强制轮次）计数加一；`force` 查询据此等待。
     done: watch::Sender<u64>,
@@ -121,26 +123,28 @@ pub struct SniffRuleStore {
 impl SniffRuleStore {
     /// 生产构造：内置公钥与规则源；`dir` 为 `<agent_data_dir>/sniff-rules`。
     #[must_use]
-    pub fn new(dir: PathBuf) -> Self {
+    pub fn new(dir: PathBuf, egress: Egress) -> Self {
         Self::build(
             dir,
             KeySet::production(),
             SOURCES.iter().map(|source| (*source).to_owned()).collect(),
+            egress,
         )
     }
 
     #[cfg(test)]
     fn with(dir: PathBuf, keys: KeySet, sources: Vec<String>) -> Self {
-        Self::build(dir, keys, sources)
+        Self::build(dir, keys, sources, Egress::system_default())
     }
 
-    fn build(dir: PathBuf, keys: KeySet, sources: Vec<String>) -> Self {
+    fn build(dir: PathBuf, keys: KeySet, sources: Vec<String>, egress: Egress) -> Self {
         Self {
             inner: Arc::new(Inner {
                 dir,
                 keys,
                 sources,
-                http: LazyHttpClient::new(|| {
+                egress,
+                http: EgressClient::new(|| {
                     reqwest::Client::builder()
                         .timeout(REQUEST_TIMEOUT)
                         .user_agent(concat!("fluxdown-agent/", env!("CARGO_PKG_VERSION")))
@@ -419,7 +423,8 @@ impl Inner {
         }
     }
 
-    /// 按源顺序取第一个 2xx（或 304）且验签通过且不回滚的文档。
+    /// 按源顺序取第一个 2xx（或 304）且验签通过且不回滚的文档。每个源先试统一出口给出的
+    /// 插件改写地址，下载失败或验签不过再回退原地址。
     async fn fetch_kind(
         &self,
         kind: DocKind,
@@ -433,48 +438,64 @@ impl Inner {
                 Some(_) => self.state.lock().await.etags.get(&url).cloned(),
                 None => None,
             };
-            let (bytes, etag) = match self.download(&url, known.as_deref()).await {
-                Ok(Downloaded::NotModified) => return Ok(Fetched::Current(None)),
-                Ok(Downloaded::Body { bytes, etag }) => (bytes, etag),
+            let plan = self.egress.plan(&url, true).await;
+            let client = match self.http.get(&plan.network).await {
+                Ok(client) => client,
                 Err(error) => {
-                    last_error = error;
+                    last_error = SniffRuleError::Http(error.to_string());
                     continue;
                 }
             };
-            let doc = match verify_envelope(&bytes, kind, &self.keys) {
-                Ok(doc) => doc,
-                Err(error) => {
-                    last_error = error;
-                    continue;
+            for attempt in plan.attempts() {
+                let (bytes, etag) = match self.download(&client, attempt, known.as_deref()).await {
+                    Ok(Downloaded::NotModified) => return Ok(Fetched::Current(None)),
+                    Ok(Downloaded::Body { bytes, etag }) => (bytes, etag),
+                    Err(error) => {
+                        last_error = error;
+                        continue;
+                    }
+                };
+                let doc = match verify_envelope(&bytes, kind, &self.keys) {
+                    Ok(doc) => doc,
+                    Err(error) => {
+                        last_error = error;
+                        continue;
+                    }
+                };
+                let accepted = Accepted {
+                    url: url.clone(),
+                    etag,
+                };
+                match have {
+                    Some(have) if doc.sequence < have => {
+                        last_error = SniffRuleError::Rollback {
+                            have,
+                            got: doc.sequence,
+                        };
+                    }
+                    Some(have) if doc.sequence == have => {
+                        return Ok(Fetched::Current(Some(accepted)));
+                    }
+                    _ => return Ok(Fetched::Updated(doc, accepted)),
                 }
-            };
-            let accepted = Accepted { url, etag };
-            match have {
-                Some(have) if doc.sequence < have => {
-                    last_error = SniffRuleError::Rollback {
-                        have,
-                        got: doc.sequence,
-                    };
-                }
-                Some(have) if doc.sequence == have => {
-                    return Ok(Fetched::Current(Some(accepted)));
-                }
-                _ => return Ok(Fetched::Updated(doc, accepted)),
             }
         }
         Err(last_error)
     }
 
     /// 流式累计响应体，超过信封上限即中止。错误串不含 URL（可能带查询参数）。
-    async fn download(&self, url: &str, etag: Option<&str>) -> Result<Downloaded, SniffRuleError> {
+    async fn download(
+        &self,
+        client: &reqwest::Client,
+        attempt: &EgressAttempt,
+        etag: Option<&str>,
+    ) -> Result<Downloaded, SniffRuleError> {
         let http_error =
             |error: reqwest::Error| SniffRuleError::Http(error.without_url().to_string());
-        let client = self
-            .http
-            .get()
-            .await
-            .map_err(|error| SniffRuleError::Http(error.to_string()))?;
-        let mut request = client.get(url);
+        let mut request = client.get(&attempt.url);
+        for (name, value) in &attempt.headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
         if let Some(etag) = etag {
             request = request.header(reqwest::header::IF_NONE_MATCH, etag);
         }

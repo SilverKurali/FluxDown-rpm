@@ -627,6 +627,9 @@ pub struct ShellStatusDto {
     pub tray_unavailable_reason: Option<TrayUnavailableReason>,
     /// `true`：关闭全部 UI 只退出界面，agent + daemon 继续运行；`false`：随界面一起退出。
     pub resident: bool,
+    /// agent 全局快捷键后端与逐项注册状态（旧 agent 缺省 = 不可用）。
+    #[serde(default)]
+    pub global_shortcuts: crate::shortcuts::GlobalShortcutsStatusDto,
 }
 
 /// 完成后关机的调度状态（agent 拥有状态机与执行）。

@@ -64,7 +64,6 @@ export function RulesPanel(): JSX.Element {
       <RuleTable
         entries={data.entries}
         overrides={overrides}
-        revocationSequence={data.sync?.revocations?.sequence ?? null}
         onOverridesChange={(next) => void writeOverrides(next)}
         local={local}
       />

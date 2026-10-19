@@ -90,6 +90,7 @@ flux_icons! {
     HardDrive => "hard-drive",
     Image => "image",
     Info => "info",
+    Keyboard => "keyboard",
     Layers => "layers",
     Library => "library",
     ListFilter => "list-filter",

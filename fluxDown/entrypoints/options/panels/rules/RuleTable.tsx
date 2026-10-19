@@ -1,8 +1,8 @@
 import type { JSX } from "preact";
 import { useMemo, useState } from "preact/hooks";
 import type { RulesListEntry } from "@/background/protocol";
-import { matchesQuery } from "@/background/rule-view";
-import type { RuleStatus, RuleStatusReason } from "@/rules/engine";
+import { type ListedRuleStatus, matchesQuery } from "@/background/rule-view";
+import type { RuleStatusReason } from "@/rules/engine";
 import type { RuleOverrides, RuleTier, SniffRuleV1 } from "@/rules/schema";
 import { Badge } from "@/ui/components/Badge";
 import { Button } from "@/ui/components/Button";
@@ -25,8 +25,6 @@ import { stageLabels } from "./stage-labels";
 interface RuleTableProps {
   entries: RulesListEntry[];
   overrides: RuleOverrides;
-  /** 当前吊销列表的 sequence；没有时无法确认「仍然启用」。 */
-  revocationSequence: number | null;
   onOverridesChange: (next: RuleOverrides) => void;
   local: LocalRulesApi;
 }
@@ -42,24 +40,20 @@ const TIER_TONES: Record<RuleTier, "neutral" | "accent" | "warning" | "success">
   local: "success",
 };
 
-const STATUS_TONES: Record<RuleStatus, "neutral" | "success" | "warning" | "danger"> = {
+const STATUS_TONES: Record<ListedRuleStatus, "neutral" | "success" | "warning" | "danger"> = {
   active: "success",
   disabled: "neutral",
   paused: "neutral",
-  "soft-revoked": "warning",
-  "hard-revoked": "danger",
   expired: "warning",
   "engine-too-new": "warning",
   rejected: "danger",
 };
 
-/** 这些状态下开关不可操作（撤回用独立按钮，其余由包本身或层级开关决定）。 */
-const LOCKED_STATUSES: Record<RuleStatus, boolean> = {
+/** 这些状态下开关不可操作（由包本身或层级开关决定）。 */
+const LOCKED_STATUSES: Record<ListedRuleStatus, boolean> = {
   active: false,
   disabled: false,
   paused: true,
-  "soft-revoked": true,
-  "hard-revoked": true,
   expired: true,
   "engine-too-new": true,
   rejected: true,
@@ -107,29 +101,26 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
     community: t("rules.tier.community"),
     local: t("rules.tier.local"),
   };
-  const statusLabels: Record<RuleStatus, string> = {
+  const statusLabels: Record<ListedRuleStatus, string> = {
     active: t("rules.status.active"),
     disabled: t("rules.status.disabled"),
     paused: t("rules.status.paused"),
-    "soft-revoked": t("rules.status.softRevoked"),
-    "hard-revoked": t("rules.status.hardRevoked"),
     expired: t("rules.status.expired"),
     "engine-too-new": t("rules.status.engineTooNew"),
     rejected: t("rules.status.rejected"),
   };
-  const statusHints: Record<RuleStatus, string | undefined> = {
+  const statusHints: Record<ListedRuleStatus, string | undefined> = {
     active: undefined,
     disabled: undefined,
     paused: t("rules.statusHint.paused"),
-    "soft-revoked": t("rules.statusHint.softRevoked"),
-    "hard-revoked": t("rules.statusHint.hardRevoked"),
     expired: undefined,
     "engine-too-new": t("rules.statusHint.engineTooNew"),
     rejected: undefined,
   };
+  // 吊销列表缺失 / 过期同样表现为社区包过期，不向用户暴露吊销机制。
   const reasonHints: Record<RuleStatusReason, string> = {
     "pack-expired": t("rules.statusHint.packExpired"),
-    "revocations-stale": t("rules.statusHint.revocationsStale"),
+    "revocations-stale": t("rules.statusHint.packExpired"),
   };
   const stageNames: Record<string, string> = stageLabels();
 
@@ -167,14 +158,6 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
   const resetOverride = (id: string) => {
     const { [id]: _removed, ...rest } = props.overrides;
     props.onOverridesChange(rest);
-  };
-
-  const keepEnabled = (id: string) => {
-    if (props.revocationSequence === null) return;
-    props.onOverridesChange({
-      ...props.overrides,
-      [id]: { enabled: true, ackRevocation: props.revocationSequence },
-    });
   };
 
   const openPreview = (entry: RulesListEntry) => {
@@ -320,16 +303,6 @@ export function RuleTable(props: RuleTableProps): JSX.Element {
                           <Badge tone="warning" title={inertHint}>
                             {inert === "requires-setting" ? t("rules.inert.requiresSetting") : t("rules.inert.classifyOnly")}
                           </Badge>
-                        ) : null}
-                        {status === "soft-revoked" ? (
-                          <Button
-                            size="sm"
-                            disabled={props.revocationSequence === null}
-                            title={hint}
-                            onClick={() => keepEnabled(rule.id)}
-                          >
-                            {t("rules.table.keepEnabled")}
-                          </Button>
                         ) : null}
                       </div>
                       {hint || (status === "active" && inertHint) ? (

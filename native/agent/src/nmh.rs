@@ -2911,6 +2911,7 @@ mod tests {
         let (service, _) = service_with(daemon);
         let service = service.with_sniff_rules(Arc::new(crate::sniff_rules::SniffRuleStore::new(
             dir.clone(),
+            crate::egress::Egress::system_default(),
         )));
         let (mut client, server) = tokio::io::duplex(65536);
         tokio::spawn(handle_stream(server, service));

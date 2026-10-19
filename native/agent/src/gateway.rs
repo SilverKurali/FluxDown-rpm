@@ -2640,6 +2640,7 @@ mod tests {
             let update = Arc::new(crate::update::UpdateService::unsupported(
                 events.clone(),
                 dir.join("update-data"),
+                crate::egress::Egress::system_default(),
             ));
             let link = crate::link::LinkService::new(crate::link::LinkServiceParts {
                 events: events.clone(),

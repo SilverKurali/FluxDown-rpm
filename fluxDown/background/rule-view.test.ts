@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { RuleListEntry } from "@/rules/engine";
 import type { SniffRuleV1 } from "@/rules/schema";
-import { buildSearchText, matchesQuery, toListItem } from "./rule-view";
+import { buildSearchText, type ListedRuleEntry, matchesQuery, toListItem } from "./rule-view";
 
 const rule: SniffRuleV1 = {
   id: "community.misc.bili",
@@ -42,7 +41,7 @@ describe("buildSearchText", () => {
 });
 
 describe("toListItem", () => {
-  const entry: RuleListEntry = { rule, status: "active" };
+  const entry: ListedRuleEntry = { rule, status: "active" };
 
   test("精简字段，不带 match / action", () => {
     const item = toListItem(entry);

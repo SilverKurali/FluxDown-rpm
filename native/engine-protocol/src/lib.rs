@@ -44,6 +44,31 @@ pub fn source_bytes_to_dto(bytes: SourceBytes) -> fluxdown_protocol::TaskSourceB
     }
 }
 
+/// 将宿主自身请求的出口方案转换为 wire DTO（改写地址在前，原地址由调用方兜底）。
+#[must_use]
+pub fn egress_plan_to_dto(
+    plan: fluxdown_engine::egress::EgressPlan,
+) -> fluxdown_protocol::EgressPlanDto {
+    let proxy = plan.proxy.map(|proxy| fluxdown_protocol::EgressProxyDto {
+        url: proxy.url,
+        no_proxy: proxy.no_proxy,
+    });
+    match plan.route.rewrite() {
+        Some(rewrite) => fluxdown_protocol::EgressPlanDto {
+            url: rewrite.url.clone(),
+            headers: rewrite.headers.iter().cloned().collect(),
+            plugin: Some(rewrite.plugin.clone()),
+            proxy,
+        },
+        None => fluxdown_protocol::EgressPlanDto {
+            url: plan.route.source_url().to_owned(),
+            headers: std::collections::BTreeMap::new(),
+            plugin: None,
+            proxy,
+        },
+    }
+}
+
 /// 将引擎实际传输采样转换成 wire DTO，不推测未知并发。
 #[must_use]
 pub fn task_runtime_to_dto(

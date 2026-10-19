@@ -2,7 +2,7 @@
  * 规则列表的精简视图：`rulesList` 只带展示 / 搜索所需字段，规则全文按需经 `ruleGet` 获取。
  * 纯函数，无副作用。
  */
-import type { RuleListEntry } from "@/rules/engine";
+import type { RuleListEntry, RuleStatus } from "@/rules/engine";
 import type { SniffRuleV1 } from "@/rules/schema";
 
 /** 命中统计（background 内存 + storage.session，见 rule-hits.ts）。 */
@@ -13,7 +13,15 @@ export interface RuleHit {
 
 export type RulesListRule = Pick<SniffRuleV1, "id" | "title" | "tier" | "stage" | "version" | "priority" | "enabled">;
 
-export type RulesListItem = Omit<RuleListEntry, "rule"> & {
+/** 吊销是内部下架机制，不对用户展示：被吊销的规则直接从列表消失，等同下架。 */
+export type ListedRuleStatus = Exclude<RuleStatus, "soft-revoked" | "hard-revoked">;
+export type ListedRuleEntry = RuleListEntry & { status: ListedRuleStatus };
+
+export function isListed(entry: RuleListEntry): entry is ListedRuleEntry {
+  return entry.status !== "soft-revoked" && entry.status !== "hard-revoked";
+}
+
+export type RulesListItem = Omit<ListedRuleEntry, "rule"> & {
   rule: RulesListRule;
   /** 小写、预拼接的可搜索文本（id / 标题 / host / pageHost / ext / mime / url）。 */
   searchText: string;
@@ -39,7 +47,7 @@ export function matchesQuery(searchText: string, needle: string): boolean {
 }
 
 /** `redactBody` = 发布构建里的内置规则：搜索文本只含 id / 标题，不泄露 match 内容。 */
-export function toListItem(entry: RuleListEntry, hit?: RuleHit, redactBody = false): RulesListItem {
+export function toListItem(entry: ListedRuleEntry, hit?: RuleHit, redactBody = false): RulesListItem {
   const { rule, ...rest } = entry;
   return {
     ...rest,

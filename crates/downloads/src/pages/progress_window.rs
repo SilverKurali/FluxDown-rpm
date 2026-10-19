@@ -1311,6 +1311,7 @@ mod tests {
                         ProgressWindowEvent::HandOffAborted => Seen::Aborted,
                         ProgressWindowEvent::HandedOff => Seen::HandedOff,
                         ProgressWindowEvent::Close
+                        | ProgressWindowEvent::OpenMainWindow
                         | ProgressWindowEvent::ShowCompletionChanged(_) => {
                             return;
                         }

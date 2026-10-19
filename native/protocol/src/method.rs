@@ -141,6 +141,10 @@ pub const DAEMON_WEBHOOK_TEST: &str = "daemon.webhook.test";
 pub const DAEMON_CDN_REPORTS_PEEK: &str = "daemon.cdnReports.peek";
 pub const DAEMON_CDN_REPORTS_ACK: &str = "daemon.cdnReports.ack";
 pub const DAEMON_CDN_CONFIG_APPLY: &str = "daemon.cdnConfig.apply";
+/// 宿主自身外网请求的统一出口方案（`EgressPlanParams` → `EgressPlanDto`）：与下载任务同一套全局
+/// 代理；`verifiedPayload` 为真时再按下载任务的 resolver 规则交给插件改写（如 GitHub 加速）。agent
+/// 的自更新、规则包下载经它与 daemon 内的组件 / 插件包下载走同一出口。慢方法：插件改写可能实测加速源。
+pub const DAEMON_EGRESS_PLAN: &str = "daemon.egress.plan";
 
 pub const DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH: &str = "daemon.bt.trackerSubscription.refresh";
 pub const DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH: &str = "daemon.ed2k.serverSubscription.refresh";
@@ -430,6 +434,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_CDN_REPORTS_PEEK,
     DAEMON_CDN_REPORTS_ACK,
     DAEMON_CDN_CONFIG_APPLY,
+    DAEMON_EGRESS_PLAN,
     DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH,
     DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH,
     DAEMON_DIAGNOSTICS_DESCRIBE,
@@ -565,6 +570,7 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_DIAGNOSTICS_PROBE,
     DAEMON_DIAGNOSTICS_FIX_COMPONENT,
     DAEMON_TASK_VERIFY,
+    DAEMON_EGRESS_PLAN,
 ];
 
 /// 是否属于 [`SLOW_DAEMON_METHODS`]。

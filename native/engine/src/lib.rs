@@ -35,6 +35,8 @@ pub mod downloader;
 /// eD2K / Kad 协议栈。仅 `ed2k` feature 下编译。
 #[cfg(feature = "ed2k")]
 pub mod ed2k;
+/// 宿主自身外网请求（应用更新、组件、插件包、订阅列表）的统一出口：全局代理 + 插件改写。
+pub mod egress;
 pub mod events;
 pub mod file_exists;
 pub mod ftp_downloader;
@@ -325,7 +327,7 @@ impl Engine {
                     .map_err(|e| EngineError::Plugin(e.to_string()))?,
             );
             let audit = plugin::audit::AuditLog::new(db.clone(), &runtime.spawn_handle());
-            let engine_bridge: Arc<dyn plugin::PluginBridge> = Arc::new(
+            let engine_bridge = Arc::new(
                 plugin::bridge::EngineBridge::new(
                     db.clone(),
                     &proxy_cfg,
@@ -335,7 +337,7 @@ impl Engine {
                 .map_err(|e| EngineError::Plugin(e.to_string()))?,
             );
             let bridge: Arc<dyn plugin::PluginBridge> = Arc::new(
-                plugin::audit::AuditingBridge::new(engine_bridge, audit.clone()),
+                plugin::audit::AuditingBridge::new(engine_bridge.clone(), audit.clone()),
             );
             let app_version = db
                 .get_config("app_version")
@@ -363,7 +365,7 @@ impl Engine {
             ));
             pm.load_all().await;
             manager.rss.set_fallback_provider(pm.subscription_router());
-            manager.install_plugin_manager(pm);
+            manager.install_plugin_manager(pm, engine_bridge);
         }
         // 装载 RSS 订阅到内存镜像——放在引擎构造而非交给宿主，保证任何
         // 宿主（daemon / CLI --local）都不必记得这一步就能让轮询生效。

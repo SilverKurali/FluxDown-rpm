@@ -24,7 +24,7 @@ use gpui_component::{
 use crate::search::SettingsTarget;
 use crate::sections::{
     self, SectionContext, about, api, appearance, bt, doctor, download, ed2k, general, notify,
-    proxy,
+    proxy, shortcuts,
 };
 use crate::store::{SettingsErrorKind, SettingsStore};
 use crate::ui::{
@@ -450,6 +450,7 @@ pub(crate) fn build_pages(
     }
     pages.extend([
         appearance::page(ctx, cx),
+        shortcuts::page(ctx, cx),
         download::page(ctx, cx),
         bt::page(ctx, cx),
         ed2k::page(ctx, cx),

@@ -7,10 +7,10 @@
 //! 2. 自定义 `reqwest::dns::Resolve`（解析后过滤，挡 DNS rebinding、消 TOCTOU）；
 //! 3. 逐跳重定向 `Policy::custom`（手动重建 30 跳上限 + 每跳字面量 IP 校验）。
 //!
-//! ## v1 限制（记录在案）
-//! - `proxy` 在 bridge 构造时快照（reqwest ClientBuilder 配置构建时定死；
-//!   `ytdlp_proxy_url` 同理快照进 `--proxy` 参数，见 #401）；运行期改代理后
-//!   插件出口（含 yt-dlp 子进程）不随动（可接受，非安全问题）。
+//! ## 代理
+//! - 出口代理与宿主自身下载同一来源（[`crate::egress::proxy_endpoint`]）；全局代理变更时
+//!   [`EngineBridge::set_proxy_config`] 整体替换 client 与 yt-dlp `--proxy`（#401），已在途的
+//!   请求 / 子进程沿用发起时的配置。
 //! - 单次调用严格 per-call fetch 上限退化为**全局并发 fetch 上限**（对宿主保护更强）。
 //! - 配置代理时 DNS 由代理侧解析，[`GuardResolver`] 不参与（hostname 级过滤失效；
 //!   字面量 IP 前置校验与逐跳重定向校验仍然生效）。代理由用户显式配置，视为可信出口。
@@ -336,11 +336,29 @@ enum GuardError {
     BlockedRedirect,
 }
 
-/// 引擎侧 `PluginBridge` 实现。
-pub struct EngineBridge {
+/// 随全局代理整体替换的出口配置。
+struct BridgeNet {
     client: reqwest::Client,
     /// 认证请求专用 client：认证档案里的自定义 headers 不能跨 origin 跟随重定向。
     auth_client: reqwest::Client,
+    /// yt-dlp 子进程用 `--proxy` URL。`None` = 直连，不注入 `--proxy`。#401
+    ytdlp_proxy_url: Option<String>,
+}
+
+impl BridgeNet {
+    fn build(proxy: &ProxyConfig) -> Result<Self, PluginError> {
+        let endpoint = crate::egress::proxy_endpoint(proxy);
+        Ok(Self {
+            client: build_guarded_client(endpoint.as_ref(), false, "守卫")?,
+            auth_client: build_guarded_client(endpoint.as_ref(), true, "认证守卫")?,
+            ytdlp_proxy_url: endpoint.map(|endpoint| endpoint.url),
+        })
+    }
+}
+
+/// 引擎侧 `PluginBridge` 实现。
+pub struct EngineBridge {
+    net: std::sync::RwLock<Arc<BridgeNet>>,
     db: Db,
     plugin_retry_tx: mpsc::UnboundedSender<(String, u64)>,
     fetch_sema: Arc<Semaphore>,
@@ -350,38 +368,49 @@ pub struct EngineBridge {
     ffmpeg_sema: Arc<Semaphore>,
     /// 全局并发 yt-dlp 进程限流。
     ytdlp_sema: Arc<Semaphore>,
-    /// yt-dlp 子进程用 `--proxy` URL（构造时快照，同 v1 限制：运行期改代理
-    /// 不随动，见模块文档）。`None` = 直连，不注入 `--proxy`。#401
-    ytdlp_proxy_url: Option<String>,
 }
 
 impl EngineBridge {
-    /// 构造带守卫的 bridge。`proxy` 在此快照进 Client（v1 限制，见模块文档）。
+    /// 构造带守卫的 bridge，出口按 `proxy` 装配。
     pub fn new(
         db: Db,
         proxy: &ProxyConfig,
         plugin_retry_tx: mpsc::UnboundedSender<(String, u64)>,
         data_dir: PathBuf,
     ) -> Result<Self, PluginError> {
-        let client = build_guarded_client(proxy, false, "守卫")?;
-        let auth_client = build_guarded_client(proxy, true, "认证守卫")?;
-        let ytdlp_proxy_url = proxy.resolve().to_proxy_url();
         Ok(Self {
-            client,
-            auth_client,
+            net: std::sync::RwLock::new(Arc::new(BridgeNet::build(proxy)?)),
             db,
             plugin_retry_tx,
             fetch_sema: Arc::new(Semaphore::new(MAX_CONCURRENT_FETCH)),
             data_dir,
             ffmpeg_sema: Arc::new(Semaphore::new(MAX_CONCURRENT_FFMPEG)),
             ytdlp_sema: Arc::new(Semaphore::new(MAX_CONCURRENT_YTDLP)),
-            ytdlp_proxy_url,
         })
+    }
+
+    /// 全局代理变更：重建插件出口；构建失败时保留原出口并返回错误。
+    pub fn set_proxy_config(&self, proxy: &ProxyConfig) -> Result<(), PluginError> {
+        let next = Arc::new(BridgeNet::build(proxy)?);
+        *self
+            .net
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+        Ok(())
+    }
+
+    fn net(&self) -> Arc<BridgeNet> {
+        Arc::clone(
+            &self
+                .net
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 }
 
 fn build_guarded_client(
-    proxy: &ProxyConfig,
+    proxy: Option<&crate::egress::ProxyEndpoint>,
     same_origin_redirects_only: bool,
     label: &str,
 ) -> Result<reqwest::Client, PluginError> {
@@ -413,11 +442,15 @@ fn build_guarded_client(
 
     // 无显式代理时必须 no_proxy：否则 reqwest 会静默继承环境/系统代理，请求改由
     // 代理解析主机名，GuardResolver 的 DNS 级内网过滤随之失效。
-    match proxy.resolve().to_proxy_url() {
-        Some(url) => {
-            if let Ok(p) = reqwest::Proxy::all(&url) {
-                builder = builder.proxy(p);
-            }
+    match proxy.map(|endpoint| reqwest::Proxy::all(&endpoint.url).map(|p| (p, endpoint))) {
+        Some(Ok((p, endpoint))) => {
+            builder = builder.proxy(p.no_proxy(reqwest::NoProxy::from_string(&endpoint.no_proxy)));
+        }
+        Some(Err(error)) => {
+            log_warn!(
+                "[plugin-bridge] invalid proxy address, {label} client connects directly: {error}"
+            );
+            builder = builder.no_proxy();
         }
         None => builder = builder.no_proxy(),
     }
@@ -540,10 +573,11 @@ impl PluginBridge for EngineBridge {
 
         let method = reqwest::Method::from_bytes(req.method.as_bytes())
             .map_err(|_| PluginError::InvalidOutput(format!("HTTP method 非法: {}", req.method)))?;
+        let net = self.net();
         let client = if auth_applied {
-            &self.auth_client
+            &net.auth_client
         } else {
-            &self.client
+            &net.client
         };
         let mut rb = client.request(method, parsed);
         for (k, v) in &req.headers {
@@ -1059,12 +1093,13 @@ impl PluginBridge for EngineBridge {
         // subdir，使同插件多次调用共享 nsig/player JS 等缓存；插件自带的
         // `--cache-dir`（只能是牢笼内相对路径）会覆盖此默认，仍在牢笼内。
         cmd.arg("--cache-dir").arg(jail.join(".cache"));
+        let ytdlp_proxy_url = self.net().ytdlp_proxy_url.clone();
         log_info!(
             "[ytdlp-exec] plugin={} 执行: {} --ignore-config --cache-dir <jail> {}{}",
             plugin_id,
             bin.display(),
             spec.args.join(" "),
-            if self.ytdlp_proxy_url.is_some() {
+            if ytdlp_proxy_url.is_some() {
                 " --proxy <redacted>"
             } else {
                 ""
@@ -1074,7 +1109,7 @@ impl PluginBridge for EngineBridge {
         // 宿主注入代理（#401）：放在 spec.args 之后——yt-dlp 同名开关后者生效，
         // 用户在 App 里配置的代理对子进程权威；未配置代理时不注入，插件自带的
         // `--proxy`（既有插件的自救路径）仍然可用。
-        if let Some(proxy_url) = &self.ytdlp_proxy_url {
+        if let Some(proxy_url) = &ytdlp_proxy_url {
             cmd.arg("--proxy").arg(proxy_url);
         }
         cmd.stdin(Stdio::null())

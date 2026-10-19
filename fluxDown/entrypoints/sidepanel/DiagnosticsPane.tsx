@@ -15,7 +15,7 @@ import { Icon } from "@/ui/components/Icon";
 import { showToast } from "@/ui/components/Toast";
 import { resourceDisplayName } from "@/ui/features/labels";
 import { useT } from "@/ui/i18n";
-import { syncProblemLabel } from "../options/panels/rules/sync-labels";
+import { syncProblemLabel, userSyncProblems } from "../options/panels/rules/sync-labels";
 
 interface Props {
   view: TabView | null;
@@ -200,9 +200,9 @@ export function DiagnosticsPane(props: Props): JSX.Element {
             <Row label={t("sidepanel.diag.lastSync")}>
               {sync.lastSyncAt ? new Date(sync.lastSyncAt).toLocaleString() : never}
             </Row>
-            {sync.problems.length > 0 ? (
+            {userSyncProblems(sync.problems).length > 0 ? (
               <Row label={t("sidepanel.diag.lastError")}>
-                <span class="sp-error">{sync.problems.map(syncProblemLabel).join("；")}</span>
+                <span class="sp-error">{userSyncProblems(sync.problems).map(syncProblemLabel).join("；")}</span>
               </Row>
             ) : null}
             {sync.host?.lastError ? (

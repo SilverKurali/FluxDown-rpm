@@ -8,6 +8,8 @@ mod port;
 mod push_view;
 mod search;
 mod sections;
+mod shortcut_display;
+mod shortcut_record;
 mod store;
 mod theme_library;
 mod ui;
@@ -18,6 +20,7 @@ mod view;
 pub use port::{PortFuture, SettingsPort};
 pub use push_view::{PushHost, PushView, WindowAction};
 pub use search::{SettingsSearchEntry, SettingsTarget, search_index};
+pub use shortcut_display::{shortcut_label, shortcut_recording};
 pub use store::{SettingsError, SettingsErrorKind, SettingsStore};
 pub use theme_library::sync_theme_library;
 pub use update_prompt::{

@@ -75,7 +75,7 @@ const GENERAL_INFO_MIN_WIDTH: f32 = 300.;
 const SOURCES_SECTION_WIDTH: f32 = 360.;
 /// 键值表标签列宽：详情、做种、高级与任务组概览共用，保证值列左缘对齐。
 const DETAIL_LABEL_WIDTH: f32 = 112.;
-/// 活动日志时间戳列宽（`YYYY-MM-DD HH:MM:SS.mmm` 等宽数字）。
+/// 活动日志时间戳宽度（`YYYY-MM-DD HH:MM:SS.mmm` 等宽数字），条目头部单独一行显示。
 const ACTIVITY_TIME_WIDTH: f32 = 168.;
 /// 空状态图标边长。
 const EMPTY_ICON_SIZE: f32 = 32.;
@@ -164,6 +164,8 @@ pub struct TaskDetailView {
     seed_baseline: Option<SeedLimits>,
     /// 错误信息复制按钮的反馈代次；非零 = 显示「已复制」勾选态，定时回落时比对代次防连点提前复位。
     error_copied: u32,
+    /// 日志「复制全部」按钮的反馈代次，语义同 `error_copied`。
+    log_copied: u32,
 }
 
 impl EventEmitter<TaskDetailEvent> for TaskDetailView {}
@@ -281,6 +283,7 @@ impl TaskDetailView {
             seed_upload_limit,
             seed_baseline: None,
             error_copied: 0,
+            log_copied: 0,
         };
         Self::spawn_speed_ticker(cx);
         this
@@ -332,6 +335,7 @@ impl TaskDetailView {
         self.runtime = None;
         self.closed = false;
         self.error_copied = 0;
+        self.log_copied = 0;
         self.seed_baseline = None;
         self.fetch_activity(cx);
         cx.notify();
@@ -766,8 +770,31 @@ impl TaskDetailView {
             return;
         }
         cx.write_to_clipboard(ClipboardItem::new_string(message));
-        let generation = self.error_copied.wrapping_add(1).max(1);
-        self.error_copied = generation;
+        self.flash_copied(cx, |this| &mut this.error_copied);
+    }
+
+    /// 日志页「复制全部」：按界面显示顺序（新→旧）导出已加载的全部条目。
+    fn copy_log(&mut self, cx: &mut Context<Self>) {
+        let mut text = String::new();
+        for entry in self.activity.entries().rev() {
+            let line = self.activity_line_text(entry, cx);
+            text.push_str(&format_activity_timestamp(entry.timestamp_ms));
+            text.push(' ');
+            text.push_str(&line);
+            text.push('\n');
+        }
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.flash_copied(cx, |this| &mut this.log_copied);
+    }
+
+    /// 复制按钮勾选态：递增代次并在 1.5s 后回落；代次不符说明期间又点过，不提前复位。
+    fn flash_copied(&mut self, cx: &mut Context<Self>, slot: fn(&mut Self) -> &mut u32) {
+        let counter = slot(self);
+        let generation = counter.wrapping_add(1).max(1);
+        *counter = generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -775,8 +802,9 @@ impl TaskDetailView {
                 .await;
 
             let Ok(()) = this.update(cx, |this, cx| {
-                if this.error_copied == generation {
-                    this.error_copied = 0;
+                let counter = slot(this);
+                if *counter == generation {
+                    *counter = 0;
                     cx.notify();
                 }
             }) else {
@@ -1875,10 +1903,40 @@ impl TaskDetailView {
                 .text_color(color)
                 .child(text)
         };
-        let mut content = v_flex().gap(tokens.spacing.xs).child(note(
-            self.t(cx, "detailLogHint"),
-            tokens.colors.muted_foreground,
-        ));
+        let has_entries = self.activity.entries().next().is_some();
+        let copied = self.log_copied != 0;
+        let copy_label = self.t(
+            cx,
+            if copied {
+                "detailLogCopied"
+            } else {
+                "detailCopyLog"
+            },
+        );
+        let mut content = v_flex().gap(tokens.spacing.xs).child(
+            h_flex()
+                .items_start()
+                .gap(tokens.spacing.sm)
+                .pb(tokens.spacing.xs)
+                .child(div().flex_1().min_w_0().child(note(
+                    self.t(cx, "detailLogHint"),
+                    tokens.colors.muted_foreground,
+                )))
+                .child(
+                    Button::new("detail-copy-log")
+                        .ghost()
+                        .control(cx)
+                        .icon(if copied {
+                            FluxIcon::Check
+                        } else {
+                            FluxIcon::Copy
+                        })
+                        .label(copy_label)
+                        .when(copied, |this| this.text_color(extended.colors.success))
+                        .disabled(!has_entries)
+                        .on_click(cx.listener(|this, _, _, cx| this.copy_log(cx))),
+                ),
+        );
         if truncated {
             content = content.child(note(
                 self.t(cx, "detailActivityTruncated"),
@@ -1936,54 +1994,47 @@ impl TaskDetailView {
                 tokens.colors.muted_foreground,
             ));
         }
-        content = content.children(self.activity.entries().rev().map(|entry| {
-            let kind_key = activity_kind_key(&entry.kind);
-            let label = self.t(cx, kind_key);
-            let state = if entry.kind == "status" {
-                entry
-                    .status
-                    .map(|status| self.strings.status_code_label(status))
-            } else {
-                None
-            };
-            let text = if let Some(state) = state {
-                format!("{label}: {state}")
-            } else if kind_key == "detailActivityKindUnknown" {
-                if entry.message.is_empty() {
-                    format!("{label} ({})", entry.kind)
-                } else {
-                    format!("{label} ({}): {}", entry.kind, entry.message)
-                }
-            } else if entry.message.is_empty() {
-                label.to_string()
-            } else {
-                format!("{label}: {}", entry.message)
-            };
-            h_flex()
-                .gap(tokens.spacing.sm)
-                .items_start()
-                .text_size(tokens.typography.xs.size)
-                .line_height(tokens.typography.xs.line_height)
-                .child(
-                    div()
-                        .flex_none()
-                        .w(active_theme(cx).text_extent(ACTIVITY_TIME_WIDTH))
-                        .font_features(tabular_numbers())
-                        .text_color(extended.colors.text_tertiary)
-                        .child(format_activity_timestamp(entry.timestamp_ms)),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .text_color(if entry.kind == "journal_overflow" {
-                            extended.colors.warning
-                        } else {
-                            tokens.colors.foreground
-                        })
-                        .child(text),
-                )
-        }));
+        let mut list = v_flex()
+            .rounded(tokens.radius.sm)
+            .border_1()
+            .border_color(extended.colors.hairline)
+            .overflow_hidden();
+        let total = self.activity.entries().count();
+        for (index, entry) in self.activity.entries().rev().enumerate() {
+            let text = self.activity_line_text(entry, cx);
+            list = list.child(
+                v_flex()
+                    .px(tokens.spacing.sm)
+                    .py(tokens.spacing.xs)
+                    .gap(px(2.))
+                    .when(index + 1 < total, |this| {
+                        this.border_b(extended.stroke.thin)
+                            .border_color(extended.colors.hairline)
+                    })
+                    .text_size(tokens.typography.xs.size)
+                    .line_height(tokens.typography.xs.line_height)
+                    .child(
+                        div()
+                            .w(active_theme(cx).text_extent(ACTIVITY_TIME_WIDTH))
+                            .font_features(tabular_numbers())
+                            .text_color(extended.colors.text_tertiary)
+                            .child(format_activity_timestamp(entry.timestamp_ms)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_color(if entry.kind == "journal_overflow" {
+                                extended.colors.warning
+                            } else {
+                                tokens.colors.foreground
+                            })
+                            .child(text),
+                    ),
+            );
+        }
+        if has_entries {
+            content = content.child(list);
+        }
         if self.activity.has_older() && !self.activity.is_loading() && !self.activity.failed() {
             content = content.child(
                 div().pt(tokens.spacing.xs).child(
@@ -1996,6 +2047,32 @@ impl TaskDetailView {
             );
         }
         content.into_any_element()
+    }
+
+    /// 单条活动的显示文本（界面与「复制全部」共用）。
+    fn activity_line_text(&self, entry: &fluxdown_protocol::TaskActivityDto, cx: &App) -> String {
+        let kind_key = activity_kind_key(&entry.kind);
+        let label = self.t(cx, kind_key);
+        let state = if entry.kind == "status" {
+            entry
+                .status
+                .map(|status| self.strings.status_code_label(status))
+        } else {
+            None
+        };
+        if let Some(state) = state {
+            format!("{label}: {state}")
+        } else if kind_key == "detailActivityKindUnknown" {
+            if entry.message.is_empty() {
+                format!("{label} ({})", entry.kind)
+            } else {
+                format!("{label} ({}): {}", entry.kind, entry.message)
+            }
+        } else if entry.message.is_empty() {
+            label.to_string()
+        } else {
+            format!("{label}: {}", entry.message)
+        }
     }
 
     fn render_advanced(&self, cx: &mut Context<Self>) -> AnyElement {

@@ -39,6 +39,8 @@ pub struct DaemonService {
     data_dir: PathBuf,
     #[cfg(feature = "plugins")]
     plugin_manager: Option<Arc<fluxdown_engine::plugin::PluginManager>>,
+    /// 宿主自身外网请求的统一出口（组件下载、agent 自更新等的代理与插件改写）。
+    egress: fluxdown_engine::egress::Egress,
     blobs: Arc<BlobStore>,
     #[cfg(feature = "components")]
     ffmpeg_installing: AtomicBool,
@@ -66,6 +68,12 @@ impl DaemonService {
             Arc<fluxdown_engine::plugin::PluginManager>,
         >,
     ) -> Self {
+        let egress = fluxdown_engine::egress::Egress::new(db.clone());
+        #[cfg(feature = "plugins")]
+        let egress = match &plugin_manager {
+            Some(manager) => egress.with_plugins(Arc::clone(manager)),
+            None => egress,
+        };
         Self {
             hello,
             events,
@@ -75,6 +83,7 @@ impl DaemonService {
             data_dir,
             #[cfg(feature = "plugins")]
             plugin_manager,
+            egress,
             #[cfg(feature = "components")]
             ffmpeg_installing: AtomicBool::new(false),
             #[cfg(feature = "components")]
@@ -1202,6 +1211,18 @@ impl DaemonService {
                 })
                 .await
             }
+            method::DAEMON_EGRESS_PLAN => {
+                let params = parse_params::<fluxdown_protocol::EgressPlanParams>(params)?;
+                if params.url.trim().is_empty() {
+                    return Err(invalid_argument("url", "url is required"));
+                }
+                let plan = self
+                    .egress
+                    .plan(&params.url, params.verified_payload)
+                    .await
+                    .map_err(|error| internal_error(format!("{error:#}")))?;
+                to_value(fluxdown_engine_protocol::egress_plan_to_dto(plan))
+            }
             method::DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH => {
                 match self
                     .actor
@@ -1676,27 +1697,15 @@ impl DaemonService {
         &self,
         component: fluxdown_protocol::ComponentKind,
     ) -> Result<fluxdown_protocol::ComponentVersions, RpcErrorObject> {
-        let config = self
-            .db
-            .get_all_config()
-            .await
-            .map_err(|error| internal_error(format!("{error:#}")))?;
-        let proxy = fluxdown_engine::proxy_config::ProxyConfig::from_config_map(&config);
-        let user_agent = config
-            .get("global_user_agent")
-            .map(String::as_str)
-            .unwrap_or_default();
-        let client = fluxdown_engine::downloader::build_client(&proxy, user_agent)
-            .map_err(|error| internal_error(format!("{error:#}")))?;
         match component {
             fluxdown_protocol::ComponentKind::Ffmpeg => {
-                fluxdown_engine::components::list_versions(&self.db, &client)
+                fluxdown_engine::components::list_versions(&self.db, &self.egress)
                     .await
                     .map(fluxdown_engine_protocol::ffmpeg_versions_to_dto)
                     .map_err(|error| internal_error(error.to_string()))
             }
             fluxdown_protocol::ComponentKind::Ytdlp => {
-                fluxdown_engine::components::list_ytdlp_versions(&self.db, &client)
+                fluxdown_engine::components::list_ytdlp_versions(&self.db, &self.egress)
                     .await
                     .map(fluxdown_engine_protocol::ytdlp_versions_to_dto)
                     .map_err(|error| internal_error(error.to_string()))
@@ -1714,18 +1723,6 @@ impl DaemonService {
             return Err(conflict_error("component install already in progress"));
         }
         let _guard = ComponentInstallGuard(flag);
-        let config = self
-            .db
-            .get_all_config()
-            .await
-            .map_err(|error| internal_error(format!("{error:#}")))?;
-        let proxy = fluxdown_engine::proxy_config::ProxyConfig::from_config_map(&config);
-        let user_agent = config
-            .get("global_user_agent")
-            .map(String::as_str)
-            .unwrap_or_default();
-        let client = fluxdown_engine::downloader::build_client(&proxy, user_agent)
-            .map_err(|error| internal_error(format!("{error:#}")))?;
         let component_name = component_name(component);
         let progress_events = self.events.clone();
         let progress = move |downloaded: u64, total: u64| {
@@ -1742,7 +1739,7 @@ impl DaemonService {
                 fluxdown_engine::components::install_ffmpeg(
                     &self.db,
                     &self.data_dir,
-                    &client,
+                    &self.egress,
                     version.as_deref(),
                     &progress,
                 )
@@ -1752,7 +1749,7 @@ impl DaemonService {
             fluxdown_protocol::ComponentKind::Ytdlp => fluxdown_engine::components::install_ytdlp(
                 &self.db,
                 &self.data_dir,
-                &client,
+                &self.egress,
                 version.as_deref(),
                 &progress,
             )

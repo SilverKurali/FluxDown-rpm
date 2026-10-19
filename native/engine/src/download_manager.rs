@@ -3388,6 +3388,9 @@ pub struct DownloadManager {
     /// 仅 `plugins` feature 下存在；feature 关时无此字段、下载主链路零变化。
     #[cfg(feature = "plugins")]
     plugin_manager: Option<Arc<crate::plugin::PluginManager>>,
+    /// 插件网络出口（与 `plugin_manager` 同时注入）：全局代理变更时随之重建。
+    #[cfg(feature = "plugins")]
+    plugin_bridge: Option<Arc<crate::plugin::bridge::EngineBridge>>,
     /// off-actor resolve 回流通道（worker → actor `on_resolve_ready`）。
     #[cfg(feature = "plugins")]
     resolve_tx: mpsc::UnboundedSender<ResolveOutcome>,
@@ -3545,6 +3548,8 @@ impl DownloadManager {
             #[cfg(feature = "plugins")]
             plugin_manager: None,
             #[cfg(feature = "plugins")]
+            plugin_bridge: None,
+            #[cfg(feature = "plugins")]
             resolve_tx,
             #[cfg(feature = "plugins")]
             resolve_rx: Some(resolve_rx),
@@ -3588,10 +3593,15 @@ impl DownloadManager {
     // 仅 `plugins` feature 下编译；feature 关时下载主链路零变化。
     // ===================================================================
 
-    /// 注入插件管理器（Engine::new 构造后调用）。
+    /// 注入插件管理器与其网络出口（Engine::new 构造后调用）。
     #[cfg(feature = "plugins")]
-    pub fn install_plugin_manager(&mut self, pm: Arc<crate::plugin::PluginManager>) {
+    pub fn install_plugin_manager(
+        &mut self,
+        pm: Arc<crate::plugin::PluginManager>,
+        bridge: Arc<crate::plugin::bridge::EngineBridge>,
+    ) {
         self.plugin_manager = Some(pm);
+        self.plugin_bridge = Some(bridge);
     }
 
     /// 获取插件管理器（供宿主管理接口读操作 + 集成测试）。
@@ -4921,6 +4931,13 @@ impl DownloadManager {
         self.proxy_config = config;
         // 仅 `useProxy` 端点用得上，但出口变了就得跟着重建。
         self.webhook.set_proxy_config(&self.proxy_config);
+        // 插件 `flux.fetch` / yt-dlp 与下载任务同一出口（GitHub 加速等测速请求随之换代理）。
+        #[cfg(feature = "plugins")]
+        if let Some(bridge) = &self.plugin_bridge
+            && let Err(error) = bridge.set_proxy_config(&self.proxy_config)
+        {
+            crate::logger::report_warning("plugin", "rebuild_bridge_proxy", &error);
+        }
         // 网络出口变化：域名连接上限是对【旧出口】的服务器策略观察，
         // 换代理后不再可信，清空重学（内存 + 持久化）。
         crate::segment_coordinator::clear_domain_conn_caps(&self.db);
@@ -4997,7 +5014,6 @@ impl DownloadManager {
     }
 
     /// Get a reference to the current proxy configuration.
-    #[allow(dead_code)]
     pub fn proxy_config(&self) -> &ProxyConfig {
         &self.proxy_config
     }

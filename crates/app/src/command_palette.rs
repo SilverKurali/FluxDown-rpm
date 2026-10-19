@@ -3,6 +3,7 @@
 //! 面板只在主窗口或设置窗口内打开；焦点在其他窗口（进度、新建下载等小窗）或没有窗口时，
 //! 先把主窗口调到前台再在其中打开。
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use fluxdown_ui_command_palette::{PaletteConfig, PaletteItem, PaletteItemKind, UsageStats};
@@ -68,9 +69,11 @@ pub fn toggle(cx: &mut App) {
 fn build_config(translator: &Translator, cx: &mut App) -> PaletteConfig {
     let mut english = translator.clone();
     english.set_locale("en");
+    let store = Desktop::global(cx).settings_store.clone();
     let labels = Labels {
         current: translator,
         english: &english,
+        hints: crate::shortcuts::hints(&store, translator, cx),
     };
     let mut items = commands(&labels, cx);
     items.extend(crate::plugin_contributions::palette_items(cx));
@@ -88,6 +91,27 @@ fn build_config(translator: &Translator, cx: &mut App) -> PaletteConfig {
 struct Labels<'a> {
     current: &'a Translator,
     english: &'a Translator,
+    /// 应用内快捷键提示（目录 id → 展示文本），来自用户当前绑定；未绑定的动作不在表内。
+    hints: HashMap<&'static str, String>,
+}
+
+/// 面板命令 id → 对应的应用内快捷键目录 id。
+fn command_shortcut_id(command_id: &str) -> Option<&'static str> {
+    Some(match command_id {
+        "cmd.new_download" => "new_download",
+        "cmd.open_torrent_file" => "open_torrent_file",
+        "cmd.pause_all" => "pause_all",
+        "cmd.resume_all" => "resume_all",
+        "cmd.select_all" => "select_all",
+        "cmd.search_tasks" => "focus_search",
+        "cmd.cycle_density" => "cycle_density",
+        "cmd.cycle_group_by" => "cycle_group",
+        "cmd.cycle_sort" => "cycle_sort",
+        "cmd.toggle_detail_panel" => "toggle_detail",
+        "cmd.open_settings" => "open_settings",
+        "cmd.quit" => "quit",
+        _ => return None,
+    })
 }
 
 impl Labels<'_> {
@@ -121,25 +145,27 @@ impl Labels<'_> {
         icon: FluxIcon,
         run: impl Fn(&mut Window, &mut App) + 'static,
     ) -> PaletteItem {
-        PaletteItem::new(PaletteItemKind::Command, id, self.title(title_key), run)
+        let item = PaletteItem::new(PaletteItemKind::Command, id, self.title(title_key), run)
             .icon(Icon::new(icon))
-            .aliases(self.english_alias(title_key))
+            .aliases(self.english_alias(title_key));
+        match command_shortcut_id(id).and_then(|shortcut| self.hints.get(shortcut)) {
+            Some(hint) => item.shortcut(hint.clone()),
+            None => item,
+        }
     }
 }
 
 /// 全局命令：应用级动作经窗口派发（冒泡到 app 的全局处理器），下载动作派发到主窗口下载页。
 fn commands(labels: &Labels, cx: &App) -> Vec<PaletteItem> {
     let mut items = vec![
-        labels
-            .command(
-                "cmd.new_download",
-                "menuNewDownload",
-                FluxIcon::Plus,
-                |w, cx| {
-                    dispatch(w, cx, &dl::NewDownload);
-                },
-            )
-            .shortcut(shortcut("N")),
+        labels.command(
+            "cmd.new_download",
+            "menuNewDownload",
+            FluxIcon::Plus,
+            |w, cx| {
+                dispatch(w, cx, &dl::NewDownload);
+            },
+        ),
         labels.command(
             "cmd.open_torrent_file",
             "openTorrentFile",
@@ -162,24 +188,20 @@ fn commands(labels: &Labels, cx: &App) -> Vec<PaletteItem> {
             FluxIcon::Trash2,
             |_, cx| run_in_downloads(cx, PageCommand::ClearFinished),
         ),
-        labels
-            .command(
-                "cmd.select_all",
-                "selectAll",
-                FluxIcon::CheckboxCheck,
-                |_, cx| {
-                    run_in_downloads(cx, PageCommand::SelectAll);
-                },
-            )
-            .shortcut(shortcut("A")),
-        labels
-            .command(
-                "cmd.search_tasks",
-                "searchTasksPlaceholder",
-                FluxIcon::Search,
-                |_, cx| run_in_downloads(cx, PageCommand::FocusSearch),
-            )
-            .shortcut(shortcut("F")),
+        labels.command(
+            "cmd.select_all",
+            "selectAll",
+            FluxIcon::CheckboxCheck,
+            |_, cx| {
+                run_in_downloads(cx, PageCommand::SelectAll);
+            },
+        ),
+        labels.command(
+            "cmd.search_tasks",
+            "searchTasksPlaceholder",
+            FluxIcon::Search,
+            |_, cx| run_in_downloads(cx, PageCommand::FocusSearch),
+        ),
         labels.command(
             "cmd.cycle_density",
             "menuCycleDensity",
@@ -198,14 +220,12 @@ fn commands(labels: &Labels, cx: &App) -> Vec<PaletteItem> {
             FluxIcon::ArrowUpDown,
             |_, cx| run_in_downloads(cx, PageCommand::CycleSort),
         ),
-        labels
-            .command(
-                "cmd.toggle_detail_panel",
-                "menuDetailPanel",
-                FluxIcon::PanelBottom,
-                |_, cx| run_in_downloads(cx, PageCommand::ToggleDetailPanel),
-            )
-            .shortcut(shortcut("I")),
+        labels.command(
+            "cmd.toggle_detail_panel",
+            "menuDetailPanel",
+            FluxIcon::PanelBottom,
+            |_, cx| run_in_downloads(cx, PageCommand::ToggleDetailPanel),
+        ),
         labels.command(
             "cmd.queue_manager",
             "manageQueueAction",
@@ -262,18 +282,14 @@ fn commands(labels: &Labels, cx: &App) -> Vec<PaletteItem> {
                 FluxIcon::User,
                 |_, cx| crate::activity::open_account(cx),
             )),
-            ActivityEntry::Settings => items.push(
-                labels
-                    .command(
-                        "cmd.open_settings",
-                        label_key,
-                        FluxIcon::Settings,
-                        |w, cx| {
-                            dispatch(w, cx, &OpenSettings);
-                        },
-                    )
-                    .shortcut(shortcut(",")),
-            ),
+            ActivityEntry::Settings => items.push(labels.command(
+                "cmd.open_settings",
+                label_key,
+                FluxIcon::Settings,
+                |w, cx| {
+                    dispatch(w, cx, &OpenSettings);
+                },
+            )),
         }
     }
 
@@ -314,11 +330,7 @@ fn commands(labels: &Labels, cx: &App) -> Vec<PaletteItem> {
             dispatch(w, cx, &Quit);
         })
         .aliases(labels.synonyms("commandPaletteQuitAliases"));
-    items.push(if cfg!(target_os = "macos") {
-        quit.shortcut(shortcut("Q"))
-    } else {
-        quit
-    });
+    items.push(quit);
     items
 }
 
@@ -425,13 +437,4 @@ fn customize_layout(cx: &mut App) {
             shell.update(cx, |shell, cx| shell.set_editing(true, cx));
         }
     });
-}
-
-/// 平台快捷键提示：macOS `⌘N`，其他平台 `Ctrl+N`。
-fn shortcut(key: &str) -> String {
-    if cfg!(target_os = "macos") {
-        format!("⌘{key}")
-    } else {
-        format!("Ctrl+{key}")
-    }
 }

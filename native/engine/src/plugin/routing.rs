@@ -141,6 +141,22 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// 无人值守定案：仍是候选的站点记录 > 仍是候选的已绑定回退插件 > 首个候选。
+fn unattended_pick(
+    stored: Option<&StoredSiteDefault>,
+    bound: &str,
+    candidates: &[PluginCandidate],
+) -> String {
+    let is_candidate = |identity: &str| candidates.iter().any(|c| c.identity == identity);
+    stored
+        .map(|s| s.identity.as_str())
+        .filter(|identity| is_candidate(identity))
+        .or_else(|| is_candidate(bound).then_some(bound))
+        .or_else(|| candidates.first().map(|c| c.identity.as_str()))
+        .unwrap_or(bound)
+        .to_owned()
+}
+
 impl PluginManager {
     /// 链接命中的已启用 resolver 插件（identity 升序）。`multi_only` 只取声明
     /// `"multi": true` 的 resolver（前置预解析用）。
@@ -217,6 +233,23 @@ impl PluginManager {
         Some(first)
     }
 
+    /// 不建任务的宿主自身下载（应用更新、组件、插件包）选用的 resolver：按无人值守任务的
+    /// 规则定案（站点记录 > 首个候选），不询问、不写站点记录。无命中返回 `None`。
+    pub async fn unattended_resolver(&self, url: &str) -> Option<String> {
+        let candidates = self.matching_resolvers(url, false).await;
+        match candidates.as_slice() {
+            [] => None,
+            [only] => Some(only.identity.clone()),
+            _ => {
+                let stored = match site_key(url) {
+                    Some(site) => self.read_site_default(&site).await,
+                    None => None,
+                };
+                Some(unattended_pick(stored.as_ref(), "", &candidates))
+            }
+        }
+    }
+
     /// 首次 resolve 前为待选任务定案（off-actor worker 调用）并写回任务绑定。
     ///
     /// `bound` 是建任务时绑定的回退插件；`unattended` 任务绝不询问。用户关闭选择框时
@@ -278,15 +311,7 @@ impl PluginManager {
         {
             return Some(stored.identity.clone());
         }
-        let is_candidate = |identity: &str| candidates.iter().any(|c| c.identity == identity);
-        let fallback = stored
-            .as_ref()
-            .map(|s| s.identity.as_str())
-            .filter(|identity| is_candidate(identity))
-            .or_else(|| is_candidate(bound).then_some(bound))
-            .or_else(|| candidates.first().map(|c| c.identity.as_str()))
-            .unwrap_or(bound)
-            .to_owned();
+        let fallback = unattended_pick(stored.as_ref(), bound, &candidates);
 
         if unattended {
             // 记录这次自动选择（不覆盖用户确认过的记录），插件页据此提示冲突并让用户确认。

@@ -11,15 +11,18 @@ function tierLabel(tier: Tier | undefined): string {
       return t("rules.sync.community");
     case "plugin":
       return t("rules.sync.plugin");
-    case "revocations":
-      return t("rules.sync.revocations");
     default:
       return "";
   }
 }
 
+/** 吊销列表是内部下架机制，相关问题不展示给用户。 */
+export function userSyncProblems(problems: RuleSyncProblem[]): RuleSyncProblem[] {
+  return problems.filter((problem) => problem.code !== "revocations_invalid" && problem.tier !== "revocations");
+}
+
 /**
- * 同步问题的本地化文案：选项页与诊断页共用。`code` 是稳定契约，`detail` 仅作补充。
+ * 同步问题的本地化文案：选项页与诊断页共用，调用方先经 `userSyncProblems` 过滤。`code` 是稳定契约，`detail` 仅作补充。
  * 在渲染中调用（组件已经 useT() 订阅语言切换）。
  */
 export function syncProblemLabel(problem: RuleSyncProblem): string {
@@ -34,7 +37,7 @@ export function syncProblemLabel(problem: RuleSyncProblem): string {
     case "rules_rejected":
       return t("rules.sync.problem.rulesRejected", { tier, count: String(problem.count ?? 0) });
     case "revocations_invalid":
-      return t("rules.sync.problem.revocationsInvalid");
+      return "";
   }
 }
 

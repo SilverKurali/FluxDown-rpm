@@ -371,12 +371,33 @@ export interface GatewayStatusDto {
 
 export type TrayUnavailableReason = 'notBuilt' | 'noDisplay' | 'noHost' | 'initFailed';
 
+/** agent 全局快捷键后端（Rust `GlobalShortcutBackend`）。 */
+export type GlobalShortcutBackend = 'unavailable' | 'windows' | 'macOs' | 'x11' | 'waylandPortal';
+
+/** 单个全局快捷键的注册结果（Rust `GlobalShortcutState`）。 */
+export type GlobalShortcutState = 'active' | 'inUse' | 'unsupported' | 'permissionRequired' | 'failed';
+
+export interface GlobalShortcutStatusDto {
+  action: string;
+  /** 规范触发器文本，如 `ctrl-shift-d` / `double:ctrl`。 */
+  trigger: string;
+  state: GlobalShortcutState;
+  detail?: string | null;
+}
+
+export interface GlobalShortcutsStatusDto {
+  backend: GlobalShortcutBackend;
+  entries: GlobalShortcutStatusDto[];
+}
+
 /** agent 系统外壳状态。 */
 export interface ShellStatusDto {
   trayAvailable: boolean;
   trayUnavailableReason: TrayUnavailableReason | null;
   /** true：关闭全部 UI 后 agent + daemon 继续驻留。 */
   resident: boolean;
+  /** 桌面 agent 的全局快捷键状态（Web 不展示；旧 agent 缺省）。 */
+  globalShortcuts?: GlobalShortcutsStatusDto;
 }
 
 /** 完成后关机状态。 */

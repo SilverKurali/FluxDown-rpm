@@ -135,6 +135,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         files: launch.torrent_files.clone(),
         activate: launch.activate_existing || !launch.capture_only,
         settings: launch.settings,
+        new_download: launch.new_download,
         progress_task: launch.progress_task.clone(),
     };
     let lock_wait = if launch.after_update || launch.relaunch {
@@ -264,7 +265,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         })
         .detach();
 
-        crate::menus::bind_keys(cx);
+        crate::shortcuts::install(cx, &settings_store, &translator);
         crate::menus::install(cx, &translator);
         crate::menus::install_global_actions(cx);
         let referral_visibility = cx.new(|_| SlotVisibility::default());
@@ -366,6 +367,8 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
                     }
                     if message.settings {
                         crate::windows::settings::open(cx);
+                    } else if message.new_download {
+                        crate::windows::new_download::open_default(cx);
                     } else if message.activate {
                         crate::windows::main::reveal(cx);
                     }
@@ -397,6 +400,8 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
 
         if launch.settings {
             after_session_settled(cx, crate::windows::settings::open);
+        } else if launch.new_download {
+            after_session_settled(cx, crate::windows::new_download::open_default);
         } else if launch.capture_only {
             // 由 agent 为待确认交互拉起：不开主窗口；确认窗口随快照 / 事件打开，全部关闭后由
             // 窗口注册表退出。启动链接提交完成后若首个快照里已无待确认项，直接退出。

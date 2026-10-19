@@ -422,6 +422,7 @@ dependencies = [
  "getrandom 0.4.3",
  "serde",
  "serde_repr",
+ "tokio",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
@@ -3341,6 +3342,7 @@ name = "fluxdown_agent"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "ashpd",
  "async-trait",
  "axum",
  "base64 0.22.1",
@@ -3383,6 +3385,7 @@ dependencies = [
  "windows 0.61.3",
  "windows-sys 0.59.0",
  "winreg 0.55.0",
+ "x11rb",
  "zip",
 ]
 
@@ -11744,6 +11747,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -14120,6 +14124,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

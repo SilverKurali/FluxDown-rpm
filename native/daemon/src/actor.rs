@@ -616,10 +616,12 @@ async fn dispatch_operation(
                 let urls = config.get("bt_tracker_sub_urls").cloned().unwrap_or_else(
                     fluxdown_engine::tracker_subscription::default_subscription_urls,
                 );
+                let proxy = engine.manager.proxy_config().clone();
                 let maintenance_tx = maintenance_tx.clone();
                 tokio::spawn(async move {
                     let outcome =
-                        fluxdown_engine::tracker_subscription::fetch_subscriptions(&urls).await;
+                        fluxdown_engine::tracker_subscription::fetch_subscriptions(&urls, &proxy)
+                            .await;
                     if maintenance_tx
                         .send(MaintenanceEvent::Tracker { outcome, ack })
                         .is_err()
@@ -650,11 +652,12 @@ async fn dispatch_operation(
                 let urls = config.get("ed2k_server_sub_urls").cloned().unwrap_or_else(
                     fluxdown_engine::ed2k::server_subscription::default_server_met_urls,
                 );
+                let proxy = engine.manager.proxy_config().clone();
                 let maintenance_tx = maintenance_tx.clone();
                 tokio::spawn(async move {
                     let outcome =
                         fluxdown_engine::ed2k::server_subscription::fetch_server_subscriptions(
-                            &urls,
+                            &urls, &proxy,
                         )
                         .await;
                     if maintenance_tx
@@ -692,9 +695,10 @@ async fn dispatch_operation(
                         return;
                     }
                 };
+                let proxy = engine.manager.proxy_config().clone();
                 let maintenance_tx = maintenance_tx.clone();
                 tokio::spawn(async move {
-                    let outcome = fluxdown_engine::ed2k::kad::fetch_nodes_dat(&url).await;
+                    let outcome = fluxdown_engine::ed2k::kad::fetch_nodes_dat(&url, &proxy).await;
                     if maintenance_tx
                         .send(MaintenanceEvent::Ed2kNodes { outcome, ack })
                         .is_err()

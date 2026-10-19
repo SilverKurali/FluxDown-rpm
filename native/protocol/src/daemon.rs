@@ -345,6 +345,49 @@ pub struct CdnReportAckParams {
     pub batch_id: String,
 }
 
+/// `daemon.egress.plan` 参数。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct EgressPlanParams {
+    /// 要请求的原始地址。
+    pub url: String,
+    /// 调用方会按独立来源的哈希 / 签名校验响应内容：只有这类载荷才允许插件改写地址。
+    /// 校验和、索引、版本清单等完整性锚必须为 `false`，否则插件可同时替换载荷与其校验和。
+    #[serde(default)]
+    pub verified_payload: bool,
+}
+
+/// 出口代理。`url` 可能含认证信息，只在本机服务间传递，不得写日志。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct EgressProxyDto {
+    /// 完整代理地址（`http://`、`https://`、`socks4://`、`socks5h://` …）。
+    pub url: String,
+    /// 已规范化的直连名单（逗号分隔，reqwest `NoProxy` 语法）；空 = 无例外。
+    #[serde(default)]
+    pub no_proxy: String,
+}
+
+/// `daemon.egress.plan` 结果：下载任务同一套代理与插件改写规则得出的请求方案。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct EgressPlanDto {
+    /// 首选地址：插件改写后的直链；未改写时等于原地址。
+    pub url: String,
+    /// 改写插件要求附带的请求头（只对改写后的地址生效）。
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// 改写地址的插件 identity；`None` = 未改写。改写地址失败或内容校验不符时调用方必须回退原地址。
+    #[serde(default)]
+    pub plugin: Option<String>,
+    /// 出口代理；`None` = 直连，调用方不得再套用环境 / 系统代理。
+    #[serde(default)]
+    pub proxy: Option<EgressProxyDto>,
+}
+
 /// 云端 CDN 先验配置经 agent 专用边界下发的可写键。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

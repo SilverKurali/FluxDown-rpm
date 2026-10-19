@@ -10,7 +10,7 @@ import { useT } from "@/ui/i18n";
 import { docExpiry } from "@/utils/doc-expiry";
 import { sendAction } from "@/utils/messaging";
 import { settings, updateSettings } from "../../lib/store";
-import { syncOutcomeLabels, syncProblemLabel } from "./sync-labels";
+import { syncOutcomeLabels, syncProblemLabel, userSyncProblems } from "./sync-labels";
 
 interface SyncCardProps {
   sync: RuleSyncStatus | null;
@@ -50,10 +50,9 @@ export function SyncCard(props: SyncCardProps): JSX.Element | null {
     [t("rules.sync.official"), sync?.official, false],
     [t("rules.sync.community"), sync?.community, true],
     [t("rules.sync.plugin"), sync?.plugin, false],
-    [t("rules.sync.revocations"), sync?.revocations, true],
   ];
   const now = Date.now();
-  const problems = sync?.problems ?? [];
+  const problems = userSyncProblems(sync?.problems ?? []);
   const host = sync?.host ?? null;
   const hostFetch = host?.lastFetchUnix;
   const outcome = sync?.lastOutcome ?? null;

@@ -47,7 +47,7 @@ import type {
 import { getEngine, getRuleSyncStatus, syncRemotePacks } from "./rules-store";
 import { compileWithDraft, engineSettled } from "./rules-store";
 import { getRuleHits } from "./rule-hits";
-import { toListItem } from "./rule-view";
+import { isListed, toListItem } from "./rule-view";
 import { BUILTIN_RULE_PREVIEW } from "@/utils/rule-preview";
 import { getCachedProfiles, getCachedSettings } from "./settings-cache";
 import {
@@ -452,6 +452,7 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
     const hits = await getRuleHits();
     return getEngine()
       .listRules()
+      .filter(isListed)
       .map((entry) => toListItem(entry, hits.get(entry.rule.id), entry.rule.tier === "builtin" && !BUILTIN_RULE_PREVIEW));
   },
 
@@ -460,7 +461,7 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
     const entry = getEngine()
       .listRules()
       .find((e) => e.rule.id === req.id);
-    if (!entry || (entry.rule.tier === "builtin" && !BUILTIN_RULE_PREVIEW)) return null;
+    if (!entry || !isListed(entry) || (entry.rule.tier === "builtin" && !BUILTIN_RULE_PREVIEW)) return null;
     return entry.rule;
   },
 

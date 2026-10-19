@@ -121,6 +121,7 @@ object HostMethod {
     const val daemonCdnReportsPeek = "daemon.cdnReports.peek"
     const val daemonCdnReportsAck = "daemon.cdnReports.ack"
     const val daemonCdnConfigApply = "daemon.cdnConfig.apply"
+    const val daemonEgressPlan = "daemon.egress.plan"
     const val daemonBtTrackerSubscriptionRefresh = "daemon.bt.trackerSubscription.refresh"
     const val daemonEd2kServerSubscriptionRefresh = "daemon.ed2k.serverSubscription.refresh"
     const val daemonDiagnosticsDescribe = "daemon.diagnostics.describe"

@@ -144,6 +144,8 @@ pub struct MarketClient {
     /// 包下载专用：重定向逐跳复查 https 与字面量 IP 守卫（初始 URL 的
     /// `mirror_url_allowed` 只管第一跳）。
     download_client: reqwest::Client,
+    /// 宿主自身下载的统一出口：包（content_hash 钉住）可经插件改写来源（如 GitHub 加速）。
+    egress: crate::egress::Egress,
     sources: Vec<String>,
 }
 
@@ -163,12 +165,12 @@ impl MarketClient {
         } else {
             sources
         };
-        let client = crate::downloader::build_client_builder(proxy, "", false)
+        let client = crate::egress::client_builder(proxy, "")
             .map_err(client_build_error)?
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .map_err(network_error)?;
-        let download_client = crate::downloader::build_client_builder(proxy, "", false)
+        let download_client = crate::egress::client_builder(proxy, "")
             .map_err(client_build_error)?
             .timeout(std::time::Duration::from_secs(20))
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -186,11 +188,13 @@ impl MarketClient {
             }))
             .build()
             .map_err(network_error)?;
+        let egress = crate::egress::Egress::new(db.clone()).with_plugins(manager.clone());
         Ok(Self {
             manager,
             db,
             client,
             download_client,
+            egress,
             sources,
         })
     }
@@ -330,30 +334,45 @@ impl MarketClient {
                 );
                 continue;
             }
-            let error = match self.download_one(url).await {
-                Ok(bytes) => {
-                    let actual = sha256_hex(&bytes);
-                    if actual == expected {
-                        return Ok(bytes);
-                    }
-                    MarketError::HashMismatch {
-                        expected: expected.clone(),
-                        actual,
-                    }
+            // 插件改写（如 GitHub 加速）只换来源，内容仍由 content_hash 钉住；改写地址
+            // 同样过镜像守卫，失败或内容不符回退原镜像地址。索引不经插件（它是完整性锚）。
+            let route = self.egress.route_verified(url).await;
+            for attempt in route.attempts() {
+                if !mirror_url_allowed(&attempt.url) {
+                    log_warn!(
+                        "[market] plugin={:?} version={:?} source={} rewritten by {:?} rejected by URL guard",
+                        entry.plugin_id,
+                        entry.version,
+                        safe_url(&attempt.url),
+                        attempt.plugin
+                    );
+                    continue;
                 }
-                Err(error) => error,
-            };
-            log_warn!(
-                "[market] plugin={:?} version={:?} mirror={} failed, trying next mirror: {error:#}",
-                entry.plugin_id,
-                entry.version,
-                safe_url(url)
-            );
-            if matches!(
-                error,
-                MarketError::HashMismatch { .. } | MarketError::TooLarge
-            ) {
-                verification_error = Some(error);
+                let error = match self.download_one(&attempt.url, &attempt.headers).await {
+                    Ok(bytes) => {
+                        let actual = sha256_hex(&bytes);
+                        if actual == expected {
+                            return Ok(bytes);
+                        }
+                        MarketError::HashMismatch {
+                            expected: expected.clone(),
+                            actual,
+                        }
+                    }
+                    Err(error) => error,
+                };
+                log_warn!(
+                    "[market] plugin={:?} version={:?} source={} failed, trying next source: {error:#}",
+                    entry.plugin_id,
+                    entry.version,
+                    safe_url(&attempt.url)
+                );
+                if matches!(
+                    error,
+                    MarketError::HashMismatch { .. } | MarketError::TooLarge
+                ) {
+                    verification_error = Some(error);
+                }
             }
         }
         let error = verification_error.unwrap_or(MarketError::AllMirrorsFailed);
@@ -366,13 +385,16 @@ impl MarketClient {
         Err(error)
     }
 
-    async fn download_one(&self, url: &str) -> Result<Vec<u8>, MarketError> {
-        let resp = self
-            .download_client
-            .get(url)
-            .send()
-            .await
-            .map_err(network_error)?;
+    async fn download_one(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<Vec<u8>, MarketError> {
+        let mut request = self.download_client.get(url);
+        for (name, value) in headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let resp = request.send().await.map_err(network_error)?;
         if !resp.status().is_success() {
             return Err(MarketError::Network(format!(
                 "HTTP {} at {}",

@@ -118,6 +118,7 @@ export const METHOD = {
   DAEMON_CDN_REPORTS_PEEK: 'daemon.cdnReports.peek',
   DAEMON_CDN_REPORTS_ACK: 'daemon.cdnReports.ack',
   DAEMON_CDN_CONFIG_APPLY: 'daemon.cdnConfig.apply',
+  DAEMON_EGRESS_PLAN: 'daemon.egress.plan',
 
   DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH: 'daemon.bt.trackerSubscription.refresh',
   DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH: 'daemon.ed2k.serverSubscription.refresh',
