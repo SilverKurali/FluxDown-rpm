@@ -331,6 +331,8 @@ const zhCN = {
   "float.audioVideo": "音视频",
   "float.protected": "受保护",
   "float.protectedHint": "该内容受 DRM 加密保护，下载只能得到无法播放的密文",
+  "float.browserOnly": "仅限网页内",
+  "float.browserOnlyHint": "该视频由网页在浏览器内生成（Service Worker 流式提供），服务器上没有可直接下载的地址，请使用网站自带的下载功能",
   "float.copyLink": "复制链接",
   "float.linkCopied": "链接已复制",
   "float.copyFailed": "复制失败",

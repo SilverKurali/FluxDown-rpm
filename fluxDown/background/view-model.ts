@@ -7,6 +7,8 @@
 import { urlGlobMatch } from "@/rules/glob";
 import type { CompiledRules } from "@/rules/engine";
 import type { DashManifest } from "@/utils/dash-manifest";
+import { browserOnlyReason } from "@/utils/download-source";
+import type { ServiceWorkerScopes } from "@/utils/download-source";
 import {
   buildMediaCandidates,
   isMediaCandidateVisible,
@@ -143,6 +145,10 @@ export interface ViewModelInput {
   probe: ProbeState;
   /** 钩子补注入晚于页面加载的帧。 */
   lateFrames: ReadonlySet<number>;
+  /** 页面上报的 Service Worker 作用域：作用域内、没有网络证据的地址只能由浏览器取得。 */
+  serviceWorkerScopes: ServiceWorkerScopes;
+  /** 该 URL 近期是否真的发往过网络（webRequest 请求头缓存）。 */
+  sawNetworkRequest: (url: string) => boolean;
 }
 
 const MEDIA_TYPES: ReadonlySet<ResourceType> = new Set(["video", "stream", "audio"]);
@@ -371,6 +377,12 @@ export function composeTabView(input: ViewModelInput): TabView {
   bindDeclared(candidates, elements, bindings, byId);
   inferBinding(candidates, elements, bindings, byId);
   const elementsByKey = new Map(evidenceElements.map((element) => [element.key, element]));
+  // webRequest 嗅探到的资源本身就是网络证据（请求头缓存只保留 60 s）。
+  const networkSeen = new Set(resources.filter((r) => r.detectedBy === "webRequest").map((r) => key(r.url)));
+  const evidenceOf = (url: string) => (networkSeen.has(key(url)) || input.sawNetworkRequest(url) ? "network" : "none");
+  // 规则（含桌面端插件下发的 plugin 层）显式声明的资源：地址由规则作者担保可交给 FluxDown
+  // （如 YouTube 播放页 URL 交给桌面端插件解析），SW 合成判定只针对没有规则覆盖的站点。
+  const ruleDeclared = new Set(resources.filter((r) => (r.ruleIds?.length ?? 0) > 0).map((r) => key(r.url)));
   /**
    * 关联到元素的候选带上元素的事实：元素标题（比页面标题准确，如推荐流 / 弹窗播放器里的单个视频）
    * 与 DRM 状态（EME 加密的内容下载得到的是密文）。
@@ -379,8 +391,24 @@ export function composeTabView(input: ViewModelInput): TabView {
     const element = binding ? elementsByKey.get(binding.elementKey) : undefined;
     const title = element?.title ?? "";
     const encrypted = element?.encrypted === true;
-    if (!title && !encrypted) return candidate;
-    return { ...candidate, ...(title ? { title } : {}), ...(encrypted ? { protected: true } : {}) };
+    // 每一档都有地址是 SW 合成的：整个候选只能由浏览器取得。
+    const browserOnly =
+      candidate.variants.length > 0 &&
+      candidate.variants.every((v) =>
+        [v.videoUrl, v.audioUrl].some(
+          (url) =>
+            url !== undefined &&
+            !ruleDeclared.has(key(url)) &&
+            browserOnlyReason([url], input.serviceWorkerScopes, evidenceOf) === "service-worker",
+        ),
+      );
+    if (!title && !encrypted && !browserOnly) return candidate;
+    return {
+      ...candidate,
+      ...(title ? { title } : {}),
+      ...(encrypted ? { protected: true } : {}),
+      ...(browserOnly ? { browserOnly: true } : {}),
+    };
   };
   const rows = (candidate: MediaCandidate, binding: CandidateBinding | undefined): CandidateRow => ({
     candidate: withElementFacts(candidate, binding),

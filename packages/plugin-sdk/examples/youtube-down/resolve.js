@@ -121,8 +121,9 @@ function friendlyError(stderr, withCookies) {
       ? "YouTube 要求验证「不是机器人」，当前 Cookie 未通过。请在浏览器重新登录 YouTube 后再从浏览器发起下载。"
       : "YouTube 要求验证「不是机器人」。请登录 YouTube 后从浏览器扩展发起下载（会自动携带 Cookie），或在插件设置里填写备用 Cookie。";
   }
+  // 带登录 Cookie 时缺运行时的最终 ERROR 是 "The page needs to be reloaded"，原因只在前面的 WARNING 里。
   if (/n challenge solving failed|No supported JavaScript runtime|Only images are available|nsig extraction failed/i.test(stderr)) {
-    return `yt-dlp 找不到可用的 JavaScript 运行时，无法求解 YouTube 签名。请安装 Deno 或 Node.js 并确保在系统 PATH 中。${detail}`;
+    return `yt-dlp 找不到可用的 JavaScript 运行时，无法求解 YouTube 签名。请安装 Deno、Node.js 或 Bun，并确保在终端里能直接运行。${detail}`;
   }
   if (/Private video|members-only|Join this channel|age.?restricted|confirm your age|inappropriate for some users/i.test(stderr)) {
     return `视频受限（私享 / 会员 / 年龄限制），需要有权限的登录 Cookie。${detail}`;
@@ -138,7 +139,8 @@ async function runYtdlp(ctx, args, url) {
   const avail = await flux.ytdlp.available();
   if (!avail.available) throw new Error("yt-dlp 组件未安装，请在 App「组件」页安装 yt-dlp（音视频合并另需 ffmpeg）");
 
-  const full = ["-J", "--no-warnings", ...jsRuntimeArgs(), ...args];
+  // 不加 --no-warnings：缺 JS 运行时等根因只出现在 WARNING 里，friendlyError 靠它们归因。
+  const full = ["-J", ...jsRuntimeArgs(), ...args];
   const clients = String(flux.settings.playerClients || "").trim();
   if (clients) full.push("--extractor-args", `youtube:player_client=${clients}`);
   const cookies = cookieFileContent(ctx);

@@ -48,6 +48,8 @@ export async function downloadCandidate(
   const candidate = row.candidate;
   // DRM 内容下载得到的是无法播放的密文，不发给下载器。
   if (candidate.protected) return { success: false, message: t("float.protectedHint") };
+  // SW 合成的地址引擎重放只会拿到网页。
+  if (candidate.browserOnly) return { success: false, message: t("float.browserOnlyHint") };
   const variant = variantId
     ? candidate.variants.find((v) => v.id === variantId)
     : defaultCandidateVariant(candidate);
@@ -94,10 +96,11 @@ export async function downloadPlayingMedia(): Promise<void> {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined) return;
   const view = await buildTabView(tab.id, { withHandoff: false });
-  const row = view.playing.find((r) => r.candidate.downloadable && !r.candidate.protected);
+  const row = view.playing.find((r) => r.candidate.downloadable && !r.candidate.protected && !r.candidate.browserOnly);
   if (!row) {
-    const protectedRow = view.playing.find((r) => r.candidate.protected);
-    notify(t("shortcut.downloadTitle"), protectedRow ? t("float.protectedHint") : t("shortcut.noPlayingMedia"));
+    const blocked = view.playing.find((r) => r.candidate.protected || r.candidate.browserOnly)?.candidate;
+    const hint = blocked?.protected ? t("float.protectedHint") : blocked ? t("float.browserOnlyHint") : t("shortcut.noPlayingMedia");
+    notify(t("shortcut.downloadTitle"), hint);
     return;
   }
   const result = await downloadCandidate(tab.id, row.candidate.id, row.playingVariantId ?? undefined, undefined);

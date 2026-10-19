@@ -241,13 +241,8 @@ async fn asks_once_then_remembers_site_default() {
     let mut fx = Fixture::new(selector.clone()).await;
 
     let first = fx.create("first.bin", false).await;
-    assert!(
-        fx.engine
-            .db
-            .is_task_resolver_choice_pending(&first)
-            .await
-            .unwrap()
-    );
+    // 建任务即起跑，off-actor worker 与此处并发定案并清除待选标记，这里断言待选必然竞态；
+    // 下方选择框恰好被询问一次即证明建任务时已落库待选（起跑按库内标记决定是否询问）。
     fx.drive(&first, true).await;
 
     assert_eq!(selector.calls.load(Ordering::SeqCst), 1);

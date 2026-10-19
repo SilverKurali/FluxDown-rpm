@@ -75,8 +75,8 @@ function installable(entry: MarketEntryDto): boolean {
 }
 
 /**
- * 每个插件一条（镜像 crates/extensions/src/market.rs `latest_per_plugin`）：优先最新可安装版本；
- * 全部撤回时取 sequence 最大者（仅用于展示撤回标记）。顺序保持各插件在索引中首次出现的位置。
+ * 每个插件一条（镜像 crates/extensions/src/market.rs `latest_per_plugin`）：最新可安装版本；
+ * 全部撤回（下架）的插件不出现。顺序保持各插件在索引中首次出现的位置。
  */
 export function latestPerPlugin(entries: readonly MarketEntryDto[]): MarketEntryDto[] {
   const best = new Map<string, MarketEntryDto>()
@@ -91,7 +91,7 @@ export function latestPerPlugin(entries: readonly MarketEntryDto[]): MarketEntry
     const better = a !== b ? a : entry.sequence > current.sequence
     if (better) best.set(entry.pluginId, entry)
   }
-  return [...best.values()]
+  return [...best.values()].filter(installable)
 }
 
 /** `MAJOR.MINOR.PATCH`（可带前导 `v`，忽略预发布 / 构建后缀）；无法解析返回 null。 */

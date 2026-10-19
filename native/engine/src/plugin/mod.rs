@@ -41,6 +41,7 @@ pub mod quickjs_host;
 pub mod runtime;
 pub mod semver;
 pub mod sniff_pack;
+mod tool_path;
 pub use manager::routing;
 pub use manager::{DisabledReason, LoadedPlugin, PluginInfo, PluginLoadStatus, PluginManager};
 pub use manifest::{PluginManifest, SettingField, SettingType, SettingWidget, SubscriptionDecl};

@@ -5,7 +5,7 @@
 ## 依赖
 
 - App「组件」页安装 **yt-dlp**；分离的音视频轨合并需要 **ffmpeg**。
-- 系统 PATH 中有 JavaScript 运行时（Deno、Node.js、QuickJS 或 Bun 任一）：yt-dlp 需要它求解 YouTube 的签名挑战。
+- JavaScript 运行时（Deno、Node.js、QuickJS 或 Bun 任一），且在终端里能直接运行：yt-dlp 需要它求解 YouTube 的签名挑战。App 调用 yt-dlp 时按登录 shell（macOS / Linux）或注册表（Windows）里的完整 PATH 查找，从 Dock / 开始菜单启动也一样。
 - 与索引仓的 `fluxdown@ytdlp` 插件同时启用时两者都匹配 YouTube 链接，只保留一个。
 
 ## 安装

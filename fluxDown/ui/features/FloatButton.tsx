@@ -272,8 +272,9 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
 
   if (!showBtn || !target) return <ToastHost />;
 
-  // 受保护（DRM 加密）内容：下载得到的是密文，按钮只说明原因，不提供下载。
-  const protectedOnly = rows.length > 0 && rows.every((r) => r.candidate.protected === true);
+  // 受保护（DRM 加密）或只能在浏览器内取得（SW 合成）的内容：按钮只说明原因，不提供下载。
+  const blocked = rows.length > 0 && rows.every((r) => r.candidate.protected === true || r.candidate.browserOnly === true);
+  const anyProtected = rows.some((r) => r.candidate.protected === true);
 
   // ===== 标签：有分辨率的播放档 > 元素实际高度 > 播放档（自动 / 原始）> 默认文案 =====
   const playingRow = rows.find((r) => r.playingVariantId);
@@ -282,8 +283,8 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
   // 「自动」「原始」不说明画质；此时元素正在播放的实际高度更有用。
   const genericVariant = !playingVariant || playingVariant.label === "auto" || playingVariant.label === "original";
   // 档位标签走与清晰度菜单相同的本地化（auto / original 等内部值不直接外露）
-  const label = protectedOnly
-    ? t("float.protected")
+  const label = blocked
+    ? t(anyProtected ? "float.protected" : "float.browserOnly")
     : !genericVariant && playingVariant
       ? variantLabel(t, playingVariant)
       : height > 0
@@ -293,8 +294,8 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
           : target.tag === "audio"
             ? t("float.downloadAudio")
             : t("float.download");
-  const titleText = protectedOnly
-    ? t("float.protectedHint")
+  const titleText = blocked
+    ? t(anyProtected ? "float.protectedHint" : "float.browserOnlyHint")
     : [playingRow?.candidate.title ?? rows[0]?.candidate.title, label].filter(Boolean).join(" · ");
 
   const flash = (kind: "done" | "error", message?: string): void => {
@@ -317,7 +318,7 @@ function FloatRoot(props: FloatRootProps): JSX.Element {
   const onClick = (): void => {
     if (state === "busy") return;
     const only = rows.length === 1 ? rows[0] : null;
-    if (!protectedOnly && only && only.candidate.variants.length === 1 && only.candidate.downloadable) {
+    if (!blocked && only && only.candidate.variants.length === 1 && only.candidate.downloadable) {
       void send(() =>
         sendAction({
           action: "downloadCandidate",

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { compileBundled } from "@/rules/engine";
 import type { DashManifest } from "@/utils/dash-manifest";
+import { ServiceWorkerScopes } from "@/utils/download-source";
 import type { DetectedResource } from "@/utils/resource-types";
 import { activeElement, bindCandidates, rankElement } from "./media-binding";
 import type { ElementState } from "./protocol";
@@ -60,6 +61,8 @@ function input(overrides: Partial<ViewModelInput>): ViewModelInput {
     site: { host: "www.bilibili.com", profileKey: null, profile: { intercept: "default", sniff: true, pageDot: true, floatButton: true, saveDir: "" } },
     probe: "live",
     lateFrames: new Set(),
+    serviceWorkerScopes: new ServiceWorkerScopes(),
+    sawNetworkRequest: () => false,
     ...overrides,
   };
 }
@@ -497,5 +500,75 @@ describe("推荐流播放器（抖音式：多元素预加载、复用元素换�
     const v = track("cur", "video", 1);
     const seen = element({ key: "s:1", bindings: [{ sbId: 1, mime: "video/mp4", kind: "video", exact: [v.url], temporal: [] }] });
     expect(composeTabView(input({ pageUrl: PAGE, resources: [v], elements: [seen], lateFrames: new Set([0]) })).probe).toBe("live");
+  });
+});
+
+describe("Service Worker 合成的地址", () => {
+  const TG_PAGE = "https://web.telegram.org/k/#@me";
+  const STREAM = "https://web.telegram.org/k/stream/%7B%22dcId%22%3A5%2C%22size%22%3A36948345%7D";
+  const tgScopes = new ServiceWorkerScopes();
+  tgScopes.add("https://web.telegram.org/k/");
+  const tg = (overrides: Partial<ViewModelInput>) =>
+    input({ pageUrl: TG_PAGE, serviceWorkerScopes: tgScopes, elements: [element({ currentSrc: STREAM })], ...overrides });
+
+  test("作用域内、没有任何网络请求：候选标为只能由浏览器取得", () => {
+    const view = composeTabView(tg({}));
+    expect(view.playing).toHaveLength(1);
+    expect(view.playing[0].candidate.browserOnly).toBe(true);
+  });
+
+  test("SW 直通到网络（webRequest 见过该地址）：照常可下载", () => {
+    expect(composeTabView(tg({ sawNetworkRequest: (u) => u === STREAM })).playing[0].candidate.browserOnly).toBeUndefined();
+    const sniffed: DetectedResource = {
+      id: STREAM,
+      url: STREAM,
+      filename: "a.mp4",
+      type: "video",
+      size: -1,
+      detectedBy: "webRequest",
+      detectedAt: 1,
+      tabId: 1,
+      pageUrl: TG_PAGE,
+      confidence: "high",
+    };
+    expect(composeTabView(tg({ resources: [sniffed] })).playing[0].candidate.browserOnly).toBeUndefined();
+  });
+
+  test("作用域外的同源地址不受影响", () => {
+    const view = composeTabView(tg({ elements: [element({ currentSrc: "https://web.telegram.org/a/video.mp4" })] }));
+    expect(view.playing[0].candidate.browserOnly).toBeUndefined();
+  });
+
+  test("规则声明的资源（插件 dom 规则把播放页交给桌面端解析）不受 SW 作用域判定影响", () => {
+    const YT_PAGE = "https://www.youtube.com/watch?v=v6Db0r0L1UU";
+    const ytScopes = new ServiceWorkerScopes();
+    ytScopes.add("https://www.youtube.com/");
+    const pageResource = (ruleIds?: string[]): DetectedResource => ({
+      id: YT_PAGE,
+      url: YT_PAGE,
+      filename: "",
+      type: "video",
+      size: -1,
+      detectedBy: "dom-scan",
+      detectedAt: 1,
+      tabId: 1,
+      pageUrl: YT_PAGE,
+      confidence: "high",
+      elementKey: "f1:1",
+      ...(ruleIds ? { ruleIds } : {}),
+    });
+    const view = (resource: DetectedResource) =>
+      composeTabView(
+        input({
+          pageUrl: YT_PAGE,
+          serviceWorkerScopes: ytScopes,
+          resources: [resource],
+          elements: [element()],
+        }),
+      );
+    const declared = view(pageResource(["plugin.fluxdown.youtube-down.watch-page"])).playing;
+    expect(declared.map((r) => [r.candidate.variants[0].videoUrl, r.candidate.browserOnly])).toEqual([[YT_PAGE, undefined]]);
+    // 没有规则担保的同一地址仍按 SW 合成处理
+    expect(view(pageResource()).playing.map((r) => r.candidate.browserOnly)).toEqual([true]);
   });
 });

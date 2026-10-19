@@ -85,7 +85,7 @@
     {
       "key": "jsRuntime",
       "title": "JS 运行时",
-      "description": "yt-dlp 需要 JavaScript 运行时求解 YouTube 的签名挑战，运行时必须在系统 PATH 中。自动：按 Deno → Node.js → QuickJS → Bun 的顺序取第一个可用的。",
+      "description": "yt-dlp 需要 JavaScript 运行时求解 YouTube 的签名挑战，运行时须在终端里能直接运行（App 按登录 shell / 系统环境变量的 PATH 查找）。自动：按 Deno → Node.js → QuickJS → Bun 的顺序取第一个可用的。",
       "type": "string",
       "widget": "select",
       "options": [

@@ -12,7 +12,7 @@ fn installable(entry: &MarketEntryDto) -> bool {
     entry.yanked == "none"
 }
 
-/// 每个插件一条：优先最新可安装版本；全部撤回时取 sequence 最大者（仅用于展示撤回标记）。
+/// 每个插件一条：最新可安装版本；全部撤回（下架）的插件不出现在市场列表中。
 /// 顺序保持各插件在索引中首次出现的位置。
 pub fn latest_per_plugin(entries: &[MarketEntryDto]) -> Vec<MarketEntryDto> {
     let mut order: Vec<&str> = Vec::new();
@@ -38,7 +38,12 @@ pub fn latest_per_plugin(entries: &[MarketEntryDto]) -> Vec<MarketEntryDto> {
     }
     order
         .into_iter()
-        .filter_map(|id| best.get(id).map(|entry| (*entry).clone()))
+        .filter_map(|id| {
+            best.get(id)
+                .copied()
+                .filter(|entry| installable(entry))
+                .cloned()
+        })
         .collect()
 }
 
@@ -384,15 +389,15 @@ mod tests {
     }
 
     #[test]
-    fn fully_yanked_plugin_shows_newest_entry_and_is_unavailable() {
+    fn fully_yanked_plugin_is_hidden_from_catalog() {
         let entries = [
             entry("a@x", "1.0.0", 1, "deprecated"),
             entry("a@x", "1.1.0", 2, "malicious"),
+            entry("b@y", "1.0.0", 3, "none"),
         ];
         let catalog = latest_per_plugin(&entries);
         assert_eq!(catalog.len(), 1);
-        assert_eq!(catalog[0].version, "1.1.0");
-        assert_eq!(market_action(&catalog[0], None), MarketAction::Unavailable);
+        assert_eq!(catalog[0].plugin_id, "b@y");
     }
 
     #[test]

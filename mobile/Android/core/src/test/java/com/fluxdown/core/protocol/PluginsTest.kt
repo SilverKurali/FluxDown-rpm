@@ -194,17 +194,15 @@ class PluginsTest {
         MarketEntry(pluginId = id, version = version, sequence = seq, yanked = yanked, permissions = perms)
 
     @Test
-    fun latestPerPluginPrefersInstallableThenHighestSequenceKeepingFirstSeenOrder() {
+    fun latestPerPluginPrefersInstallableAndHidesFullyYankedKeepingFirstSeenOrder() {
         val list = listOf(
             entry("a", "1.0.0", 1), entry("b", "1.0.0", 5, yanked = "malicious"),
             entry("a", "1.1.0", 2), entry("b", "1.1.0", 6, yanked = "deprecated"),
-            entry("a", "1.2.0", 3, yanked = "vulnerable"),
+            entry("a", "1.2.0", 3, yanked = "vulnerable"), entry("c", "1.0.0", 7),
         )
         val latest = PluginMarket.latestPerPlugin(list)
-        assertEquals(listOf("a", "b"), latest.map { it.pluginId })
+        assertEquals(listOf("a", "c"), latest.map { it.pluginId })
         assertEquals("1.1.0", latest[0].version)
-        assertEquals("1.1.0", latest[1].version)
-        assertFalse(latest[1].installable)
     }
 
     @Test

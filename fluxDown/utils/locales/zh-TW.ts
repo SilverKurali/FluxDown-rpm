@@ -333,6 +333,8 @@ const zhTW = {
   "float.audioVideo": "影音",
   "float.protected": "受保護",
   "float.protectedHint": "此內容受 DRM 加密保護，下載只能取得無法播放的密文",
+  "float.browserOnly": "僅限網頁內",
+  "float.browserOnlyHint": "此影片由網頁在瀏覽器內產生（Service Worker 串流提供），伺服器上沒有可直接下載的位址，請使用網站內建的下載功能",
   "float.copyLink": "複製連結",
   "float.linkCopied": "已複製連結",
   "float.copyFailed": "複製失敗",

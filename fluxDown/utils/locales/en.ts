@@ -344,6 +344,8 @@ const en: Record<MessageKey, string> = {
   "float.audioVideo": "Video + audio",
   "float.protected": "Protected",
   "float.protectedHint": "This content is DRM-protected; downloading would only produce encrypted data that cannot be played",
+  "float.browserOnly": "In-page only",
+  "float.browserOnlyHint": "This video is generated inside the browser by the page (service-worker stream); the server has no directly downloadable address, so use the site's own download option",
   "float.copyLink": "Copy link",
   "float.linkCopied": "Link copied",
   "float.copyFailed": "Copy failed",

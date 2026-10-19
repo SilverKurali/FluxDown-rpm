@@ -442,8 +442,8 @@ object PluginMarket {
     }
 
     /**
-     * 每个插件一条（`crates/extensions/src/market.rs::latest_per_plugin`）：优先最新可安装版本；
-     * 全部撤回时取 sequence 最大者（仅用于展示撤回标记）。顺序为各插件在索引中首次出现的位置。
+     * 每个插件一条（`crates/extensions/src/market.rs::latest_per_plugin`）：最新可安装版本；
+     * 全部撤回（下架）的插件不出现。顺序为各插件在索引中首次出现的位置。
      */
     fun latestPerPlugin(entries: List<MarketEntry>): List<MarketEntry> {
         val best = LinkedHashMap<String, MarketEntry>()
@@ -458,7 +458,7 @@ object PluginMarket {
             val better = if (a != b) a else entry.sequence > current.sequence
             if (better) best[entry.pluginId] = entry
         }
-        return best.values.toList()
+        return best.values.filter { it.installable }
     }
 
     /** `MAJOR.MINOR.PATCH`（可带前导 `v`，忽略预发布 / 构建后缀）；无法解析为 null。 */

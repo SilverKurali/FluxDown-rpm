@@ -53,7 +53,11 @@ export function QualityPicker(props: QualityPickerProps): JSX.Element {
           <div class="fd-qp-title" title={row.candidate.title}>
             {row.candidate.title}
           </div>
-          {row.candidate.protected ? <div class="fd-qp-note">{t("float.protectedHint")}</div> : null}
+          {row.candidate.protected ? (
+            <div class="fd-qp-note">{t("float.protectedHint")}</div>
+          ) : row.candidate.browserOnly ? (
+            <div class="fd-qp-note">{t("float.browserOnlyHint")}</div>
+          ) : null}
           {row.candidate.variants.map((v) => {
             const playing = row.playingVariantId === v.id;
             const meta = [
@@ -68,7 +72,7 @@ export function QualityPicker(props: QualityPickerProps): JSX.Element {
                 role="menuitem"
                 key={v.id}
                 title={`${row.candidate.title}\n${variantLabel(t, v)}${meta ? ` · ${meta}` : ""}`}
-                disabled={busy || !row.candidate.downloadable || row.candidate.protected === true}
+                disabled={busy || !row.candidate.downloadable || row.candidate.protected === true || row.candidate.browserOnly === true}
                 onClick={() => void pick(row.candidate.id, v.id)}
               >
                 <span class="fd-qp-label">{variantLabel(t, v)}</span>

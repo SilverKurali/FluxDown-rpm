@@ -4,8 +4,10 @@ import { effectiveRemoteMode } from "@/utils/download-dispatch";
 import { profileFor } from "@/utils/site-profiles";
 import { getCapabilities } from "./host";
 import type { TabView } from "./protocol";
+import { sawNetworkRequest } from "./request-cache";
 import { getEngine } from "./rules-store";
 import { getCachedProfiles, getCachedSettings } from "./settings-cache";
+import { loadServiceWorkerScopes } from "./sw-scopes";
 import {
   getElements,
   getRetiredElements,
@@ -40,7 +42,7 @@ async function tabTitle(tabId: number): Promise<{ title: string; url: string }> 
 /** `withHandoff: false`：不探测桌面端能力（徽标刷新、下载取候选等不需要 handoff 的路径）；handoff 填占位值。 */
 export async function buildTabView(tabId: number, opts: { withHandoff?: boolean } = {}): Promise<TabView> {
   const withHandoff = opts.withHandoff ?? true;
-  const [settings, profiles, caps, remoteMode, tab] = await Promise.all([
+  const [settings, profiles, caps, remoteMode, tab, , serviceWorkerScopes] = await Promise.all([
     getCachedSettings(),
     getCachedProfiles(),
     withHandoff ? getCapabilities() : Promise.resolve(null),
@@ -48,6 +50,7 @@ export async function buildTabView(tabId: number, opts: { withHandoff?: boolean 
     tabTitle(tabId),
     // SW 被本次请求唤醒时，会话快照恢复尚未完成；先等它，否则返回空视图（浮钮随之消失）。
     whenRestored(),
+    loadServiceWorkerScopes(),
   ]);
   const engine = getEngine();
   const resources = getResources(tabId);
@@ -76,5 +79,7 @@ export async function buildTabView(tabId: number, opts: { withHandoff?: boolean 
     site,
     probe: probeStateOf(tabId),
     lateFrames: lateHookFrames(tabId),
+    serviceWorkerScopes,
+    sawNetworkRequest,
   });
 }

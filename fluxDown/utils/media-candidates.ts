@@ -62,6 +62,11 @@ export interface MediaCandidate {
   provisional?: boolean;
   /** 内容受 DRM 保护（清单声明或播放元素触发了 EME 加密）：下载得到的是密文，不提供下载。 */
   protected?: boolean;
+  /**
+   * 字节只存在于浏览器内（页面 Service Worker 合成的地址，如 Telegram Web 的 `/k/stream/…`）：
+   * 引擎按 URL 重放只会拿到网页，不提供下载。
+   */
+  browserOnly?: boolean;
 }
 
 export interface MediaCandidateOptions {

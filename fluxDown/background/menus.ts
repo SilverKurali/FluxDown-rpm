@@ -20,7 +20,7 @@ import { fallbackAfterSendFailure, sendToFluxDown } from "./sender";
 import { getCachedSettings, onSettingsChanged } from "./settings-cache";
 import { getContextTarget } from "./tab-state";
 import { buildTabView } from "./tab-view";
-import { rowsForElement } from "./view-model";
+import { allRows, rowsForElement } from "./view-model";
 
 type MenuBase =
   | "fluxdown-send-link"
@@ -184,6 +184,18 @@ async function handleMenuClick(info: Browser.contextMenus.OnClickData, tab?: Bro
     if (tab?.id !== undefined && (await downloadContextElement(tab.id, channel))) return;
     notifyVideoUnavailable();
     return;
+  }
+
+  // 页面 SW 合成的视频地址（如 Telegram Web 的 /k/stream/…）：引擎重放只会拿到网页。
+  if (isMedia && tab?.id !== undefined) {
+    const view = await buildTabView(tab.id, { withHandoff: false });
+    const synthesized = allRows(view).some(
+      (r) => r.candidate.browserOnly && r.candidate.variants.some((v) => v.videoUrl === downloadUrl),
+    );
+    if (synthesized) {
+      notify(t("notify.videoSourceUnavailableTitle"), t("float.browserOnlyHint"));
+      return;
+    }
   }
 
   if (

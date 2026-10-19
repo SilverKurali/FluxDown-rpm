@@ -33,6 +33,7 @@ use super::runtime::{
     BridgeHttpRequest, BridgeHttpResponse, FfmpegAvailability, FfmpegOutcome, FfmpegSpec,
     PluginBridge, PluginError, PluginLogLevel, YtdlpAvailability, YtdlpOutcome, YtdlpSpec,
 };
+use super::tool_path::apply_full_path_env;
 
 /// 响应体上限（超限截断 + `truncated:true`）。
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -138,81 +139,6 @@ fn fs_name_reject_reason(name: &str) -> Option<&'static str> {
     }
     None
 }
-
-/// 为受管外部工具（yt-dlp/ffmpeg/…）子进程补全 `PATH`，使其能发现用户/系统
-/// 安装的 JS 运行时（node/deno）等——这些常装在**用户级 PATH**（如 scoop 的
-/// `~\scoop\shims`、`~\scoop\apps\nodejs\current`）。
-///
-/// 根因：GUI 应用（尤其非从终端启动）继承的 `PATH` 常**缺失用户环境变量段**，
-/// 子进程 `Command` 默认只继承这份残缺 `PATH` → yt-dlp 找不到 node → n-sig
-/// 挑战求解失败 → 只能拿到缩略图。此处从注册表读**权威完整 PATH**
-/// （`HKLM\...\Session Manager\Environment\Path` + `HKCU\Environment\Path`），
-/// 与进程现有 `PATH` 合并去重后设回子进程——不硬编码任何具体安装目录。
-///
-/// 仅 Windows 生效；其余平台 `Command` 继承的 `PATH` 已足够，为空操作。
-#[cfg(windows)]
-fn apply_full_path_env(cmd: &mut Command) {
-    use winreg::RegKey;
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-
-    fn read_path(root: winreg::RegKey, sub: &str) -> Option<String> {
-        root.open_subkey(sub)
-            .ok()
-            .and_then(|k| k.get_value::<String, _>("Path").ok())
-            .filter(|s| !s.trim().is_empty())
-    }
-
-    // 收集：进程现有 PATH（保留其顺序优先）+ 注册表系统/用户 PATH，去重合并。
-    let mut seen = std::collections::HashSet::new();
-    let mut merged: Vec<String> = Vec::new();
-    let mut push_all = |raw: &str| {
-        for seg in raw.split(';') {
-            let seg = seg.trim();
-            if seg.is_empty() {
-                continue;
-            }
-            let key = seg.to_ascii_lowercase();
-            if seen.insert(key) {
-                merged.push(seg.to_string());
-            }
-        }
-    };
-
-    let inherited = std::env::var("PATH").unwrap_or_default();
-    let inherited_segs = if inherited.is_empty() {
-        0
-    } else {
-        inherited
-            .split(';')
-            .filter(|s| !s.trim().is_empty())
-            .count()
-    };
-    push_all(&inherited);
-    if let Some(system) = read_path(
-        RegKey::predef(HKEY_LOCAL_MACHINE),
-        r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-    ) {
-        push_all(&system);
-    }
-    if let Some(user) = read_path(RegKey::predef(HKEY_CURRENT_USER), "Environment") {
-        push_all(&user);
-    }
-
-    // 持久化：记录补全前后段数（补入的多为用户级 PATH，如 node/deno 安装目录）。
-    log_info!(
-        "[ytdlp-env] PATH 补全: 继承 {inherited_segs} 段 → 合并 {} 段（+{} 段来自注册表）",
-        merged.len(),
-        merged.len().saturating_sub(inherited_segs)
-    );
-
-    if !merged.is_empty() {
-        cmd.env("PATH", merged.join(";"));
-    }
-}
-
-/// 非 Windows：`Command` 继承的 `PATH` 已足够，空操作。
-#[cfg(not(windows))]
-fn apply_full_path_env(_cmd: &mut Command) {}
 
 /// 唯一的「可全局路由单播」判定函数。三处复用，杜绝判定逻辑漂移。
 ///
@@ -1083,7 +1009,11 @@ impl PluginBridge for EngineBridge {
         // 6) 启动。`--ignore-config` 前置注入（挡 ambient 配置里的 --exec 等）；
         //    stdin=null；kill_on_drop 保超时/取消时清进程。
         let mut cmd = Command::new(&bin);
-        apply_full_path_env(&mut cmd);
+        {
+            // 首次调用要等登录 shell 给出 PATH：属宿主开销，同排队一样不计入脚本墙钟。
+            let _pause = spec.wall_pause.as_ref().map(|p| p.wait());
+            apply_full_path_env(&mut cmd).await;
+        }
         crate::proc::no_console_window(&mut cmd);
         cmd.current_dir(&work).arg("--ignore-config");
         if let Some(ff) = &ffmpeg {
@@ -1246,7 +1176,7 @@ async fn run_jailed_tool(
 
     // 5) 启动。`prefix` 前置注入；stdin=null；kill_on_drop 保超时/取消时清进程。
     let mut cmd = Command::new(bin);
-    apply_full_path_env(&mut cmd);
+    apply_full_path_env(&mut cmd).await;
     crate::proc::no_console_window(&mut cmd);
     cmd.current_dir(&work)
         .args(prefix)

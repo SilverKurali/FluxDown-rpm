@@ -186,7 +186,7 @@ export function ResourceList(props: Props): JSX.Element {
 
   const visibleKeys = [
     ...[...playing, ...others, ...unbound]
-      .filter((r) => r.candidate.downloadable && !r.candidate.protected)
+      .filter((r) => r.candidate.downloadable && !r.candidate.protected && !r.candidate.browserOnly)
       .map((r) => candKey(r.candidate.id)),
     ...files.map((f) => resKey(f.resource.id)),
   ];
@@ -279,11 +279,14 @@ export function ResourceList(props: Props): JSX.Element {
     if (c.variants.length > 1) metaParts.push(t("list.variantCount", { count: String(c.variants.length) }));
     if (withSubs && subtitleLangs.length) metaParts.push(`${t("list.subtitles")} ${subtitleLangs.join("/")}`);
     const isPlaying = row.playingVariantId !== null && row.binding !== "none";
+    const unavailable = !c.downloadable || c.protected === true || c.browserOnly === true;
     const metaText = c.protected
       ? t("float.protectedHint")
-      : c.downloadable
-        ? metaParts.join(" · ")
-        : t("panel.videoNeedsManifest");
+      : c.browserOnly
+        ? t("float.browserOnlyHint")
+        : c.downloadable
+          ? metaParts.join(" · ")
+          : t("panel.videoNeedsManifest");
     return (
       <div class="fd-row-wrap" key={key}>
         <div class={`fd-row${selected.has(key) ? " fd-selected" : ""}`}>
@@ -291,7 +294,7 @@ export function ResourceList(props: Props): JSX.Element {
             type="checkbox"
             class="fd-check"
             checked={selected.has(key)}
-            disabled={!c.downloadable || c.protected === true}
+            disabled={unavailable}
             onChange={(e) => toggle(key, (e.currentTarget as HTMLInputElement).checked)}
           />
           <Icon kind="video" size={18} />
@@ -314,7 +317,7 @@ export function ResourceList(props: Props): JSX.Element {
           <IconButton
             icon="download"
             label={t("panel.download")}
-            disabled={busy || !c.downloadable || c.protected === true}
+            disabled={busy || unavailable}
             onClick={() => void downloadRow(row)}
           />
           <div class="fd-menu-anchor" data-menu>

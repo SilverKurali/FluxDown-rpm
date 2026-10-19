@@ -621,6 +621,15 @@ export function start(): void {
   window.addEventListener("popstate", () => notifyPageUrl("pop"));
   // hash 路由（`#/video/1` → `#/video/2`）不经过 history API；是否算换页由 page-nav 按 hash 形态判定
   window.addEventListener("hashchange", () => notifyPageUrl("push"));
+  // Navigation API 拦截的同文档导航（YouTube 站内换片：navigate 事件 intercept）不经过 history API。
+  // history API 调用也会触发此事件；同一次 URL 变化由 notifyPageUrl 按 lastHref 去重。
+  if ("navigation" in window && window.navigation instanceof EventTarget) {
+    window.navigation.addEventListener("currententrychange", (event) => {
+      const type = "navigationType" in event ? event.navigationType : null;
+      if (type === "push" || type === "replace") notifyPageUrl(type);
+      else if (type === "traverse") notifyPageUrl("pop");
+    });
+  }
 
   // ===== shadow DOM：通知 ISOLATED 观察新挂的 shadow root 里的媒体元素 =====
   wrapMethod(Element.prototype, "attachShadow", (orig) =>
