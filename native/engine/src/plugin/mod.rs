@@ -36,6 +36,7 @@ pub mod install;
 pub mod manager;
 pub mod manifest;
 pub mod market;
+mod package_revision;
 pub mod quickjs;
 pub mod quickjs_host;
 pub mod runtime;

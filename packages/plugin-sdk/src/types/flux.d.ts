@@ -616,6 +616,16 @@ export interface RequestPatch {
   segments?: number;
   maxConnections?: number;
   /**
+   * HTTP only; must be >= 65536 (64 KiB). Bytes. Caps the `Range` span of every data request
+   * of this task: each segment worker requests its range in windows of at most this size, and
+   * single-stream / fallback downloads send only bounded `Range` requests of at most this
+   * size (never a plain GET or an open-ended `bytes=N-`). Use it for direct links that reject
+   * large ranges, e.g. a cloud-drive CDN that answers 403 above ~5 MiB per request. Needs a
+   * known `totalBytes` and a server that honours `Range`; the metadata probe requests are
+   * unaffected. Not allowed in `refresh` results.
+   */
+  maxRangeBytes?: number;
+  /**
    * HTTP only, same meaning as in a resolver result: skip the metadata probe for this run
    * (use for one-time credentials a probe would burn).
    */

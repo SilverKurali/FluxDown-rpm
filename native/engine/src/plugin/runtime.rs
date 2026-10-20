@@ -376,6 +376,10 @@ pub struct BridgeHttpRequest {
     /// 由运行时注入，插件脚本不能自行打开认证能力。
     #[serde(skip)]
     pub auth_allowed: bool,
+    /// 由运行时注入（仅开发模式插件为 true），插件脚本不能自行打开：
+    /// 允许访问环回 / 私网等非公网地址，便于连接本机服务联调。
+    #[serde(skip)]
+    pub private_network_allowed: bool,
 }
 
 impl Default for BridgeHttpRequest {
@@ -387,6 +391,7 @@ impl Default for BridgeHttpRequest {
             body: None,
             auth_ref: None,
             auth_allowed: false,
+            private_network_allowed: false,
         }
     }
 }
@@ -557,6 +562,9 @@ pub struct HostContext {
     /// manifest `permissions` 是否含 `"auth"`——决定是否允许插件读取/保存
     /// 通用认证凭据以及让 `flux.fetch` 自动注入凭据。
     pub auth_permitted: bool,
+    /// 插件是否为开发模式（「从目录安装」）。仅此类插件的 `flux.fetch` 可访问
+    /// 非公网地址（环回 / 私网）；正式安装的插件恒为 false。
+    pub private_network_allowed: bool,
 }
 
 // ---------------------------------------------------------------------------

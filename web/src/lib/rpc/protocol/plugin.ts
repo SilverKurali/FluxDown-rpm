@@ -120,6 +120,8 @@ export interface PluginDto {
   networkHosts: string[];
   /** 插件包在 daemon 主机上的绝对目录（仅已加载插件有值）。 */
   packageDir?: string;
+  /** 插件包修订号：包代码被替换（安装 / 升级 / dev 安装 / dev 重载）后变化，只做相等比较；旧 daemon 不下发。 */
+  packageRevision?: number;
 }
 
 /** 插件平台登录请求。 */

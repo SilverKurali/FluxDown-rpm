@@ -1,6 +1,11 @@
 //! agent 到 daemon 的单连接 JSON-RPC 客户端与重连快照恢复。
+//!
+//! 端点发现：独立 `fluxdownd` 在 `daemon.token` 同目录发布实际监听地址
+//! （[`DAEMON_ENDPOINT_FILE`]，默认端口被占用 / 落在系统保留区间时为系统分配端口），每次连接前
+//! 重读。显式 `FLUXDOWN_DAEMON_URL` 与嵌入式宿主报告的地址是固定端点，不读该文件。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{PoisonError, RwLock};
@@ -10,6 +15,7 @@ use fluxdown_protocol::handshake::{
     AuthChallengeParams, AuthChallengeResult, AuthProveParams, SYSTEM_AUTH_CHALLENGE,
     SYSTEM_AUTH_PROVE, client_proof, http_credential, verify_server_proof,
 };
+use fluxdown_protocol::local_service::{DAEMON_ENDPOINT_FILE, LocalEndpoint};
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
     ApplicationErrorCode, EventFrame, METHOD_NOT_FOUND_CODE, RequestId, RpcErrorData,
@@ -32,83 +38,294 @@ use crate::supervisor::DaemonSupervisor;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// daemon 默认控制面地址（`fluxdownd` 的 `DEFAULT_DAEMON_BIND`）。只在本数据目录的 daemon
+/// 在运行却未发布端点时使用：旧版 daemon 只监听这里，从不发布端点文件。
+pub(crate) const DEFAULT_DAEMON_RPC_URL: &str = "ws://127.0.0.1:17801/rpc";
+
+/// daemon 端点来源。
+#[derive(Clone)]
+enum DaemonEndpoint {
+    /// 显式 `FLUXDOWN_DAEMON_URL` / 嵌入式宿主报告的地址：只连它。
+    Fixed(String),
+    /// 读 daemon 发布的端点文件；文件缺失时按 `daemon.lock` 进程租约判断是否有本数据目录的
+    /// daemon 在运行（旧版 / 尚未完成启动）。
+    Discovered {
+        endpoint_file: PathBuf,
+        lease_file: PathBuf,
+    },
+}
+
+/// `daemon.token` 来源：嵌入式宿主直接给出；独立进程每次连接前从文件读取（首次启动时 daemon
+/// 尚未生成，生成前不连接）。
+#[derive(Clone)]
+enum DaemonToken {
+    Fixed(Arc<str>),
+    File(PathBuf),
+}
+
 /// daemon 客户端配置。
 #[derive(Clone)]
 pub struct DaemonClientConfig {
-    pub rpc_url: String,
-    /// `daemon.token` 的内容：只用于握手 MAC 的密钥，永不发送，也不当作 HTTP 凭据。
-    token: Arc<str>,
+    endpoint: DaemonEndpoint,
+    /// 只用于握手 MAC 的密钥，永不发送，也不当作 HTTP 凭据。
+    token: DaemonToken,
     http: HttpSession,
+    /// 最近一次解析出的连接地址（诊断展示）。
+    last_url: Arc<RwLock<String>>,
 }
 
 impl DaemonClientConfig {
+    /// 固定地址与 token（嵌入式宿主、测试）。
     #[must_use]
     pub fn new(rpc_url: impl Into<String>, token: impl Into<String>) -> Self {
+        let rpc_url = rpc_url.into();
         Self {
-            rpc_url: rpc_url.into(),
-            token: Arc::from(token.into()),
+            last_url: Arc::new(RwLock::new(rpc_url.clone())),
+            endpoint: DaemonEndpoint::Fixed(rpc_url),
+            token: DaemonToken::Fixed(Arc::from(token.into())),
             http: HttpSession::default(),
         }
     }
 
-    /// 与本配置的 daemon 连接绑定的 HTTP 凭据句柄（`/blobs`、`/files`、`/exports` 用）。
+    /// 由 agent 监管的独立 `fluxdownd`：`explicit_url`（`FLUXDOWN_DAEMON_URL`）优先，否则按
+    /// `token_file` 同目录的端点文件发现；token 每次连接前从 `token_file` 读取。
+    #[must_use]
+    pub fn discovered(
+        explicit_url: Option<String>,
+        token_file: PathBuf,
+        daemon_data_dir: &Path,
+    ) -> Self {
+        let endpoint = match explicit_url {
+            Some(url) => DaemonEndpoint::Fixed(url),
+            None => DaemonEndpoint::Discovered {
+                endpoint_file: token_file
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or(daemon_data_dir)
+                    .join(DAEMON_ENDPOINT_FILE),
+                lease_file: daemon_data_dir.join("daemon.lock"),
+            },
+        };
+        let label = match &endpoint {
+            DaemonEndpoint::Fixed(url) => url.clone(),
+            DaemonEndpoint::Discovered { .. } => DEFAULT_DAEMON_RPC_URL.to_owned(),
+        };
+        Self {
+            endpoint,
+            token: DaemonToken::File(token_file),
+            http: HttpSession::default(),
+            last_url: Arc::new(RwLock::new(label)),
+        }
+    }
+
+    /// 与本配置的 daemon 连接绑定的 HTTP 访问句柄（`/blobs`、`/files`、`/exports` 用）。
     #[must_use]
     pub fn http_session(&self) -> HttpSession {
         self.http.clone()
     }
 
-    /// 拒绝非 loopback daemon URL。
-    pub fn validate(&self) -> Result<(), DaemonClientError> {
-        let url = reqwest::Url::parse(&self.rpc_url)
-            .map_err(|error| DaemonClientError::Configuration(error.to_string()))?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| DaemonClientError::Configuration("daemon URL has no host".to_owned()))?;
-        let loopback = host == "localhost"
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback());
-        if loopback {
-            Ok(())
-        } else {
-            Err(DaemonClientError::Configuration(
-                "daemon URL must be loopback".to_owned(),
-            ))
-        }
-    }
-}
-
-/// daemon 专用 HTTP 端点使用的会话级凭据。
-///
-/// 只在 WebSocket 握手证实对端持有 `daemon.token` 之后才存在，随连接断开而撤销；
-/// 没有会话时为 `None`，调用方必须当作 daemon 不可用，而不是退回长期 token。
-#[derive(Clone, Default)]
-pub struct HttpSession {
-    credential: Arc<RwLock<Option<String>>>,
-}
-
-impl HttpSession {
-    /// 当前会话的 HTTP 凭据。
+    /// 最近一次连接（或尝试连接）的 daemon RPC 地址，仅供诊断展示。
     #[must_use]
-    pub fn credential(&self) -> Option<String> {
-        self.credential
+    pub fn endpoint_label(&self) -> String {
+        self.last_url
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
-    pub(crate) fn install(&self, credential: String) {
-        *self
-            .credential
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(credential);
+    /// 拒绝非 loopback 的固定 daemon URL（发现的端点在读取时校验）。
+    pub fn validate(&self) -> Result<(), DaemonClientError> {
+        match &self.endpoint {
+            DaemonEndpoint::Fixed(url) => {
+                validate_loopback_url(url).map_err(DaemonClientError::Configuration)
+            }
+            DaemonEndpoint::Discovered { .. } => Ok(()),
+        }
+    }
+
+    /// 本轮连接的目标。`own_child_alive`：本进程监管的 daemon 子进程仍在运行（它启动完成后一定
+    /// 会发布端点，发布前不去连默认地址上可能属于别人的进程）。
+    async fn resolve(&self, own_child_alive: bool) -> Result<Resolution, ConnectError> {
+        let target = match &self.endpoint {
+            DaemonEndpoint::Fixed(url) => DaemonTarget {
+                url: url.clone(),
+                source: TargetSource::Fixed,
+            },
+            DaemonEndpoint::Discovered {
+                endpoint_file,
+                lease_file,
+            } => match read_published_endpoint(endpoint_file).await? {
+                Some(url) => DaemonTarget {
+                    url,
+                    source: TargetSource::Published,
+                },
+                None if own_child_alive => return Ok(Resolution::NotReady),
+                None if crate::lifecycle::daemon_lease_held(lease_file) => DaemonTarget {
+                    url: DEFAULT_DAEMON_RPC_URL.to_owned(),
+                    source: TargetSource::Default,
+                },
+                None => return Ok(Resolution::NotReady),
+            },
+        };
+        target.url.clone_into(
+            &mut self
+                .last_url
+                .write()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        Ok(Resolution::Connect(target))
+    }
+
+    /// 握手密钥；独立 daemon 尚未生成 token 时为 [`ConnectError::NotReady`]。
+    async fn load_token(&self) -> Result<Arc<str>, ConnectError> {
+        match &self.token {
+            DaemonToken::Fixed(token) => Ok(token.clone()),
+            DaemonToken::File(path) => match tokio::fs::read_to_string(path).await {
+                Ok(text) if !text.trim().is_empty() => Ok(Arc::from(text.trim())),
+                Ok(_) => Err(ConnectError::NotReady),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Err(ConnectError::NotReady)
+                }
+                Err(error) => Err(ConnectError::Transient(format!(
+                    "could not read {}: {error}",
+                    path.display()
+                ))),
+            },
+        }
+    }
+}
+
+/// 一次连接尝试的目标地址及其来源（决定拒绝 / 冒充时的处理方式）。
+#[derive(Clone, Debug)]
+pub(crate) struct DaemonTarget {
+    url: String,
+    source: TargetSource,
+}
+
+impl DaemonTarget {
+    fn port(&self) -> Option<u16> {
+        reqwest::Url::parse(&self.url)
+            .ok()
+            .and_then(|url| url.port_or_known_default())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TargetSource {
+    /// 显式 / 嵌入式地址：拒绝即拉起，冒充者致命。
+    Fixed,
+    /// daemon 发布的端点：连不上或对端不是本数据目录的 daemon，都说明文件已过期。
+    Published,
+    /// 本数据目录的 daemon 在运行却未发布端点：旧版 daemon，或仍在启动的新版 daemon。
+    Default,
+}
+
+enum Resolution {
+    Connect(DaemonTarget),
+    /// 本数据目录暂时没有可连的 daemon：未运行，或本进程拉起的 daemon 尚未发布端点。
+    NotReady,
+}
+
+/// 读取 daemon 发布的端点；文件不存在为 `None`。内容无效视为暂时性故障（daemon 总是原子
+/// 替换该文件，下次启动时会删除重写），按退避重试并记录原因。
+async fn read_published_endpoint(path: &Path) -> Result<Option<String>, ConnectError> {
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(ConnectError::Transient(format!(
+                "could not read {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let endpoint = serde_json::from_slice::<LocalEndpoint>(&bytes).map_err(|error| {
+        ConnectError::Transient(format!("{} is not valid: {error}", path.display()))
+    })?;
+    validate_loopback_url(&endpoint.rpc_url).map_err(|error| {
+        ConnectError::Transient(format!("{} is not valid: {error}", path.display()))
+    })?;
+    Ok(Some(endpoint.rpc_url))
+}
+
+/// daemon RPC 地址只能是回环上的 `ws://`。
+fn validate_loopback_url(url: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(url).map_err(|error| error.to_string())?;
+    if url.scheme() != "ws" {
+        return Err("daemon URL must use ws".to_owned());
+    }
+    let Some(host) = url.host_str() else {
+        return Err("daemon URL has no host".to_owned());
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if loopback {
+        Ok(())
+    } else {
+        Err("daemon URL must be loopback".to_owned())
+    }
+}
+
+/// 已认证 daemon 会话的 HTTP 访问参数：会话所连 daemon 的 HTTP 基址与会话级凭据。
+#[derive(Clone, Debug)]
+pub struct DaemonHttpAccess {
+    /// `http://<daemon 地址>`，路径为空。
+    pub base_url: reqwest::Url,
+    pub credential: String,
+}
+
+impl DaemonHttpAccess {
+    /// `ws://host:port/rpc` → `http://host:port`。
+    pub(crate) fn from_rpc_url(rpc_url: &str, credential: String) -> Result<Self, String> {
+        let mut base_url = reqwest::Url::parse(rpc_url).map_err(|error| error.to_string())?;
+        let scheme = match base_url.scheme() {
+            "ws" | "http" => "http",
+            "wss" | "https" => "https",
+            other => return Err(format!("unsupported daemon URL scheme {other}")),
+        };
+        base_url
+            .set_scheme(scheme)
+            .map_err(|()| "daemon URL scheme is not settable".to_owned())?;
+        base_url.set_path("");
+        base_url.set_query(None);
+        base_url.set_fragment(None);
+        Ok(Self {
+            base_url,
+            credential,
+        })
+    }
+}
+
+/// daemon 专用 HTTP 端点使用的会话级访问参数。
+///
+/// 只在 WebSocket 握手证实对端持有 `daemon.token` 之后才存在，随连接断开而撤销；
+/// 没有会话时为 `None`，调用方必须当作 daemon 不可用，而不是退回长期 token。基址随会话
+/// 一起给出：daemon 换了端口重连后，HTTP 请求跟着新会话走。
+#[derive(Clone, Default)]
+pub struct HttpSession {
+    access: Arc<RwLock<Option<DaemonHttpAccess>>>,
+}
+
+impl HttpSession {
+    /// 当前会话的 HTTP 访问参数。
+    #[must_use]
+    pub fn access(&self) -> Option<DaemonHttpAccess> {
+        self.access
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn install(&self, access: DaemonHttpAccess) {
+        *self.access.write().unwrap_or_else(PoisonError::into_inner) = Some(access);
     }
 
     fn clear(&self) {
-        *self
-            .credential
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self.access.write().unwrap_or_else(PoisonError::into_inner) = None;
     }
 }
 
@@ -383,13 +600,19 @@ impl DaemonClient {
     }
 }
 
-/// 本进程刚拉起、仍存活但尚未监听的 daemon 按短间隔轮询（约 10s）：冷启动 daemon 通常
-/// 数百毫秒内就绪，若按 1s 起步的退避等待，整条启动链（界面首个快照）会被白白拖长约 1s。
-/// 只对同一个子进程代际生效；子进程退出后被重新拉起则回到指数退避，避免崩溃循环高频拉起。
+/// 本进程刚拉起、仍存活但尚未就绪（未监听 / 未发布端点 / 未生成 token）的 daemon 按短间隔轮询
+/// （约 10s）：冷启动 daemon 通常数百毫秒内就绪，若按 1s 起步的退避等待，整条启动链（界面首个
+/// 快照）会被白白拖长约 1s。只对同一个子进程代际生效；子进程退出后被重新拉起则回到指数退避，
+/// 避免崩溃循环高频拉起。
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const STARTUP_POLL_ATTEMPTS: usize = 200;
 /// daemon 启动即崩溃循环时的重拉间隔：避免每 ≤30s 完整初始化一次引擎。
 const CRASH_LOOP_RETRY_SECS: u64 = 120;
+/// 建连、双向认证、hello 与快照的总时限：daemon 端口被不响应的进程占着、或 daemon 挂死时，
+/// 不能永远卡在握手里；超时按暂时性失败退避重连。慢盘 / 大任务表的快照留足余量。
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 握手前 `system.shutdown`（完全退出兜底、协议不兼容替换）的总时限。
+const SHUTDOWN_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 握手阶段的请求 ID（连接建立后的调用从 10 起）。
 const AUTH_CHALLENGE_REQUEST_ID: i64 = 1;
@@ -417,7 +640,15 @@ async fn run_client(
     // 被旧版 daemon（或冒充者）占着端口时已尝试结束同名进程的次数，见 `LEGACY_REPLACE_ATTEMPTS`。
     let mut legacy_attempts = 0_u32;
     loop {
-        match connect(&config).await {
+        let (target, outcome) = match config.resolve(supervisor.child_alive().await).await {
+            Ok(Resolution::Connect(target)) => {
+                let outcome = connect(&config, &target).await;
+                (Some(target), outcome)
+            }
+            Ok(Resolution::NotReady) => (None, Err(ConnectError::NotReady)),
+            Err(error) => (None, Err(error)),
+        };
+        let error = match outcome {
             Ok((socket, snapshot, buffered)) => {
                 attempt = 0;
                 supervisor.clear_crash_streak();
@@ -449,47 +680,95 @@ async fn run_client(
                 connected.store(false, Ordering::Release);
                 config.http.clear();
                 fail_queued_commands(&mut commands);
+                None
             }
-            Err(ConnectError::Refused) => match supervisor.ensure_running().await {
-                Ok(Some(child))
-                    if startup_polls < STARTUP_POLL_ATTEMPTS
-                        && *polled_child.get_or_insert(child) == child =>
-                {
-                    startup_polls += 1;
+            Err(error) => Some(error),
+        };
+        let source = target.as_ref().map(|target| target.source);
+        match error {
+            None => {}
+            Some(ConnectError::Refused) => {
+                if relaunch_or_poll(&supervisor, &mut polled_child, &mut startup_polls).await {
                     tokio::time::sleep(STARTUP_POLL_INTERVAL).await;
                     continue;
                 }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(error = %error, "could not supervise fluxdownd");
+            }
+            Some(ConnectError::NotReady) => {
+                if relaunch_or_poll(&supervisor, &mut polled_child, &mut startup_polls).await {
+                    tokio::time::sleep(STARTUP_POLL_INTERVAL).await;
+                    continue;
                 }
-            },
-            Err(ConnectError::Incompatible) if !replaced_incompatible => {
+                tracing::warn!(
+                    endpoint = %config.endpoint_label(),
+                    "fluxdownd is not ready yet: daemon.token or its published endpoint is missing"
+                );
+            }
+            // 端点文件指向的端口上已不是本数据目录的 daemon（daemon 崩溃后端口被别的进程
+            // 复用）：文件已过期，按「连接被拒」拉起 daemon，新 daemon 启动时会重写它。
+            Some(ConnectError::LegacyPeer) if source == Some(TargetSource::Published) => {
+                tracing::warn!(
+                    endpoint = %config.endpoint_label(),
+                    "the published fluxdownd endpoint is held by another process; treating it as stale"
+                );
+                if relaunch_or_poll(&supervisor, &mut polled_child, &mut startup_polls).await {
+                    tokio::time::sleep(STARTUP_POLL_INTERVAL).await;
+                    continue;
+                }
+            }
+            Some(ConnectError::Fatal(data))
+                if data.code == ApplicationErrorCode::Unauthorized
+                    && source == Some(TargetSource::Published) =>
+            {
+                tracing::warn!(
+                    endpoint = %config.endpoint_label(),
+                    "the process on the published fluxdownd endpoint cannot prove daemon.token; treating the endpoint as stale"
+                );
+                if relaunch_or_poll(&supervisor, &mut polled_child, &mut startup_polls).await {
+                    tokio::time::sleep(STARTUP_POLL_INTERVAL).await;
+                    continue;
+                }
+            }
+            // 本数据目录的 daemon 持有租约但尚未发布端点，默认端口上却是另一个数据目录 / 用户的
+            // daemon：等本数据目录的 daemon 发布端点，不当作冒充者而退出。
+            Some(ConnectError::Fatal(data))
+                if data.code == ApplicationErrorCode::Unauthorized
+                    && source == Some(TargetSource::Default) =>
+            {
+                tracing::warn!(
+                    "the default daemon port belongs to another fluxdownd (another user or data directory); waiting for this data directory's fluxdownd to publish its endpoint"
+                );
+            }
+            Some(ConnectError::Incompatible) if !replaced_incompatible => {
                 replaced_incompatible = true;
-                match request_shutdown(&config).await {
-                    Ok(()) => {
-                        tracing::info!("asked protocol-incompatible fluxdownd to exit");
-                        wait_until_stopped(&config, Duration::from_secs(30)).await;
-                        attempt = 0;
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "protocol-incompatible fluxdownd refused shutdown");
-                        if events
-                            .send(DaemonClientEvent::Fatal(protocol_error()))
-                            .await
-                            .is_err()
-                        {
-                            tracing::debug!(
-                                "daemon event consumer closed before fatal protocol error"
-                            );
+                if let Some(target) = target.as_ref() {
+                    match shutdown_target(&config, target).await {
+                        Ok(()) => {
+                            tracing::info!("asked protocol-incompatible fluxdownd to exit");
+                            wait_until_stopped(target, Duration::from_secs(30)).await;
+                            attempt = 0;
+                            continue;
                         }
-                        connected.store(false, Ordering::Release);
-                        return;
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "protocol-incompatible fluxdownd refused shutdown"
+                            );
+                            if events
+                                .send(DaemonClientEvent::Fatal(protocol_error()))
+                                .await
+                                .is_err()
+                            {
+                                tracing::debug!(
+                                    "daemon event consumer closed before fatal protocol error"
+                                );
+                            }
+                            connected.store(false, Ordering::Release);
+                            return;
+                        }
                     }
                 }
             }
-            Err(ConnectError::Incompatible) => {
+            Some(ConnectError::Incompatible) => {
                 if events
                     .send(DaemonClientEvent::Fatal(protocol_error()))
                     .await
@@ -500,20 +779,26 @@ async fn run_client(
                 connected.store(false, Ordering::Release);
                 return;
             }
-            Err(ConnectError::LegacyPeer) => match next_legacy_step(legacy_attempts) {
+            Some(ConnectError::LegacyPeer) => match next_legacy_step(legacy_attempts) {
                 LegacyStep::Replace => {
                     legacy_attempts += 1;
                     tracing::warn!(
                         attempt = legacy_attempts,
                         "the process on the daemon port does not speak the challenge-response handshake (legacy fluxdownd); no credentials are sent to it, stopping the stale fluxdownd instead"
                     );
-                    let stopped = supervisor.terminate_stale_daemon().await;
-                    if stopped > 0 {
+                    let port = target.as_ref().and_then(DaemonTarget::port);
+                    let stopped = match port {
+                        Some(port) => supervisor.terminate_stale_daemon(port).await,
+                        None => 0,
+                    };
+                    if stopped > 0
+                        && let Some(target) = target.as_ref()
+                    {
                         tracing::info!(
                             stopped,
                             "signalled stale fluxdownd; waiting for it to release the port"
                         );
-                        wait_until_stopped(&config, Duration::from_secs(30)).await;
+                        wait_until_stopped(target, Duration::from_secs(30)).await;
                         attempt = 0;
                         continue;
                     }
@@ -537,15 +822,15 @@ async fn run_client(
                     return;
                 }
             },
-            Err(ConnectError::Fatal(error)) => {
+            Some(ConnectError::Fatal(error)) => {
                 if events.send(DaemonClientEvent::Fatal(error)).await.is_err() {
                     tracing::debug!("daemon event consumer closed before fatal connection error");
                 }
                 connected.store(false, Ordering::Release);
                 return;
             }
-            Err(ConnectError::Transient(error)) => {
-                tracing::warn!(%error, "daemon connection failed");
+            Some(ConnectError::Transient(error)) => {
+                tracing::warn!(%error, endpoint = %config.endpoint_label(), "daemon connection failed");
             }
         }
         connected.store(false, Ordering::Release);
@@ -554,11 +839,34 @@ async fn run_client(
             delay = CRASH_LOOP_RETRY_SECS;
             tracing::error!(
                 retry_secs = delay,
-                "fluxdownd keeps exiting right after launch (port 17801 unavailable or startup failure?); see fluxdownd.stderr.log"
+                "fluxdownd keeps exiting right after launch; see fluxdownd.stderr.log"
             );
         }
         attempt = attempt.saturating_add(1);
         tokio::time::sleep(Duration::from_secs(delay)).await;
+    }
+}
+
+/// daemon 不可连（拒绝 / 未就绪 / 端点过期）：确保本进程监管的 daemon 在运行。同一个刚拉起、
+/// 仍存活的子进程在启动预算内返回 true，调用方短间隔后立即重试；否则走正常退避。
+async fn relaunch_or_poll(
+    supervisor: &DaemonSupervisor,
+    polled_child: &mut Option<u64>,
+    startup_polls: &mut usize,
+) -> bool {
+    match supervisor.ensure_running().await {
+        Ok(Some(child))
+            if *startup_polls < STARTUP_POLL_ATTEMPTS
+                && *polled_child.get_or_insert(child) == child =>
+        {
+            *startup_polls += 1;
+            true
+        }
+        Ok(_) => false,
+        Err(error) => {
+            tracing::warn!(error = %error, "could not supervise fluxdownd");
+            false
+        }
     }
 }
 
@@ -570,17 +878,27 @@ fn fail_queued_commands(commands: &mut mpsc::Receiver<ClientCommand>) {
     }
 }
 
-async fn open_socket(config: &DaemonClientConfig) -> Result<Socket, ConnectError> {
+async fn open_socket(target: &DaemonTarget) -> Result<Socket, ConnectError> {
     // 升级请求不带任何凭据：对端在证明持有 token 之前，agent 不交出任何可复用的东西。
-    let request = config
-        .rpc_url
-        .clone()
+    let request = target
+        .url
+        .as_str()
         .into_client_request()
         .map_err(|error| ConnectError::Fatal(invalid_argument(error.to_string())))?;
-    let (socket, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .map_err(classify_connect_error)?;
+    let (socket, _) =
+        tokio_tungstenite::connect_async_with_config(request, Some(inbound_ws_config()), false)
+            .await
+            .map_err(classify_connect_error)?;
     Ok(socket)
+}
+
+/// 全量快照随任务数增长且单帧发出：帧上限与消息上限一同放宽（见
+/// [`fluxdown_protocol::MAX_INBOUND_RPC_MESSAGE_BYTES`]）。
+fn inbound_ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    let limit = Some(fluxdown_protocol::MAX_INBOUND_RPC_MESSAGE_BYTES);
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_frame_size(limit)
+        .max_message_size(limit)
 }
 
 /// 双向挑战应答：先校验 daemon 对 token 持有权的证明，通过后才提交自己的证明。
@@ -646,35 +964,54 @@ fn describe_connect_error(error: ConnectError) -> String {
         ConnectError::Fatal(data) => format!("{:?}", data.code),
         ConnectError::Transient(message) => message,
         ConnectError::Refused | ConnectError::Incompatible => "daemon unreachable".to_owned(),
+        ConnectError::NotReady => "daemon not ready".to_owned(),
         ConnectError::LegacyPeer => "legacy daemon".to_owned(),
+    }
+}
+
+/// 握手前 `system.shutdown`（完全退出的兜底路径）：按当前端点解析出本数据目录的 daemon。
+pub(crate) async fn request_shutdown(config: &DaemonClientConfig) -> Result<(), String> {
+    match config
+        .resolve(false)
+        .await
+        .map_err(describe_connect_error)?
+    {
+        Resolution::Connect(target) => shutdown_target(config, &target).await,
+        Resolution::NotReady => Err("no running fluxdownd for this data directory".to_owned()),
     }
 }
 
 /// 已认证后、`system.hello` 之前的 `system.shutdown`：daemon 只在握手通过后受理，
 /// 协议版本不兼容的新旧进程替换与完全退出都走这里。
-pub(crate) async fn request_shutdown(config: &DaemonClientConfig) -> Result<(), String> {
-    let mut socket = open_socket(config)
+async fn shutdown_target(config: &DaemonClientConfig, target: &DaemonTarget) -> Result<(), String> {
+    let shutdown = async {
+        let token = config.load_token().await.map_err(describe_connect_error)?;
+        let mut socket = open_socket(target)
+            .await
+            .map_err(|_| "daemon unreachable".to_owned())?;
+        let mut buffered = Vec::new();
+        authenticate(&mut socket, &token, &mut buffered)
+            .await
+            .map_err(describe_connect_error)?;
+        call_on_socket(
+            &mut socket,
+            SHUTDOWN_REQUEST_ID,
+            method::SYSTEM_SHUTDOWN,
+            None,
+            &mut buffered,
+        )
         .await
-        .map_err(|_| "daemon unreachable".to_owned())?;
-    let mut buffered = Vec::new();
-    authenticate(&mut socket, &config.token, &mut buffered)
+        .map(|_| ())
+        .map_err(describe_connect_error)
+    };
+    tokio::time::timeout(SHUTDOWN_HANDSHAKE_TIMEOUT, shutdown)
         .await
-        .map_err(describe_connect_error)?;
-    call_on_socket(
-        &mut socket,
-        SHUTDOWN_REQUEST_ID,
-        method::SYSTEM_SHUTDOWN,
-        None,
-        &mut buffered,
-    )
-    .await
-    .map(|_| ())
-    .map_err(describe_connect_error)
+        .map_err(|_| "daemon shutdown handshake timed out".to_owned())?
 }
 
 /// 等旧 daemon 关闭监听（连接被拒）；超时后交回重连循环自愈。
-async fn wait_until_stopped(config: &DaemonClientConfig, timeout: Duration) {
-    let Ok(url) = reqwest::Url::parse(&config.rpc_url) else {
+async fn wait_until_stopped(target: &DaemonTarget, timeout: Duration) {
+    let Ok(url) = reqwest::Url::parse(&target.url) else {
         return;
     };
     let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
@@ -693,11 +1030,20 @@ async fn wait_until_stopped(config: &DaemonClientConfig, timeout: Duration) {
     }
 }
 
-/// 建立到 daemon 的已认证、已握手连接；任何一步失败都撤销会话 HTTP 凭据。
+/// 建立到 daemon 的已认证、已握手连接（整体受 [`HANDSHAKE_TIMEOUT`] 约束）；任何一步失败都
+/// 撤销会话 HTTP 访问参数。
 async fn connect(
     config: &DaemonClientConfig,
+    target: &DaemonTarget,
 ) -> Result<(Socket, Snapshot, Vec<EventFrame>), ConnectError> {
-    let result = establish(config).await;
+    let result = match tokio::time::timeout(HANDSHAKE_TIMEOUT, establish(config, target)).await {
+        Ok(result) => result,
+        Err(_) => Err(ConnectError::Transient(format!(
+            "handshake with {} timed out after {}s",
+            target.url,
+            HANDSHAKE_TIMEOUT.as_secs()
+        ))),
+    };
     if result.is_err() {
         config.http.clear();
     }
@@ -706,11 +1052,15 @@ async fn connect(
 
 async fn establish(
     config: &DaemonClientConfig,
+    target: &DaemonTarget,
 ) -> Result<(Socket, Snapshot, Vec<EventFrame>), ConnectError> {
-    let mut socket = open_socket(config).await?;
+    let token = config.load_token().await?;
+    let mut socket = open_socket(target).await?;
     let mut buffered = Vec::new();
-    let credential = authenticate(&mut socket, &config.token, &mut buffered).await?;
-    config.http.install(credential);
+    let credential = authenticate(&mut socket, &token, &mut buffered).await?;
+    let access = DaemonHttpAccess::from_rpc_url(&target.url, credential)
+        .map_err(|error| ConnectError::Fatal(invalid_argument(error)))?;
+    config.http.install(access);
     let hello = serde_json::json!({
         "clientName": "fluxdown-agent",
         "clientVersion": fluxdown_protocol::APP_VERSION,
@@ -953,6 +1303,8 @@ fn next_legacy_step(attempts_so_far: u32) -> LegacyStep {
 
 enum ConnectError {
     Refused,
+    /// daemon 尚未就绪：`daemon.token` 还没生成，或本数据目录暂无发布了端点的 daemon。
+    NotReady,
     Transient(String),
     /// 对端协议版本不兼容：可尝试让旧进程退出后由监管拉起同版本 daemon。
     Incompatible,
@@ -1177,6 +1529,14 @@ mod tests {
         (params.client_nonce, server_nonce)
     }
 
+    /// 固定端点目标（显式 URL / 嵌入式宿主）。
+    fn fixed(url: &str) -> super::DaemonTarget {
+        super::DaemonTarget {
+            url: url.to_owned(),
+            source: super::TargetSource::Fixed,
+        }
+    }
+
     async fn loopback_listener() -> (tokio::net::TcpListener, String) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}/rpc", listener.local_addr().unwrap());
@@ -1258,14 +1618,15 @@ mod tests {
                 serve_once(&listener, "a", 5, true).await;
                 serve_once(&listener, "b", 20, false).await;
             });
-            let config = super::DaemonClientConfig::new(url, TOKEN);
+            let config = super::DaemonClientConfig::new(url.clone(), TOKEN);
+            let target = fixed(&url);
             let (tx, mut rx) = tokio::sync::mpsc::channel(16);
             let (command_tx, mut commands) = tokio::sync::mpsc::channel(1);
-            let (socket, snapshot, buffered) = super::connect(&config)
+            let (socket, snapshot, buffered) = super::connect(&config, &target)
                 .await
                 .unwrap_or_else(|_| panic!("connect"));
             assert!(
-                config.http_session().credential().is_some(),
+                config.http_session().access().is_some(),
                 "an authenticated session carries an HTTP credential"
             );
             assert_eq!((snapshot.epoch.as_str(), snapshot.sequence), ("a", 5));
@@ -1291,7 +1652,7 @@ mod tests {
             };
             assert_eq!((first.sequence, second.sequence), (6, 7));
             assert!(rx.try_recv().is_err(), "gap event must not be delivered");
-            let (socket, snapshot, buffered) = super::connect(&config)
+            let (socket, snapshot, buffered) = super::connect(&config, &target)
                 .await
                 .unwrap_or_else(|_| panic!("reconnect"));
             assert_eq!((snapshot.epoch.as_str(), snapshot.sequence), ("b", 20));
@@ -1370,8 +1731,8 @@ mod tests {
                 )
                 .await;
             });
-            let config = super::DaemonClientConfig::new(url, TOKEN);
-            let (socket, snapshot, buffered) = super::connect(&config)
+            let config = super::DaemonClientConfig::new(url.clone(), TOKEN);
+            let (socket, snapshot, buffered) = super::connect(&config, &fixed(&url))
                 .await
                 .unwrap_or_else(|_| panic!("connect"));
             let (tx, _rx) = tokio::sync::mpsc::channel(16);
@@ -1411,6 +1772,65 @@ mod tests {
         .expect("daemon error forwarding");
     }
 
+    /// 快照随任务数增长且单帧发出；超过 tungstenite 默认 16 MiB 帧上限时连接仍须建立
+    /// （现网 38 MB 快照即因此在旧客户端永远重连失败）。
+    #[tokio::test]
+    async fn snapshot_larger_than_default_frame_limit_is_accepted() {
+        use fluxdown_protocol::{
+            DaemonConfigSnapshot, DaemonSnapshot, ServiceHello, ServiceRole, Snapshot, SnapshotBody,
+        };
+
+        const BIG: usize = 24 * 1024 * 1024;
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let (listener, url) = loopback_listener().await;
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                daemon_handshake(&mut ws, TOKEN).await;
+                let hello = read_request(&mut ws).await;
+                let reply =
+                    ServiceHello::new(ServiceRole::Daemon, "daemon", "test", "instance", vec![]);
+                send_response(
+                    &mut ws,
+                    RpcResponse::success(hello.id, serde_json::to_value(reply).unwrap()),
+                )
+                .await;
+                let snapshot_request = read_request(&mut ws).await;
+                let snapshot = Snapshot {
+                    epoch: "e".into(),
+                    sequence: 1,
+                    body: SnapshotBody::Daemon(Box::new(DaemonSnapshot {
+                        config: DaemonConfigSnapshot {
+                            revision: 1,
+                            values: [("big".to_owned(), "x".repeat(BIG))].into(),
+                        },
+                        ..DaemonSnapshot::default()
+                    })),
+                };
+                send_response(
+                    &mut ws,
+                    RpcResponse::success(
+                        snapshot_request.id,
+                        serde_json::to_value(snapshot).unwrap(),
+                    ),
+                )
+                .await;
+                ws
+            });
+            let config = super::DaemonClientConfig::new(url.clone(), TOKEN);
+            let (_socket, snapshot, _buffered) = super::connect(&config, &fixed(&url))
+                .await
+                .unwrap_or_else(|_| panic!("oversized snapshot must not break the handshake"));
+            let SnapshotBody::Daemon(daemon) = snapshot.body else {
+                panic!("daemon snapshot");
+            };
+            assert_eq!(daemon.config.values.get("big").map(String::len), Some(BIG));
+            server.await.unwrap();
+        })
+        .await
+        .expect("oversized snapshot handshake");
+    }
+
     #[tokio::test]
     async fn authentication_derives_the_session_credential_from_a_daemon_that_proves_the_token() {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -1420,8 +1840,7 @@ mod tests {
                 let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
                 daemon_handshake(&mut ws, TOKEN).await
             });
-            let config = super::DaemonClientConfig::new(url, TOKEN);
-            let mut socket = super::open_socket(&config)
+            let mut socket = super::open_socket(&fixed(&url))
                 .await
                 .unwrap_or_else(|_| panic!("open"));
             let mut buffered = Vec::new();
@@ -1510,12 +1929,13 @@ mod tests {
                     }
                 }
             });
-            let config = super::DaemonClientConfig::new(url, TOKEN);
-            let Err(super::ConnectError::Fatal(data)) = super::connect(&config).await else {
+            let config = super::DaemonClientConfig::new(url.clone(), TOKEN);
+            let Err(super::ConnectError::Fatal(data)) = super::connect(&config, &fixed(&url)).await
+            else {
                 panic!("an endpoint that cannot prove the token must be rejected");
             };
             assert_eq!(data.code, ApplicationErrorCode::Unauthorized);
-            assert!(config.http_session().credential().is_none());
+            assert!(config.http_session().access().is_none());
             assert!(super::request_shutdown(&config).await.is_err());
             server.await.unwrap();
 
@@ -1580,9 +2000,9 @@ mod tests {
                 }
                 later_frames
             });
-            let config = super::DaemonClientConfig::new(url, TOKEN);
+            let target = fixed(&url);
             let mut buffered = Vec::new();
-            let mut first = super::open_socket(&config)
+            let mut first = super::open_socket(&target)
                 .await
                 .unwrap_or_else(|_| panic!("open first"));
             assert!(
@@ -1590,7 +2010,7 @@ mod tests {
                     .await
                     .is_ok()
             );
-            let mut second = super::open_socket(&config)
+            let mut second = super::open_socket(&target)
                 .await
                 .unwrap_or_else(|_| panic!("open second"));
             let Err(super::ConnectError::Fatal(data)) =
@@ -1658,14 +2078,15 @@ mod tests {
                 .unwrap();
                 String::from_utf8_lossy(&received).to_ascii_lowercase()
             });
-            let config = super::DaemonClientConfig::new(url, TOKEN);
-            let Err(super::ConnectError::LegacyPeer) = super::connect(&config).await else {
+            let config = super::DaemonClientConfig::new(url.clone(), TOKEN);
+            let Err(super::ConnectError::LegacyPeer) = super::connect(&config, &fixed(&url)).await
+            else {
                 panic!("an upgrade rejected with 401 marks a legacy daemon");
             };
             let request = server.await.unwrap();
             assert!(!request.contains("authorization"), "{request}");
             assert!(!request.contains(TOKEN), "{request}");
-            assert!(config.http_session().credential().is_none());
+            assert!(config.http_session().access().is_none());
         })
         .await
         .expect("legacy daemon is identified");
@@ -1709,9 +2130,11 @@ mod tests {
                 }
                 methods
             });
-            let config = super::DaemonClientConfig::new(url, TOKEN);
+            let config = super::DaemonClientConfig::new(url.clone(), TOKEN);
             for _ in 0..2 {
-                let Err(super::ConnectError::LegacyPeer) = super::connect(&config).await else {
+                let Err(super::ConnectError::LegacyPeer) =
+                    super::connect(&config, &fixed(&url)).await
+                else {
                     panic!("a peer that does not know the challenge is a legacy daemon");
                 };
             }
@@ -1720,7 +2143,7 @@ mod tests {
                 server.await.unwrap(),
                 vec![SYSTEM_AUTH_CHALLENGE, SYSTEM_AUTH_CHALLENGE]
             );
-            assert!(config.http_session().credential().is_none());
+            assert!(config.http_session().access().is_none());
         })
         .await
         .expect("unrecognized handshake is identified");
@@ -1779,5 +2202,198 @@ mod tests {
             super::next_legacy_step(super::LEGACY_REPLACE_ATTEMPTS),
             super::LegacyStep::GiveUp
         );
+    }
+
+    fn discovery_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown-daemon-discovery-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create discovery dir");
+        dir
+    }
+
+    fn publish(dir: &std::path::Path, rpc_url: &str) {
+        std::fs::write(
+            dir.join(fluxdown_protocol::local_service::DAEMON_ENDPOINT_FILE),
+            serde_json::to_vec(&fluxdown_protocol::local_service::LocalEndpoint {
+                rpc_url: rpc_url.to_owned(),
+            })
+            .expect("endpoint json"),
+        )
+        .expect("publish endpoint");
+    }
+
+    fn resolved(
+        resolution: Result<super::Resolution, super::ConnectError>,
+    ) -> Option<(String, super::TargetSource)> {
+        match resolution {
+            Ok(super::Resolution::Connect(target)) => Some((target.url, target.source)),
+            Ok(super::Resolution::NotReady) => None,
+            Err(error) => panic!(
+                "unexpected resolution error: {}",
+                super::describe_connect_error(error)
+            ),
+        }
+    }
+
+    /// 端点发现：已发布的端点优先；未发布时只有本数据目录的 daemon 持有租约（旧版 daemon /
+    /// 仍在启动）才连默认地址，否则不碰默认端口上可能属于别的用户或程序的进程。
+    #[tokio::test]
+    async fn discovery_prefers_the_published_endpoint_and_guards_the_default_port() {
+        let dir = discovery_dir("resolve");
+        let config = super::DaemonClientConfig::discovered(None, dir.join("daemon.token"), &dir);
+
+        // 没有端点也没有租约：本数据目录没有在运行的 daemon。
+        assert_eq!(resolved(config.resolve(false).await), None);
+        // 本进程拉起的 daemon 仍在启动：等它发布端点。
+        assert_eq!(resolved(config.resolve(true).await), None);
+
+        // daemon 持有租约却没发布端点（旧版 daemon）：连默认地址。
+        let lease = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("daemon.lock"))
+            .expect("open lease");
+        lease.try_lock().expect("hold lease");
+        assert_eq!(
+            resolved(config.resolve(false).await),
+            Some((
+                super::DEFAULT_DAEMON_RPC_URL.to_owned(),
+                super::TargetSource::Default
+            ))
+        );
+        drop(lease);
+
+        publish(&dir, "ws://127.0.0.1:45678/rpc");
+        assert_eq!(
+            resolved(config.resolve(true).await),
+            Some((
+                "ws://127.0.0.1:45678/rpc".to_owned(),
+                super::TargetSource::Published
+            ))
+        );
+        assert_eq!(config.endpoint_label(), "ws://127.0.0.1:45678/rpc");
+
+        // 非回环地址绝不连接：握手证明不能发往别的机器。
+        publish(&dir, "ws://192.0.2.10:45678/rpc");
+        assert!(matches!(
+            config.resolve(false).await,
+            Err(super::ConnectError::Transient(_))
+        ));
+
+        // 显式地址不读端点文件。
+        let explicit = super::DaemonClientConfig::discovered(
+            Some("ws://127.0.0.1:9/rpc".to_owned()),
+            dir.join("daemon.token"),
+            &dir,
+        );
+        assert_eq!(
+            resolved(explicit.resolve(false).await),
+            Some((
+                "ws://127.0.0.1:9/rpc".to_owned(),
+                super::TargetSource::Fixed
+            ))
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 独立 daemon 首次启动、尚未生成 token 时不建连，按「未就绪」等它生成。
+    #[tokio::test]
+    async fn missing_or_blank_token_file_means_the_daemon_is_not_ready() {
+        let dir = discovery_dir("token");
+        let token = dir.join("daemon.token");
+        let config = super::DaemonClientConfig::discovered(None, token.clone(), &dir);
+        assert!(matches!(
+            config.load_token().await,
+            Err(super::ConnectError::NotReady)
+        ));
+        std::fs::write(&token, "  \n").expect("blank token");
+        assert!(matches!(
+            config.load_token().await,
+            Err(super::ConnectError::NotReady)
+        ));
+        std::fs::write(&token, format!("{TOKEN}\n")).expect("token");
+        assert_eq!(config.load_token().await.ok().as_deref(), Some(TOKEN));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 已发布端点上换成了别的进程（daemon 崩溃后端口被复用）：视为端点过期继续重试，而不是
+    /// 当作冒充者让 agent 退出；daemon 重新发布后客户端跟着新端点连上。
+    #[tokio::test]
+    async fn stale_published_endpoint_is_retried_until_the_daemon_republishes() {
+        use fluxdown_protocol::{ServiceHello, ServiceRole, Snapshot, SnapshotBody};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let dir = discovery_dir("stale");
+            std::fs::write(dir.join("daemon.token"), format!("{TOKEN}\n")).expect("token");
+            let (foreign, foreign_url) = loopback_listener().await;
+            publish(&dir, &foreign_url);
+            let foreign_hit = tokio::spawn(async move {
+                let (mut stream, _) = foreign.accept().await.expect("accept foreign");
+                let mut buffer = [0_u8; 2048];
+                let read = stream.read(&mut buffer).await.expect("read upgrade");
+                assert!(read > 0);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("reject upgrade");
+            });
+            let (daemon, daemon_url) = loopback_listener().await;
+            let supervisor = Arc::new(crate::supervisor::DaemonSupervisor::new(None));
+            supervisor.stop();
+            let config =
+                super::DaemonClientConfig::discovered(None, dir.join("daemon.token"), &dir);
+            let (_client, mut events) = DaemonClient::start(
+                config,
+                supervisor,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .expect("start client");
+            foreign_hit.await.expect("foreign peer contacted");
+            publish(&dir, &daemon_url);
+
+            let (tcp, _) = daemon.accept().await.expect("accept daemon");
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.expect("ws accept");
+            daemon_handshake(&mut ws, TOKEN).await;
+            let hello = read_request(&mut ws).await;
+            assert_eq!(hello.method, method::SYSTEM_HELLO);
+            let service = ServiceHello::new(ServiceRole::Daemon, "daemon", "test", "instance", vec![]);
+            send_response(
+                &mut ws,
+                RpcResponse::success(hello.id, serde_json::to_value(service).expect("hello")),
+            )
+            .await;
+            let snapshot_request = read_request(&mut ws).await;
+            let snapshot = Snapshot {
+                epoch: "republished".into(),
+                sequence: 1,
+                body: SnapshotBody::Daemon(Box::default()),
+            };
+            send_response(
+                &mut ws,
+                RpcResponse::success(
+                    snapshot_request.id,
+                    serde_json::to_value(snapshot).expect("snapshot"),
+                ),
+            )
+            .await;
+            match events.recv().await {
+                Some(super::DaemonClientEvent::Snapshot(snapshot)) => {
+                    assert_eq!(snapshot.epoch, "republished");
+                }
+                Some(super::DaemonClientEvent::Fatal(error)) => {
+                    panic!("a stale endpoint must not be fatal: {:?}", error.code)
+                }
+                _ => panic!("expected the republished daemon's snapshot"),
+            }
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        })
+        .await
+        .expect("client follows the republished endpoint");
     }
 }

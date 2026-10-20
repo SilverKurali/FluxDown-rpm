@@ -645,6 +645,10 @@ pub struct RequestSpec {
     pub pins: RequestPins,
     /// 按站点附加的请求头（插件下发，不落库）。
     pub origin_headers: Vec<OriginHeaders>,
+    /// 插件声明的单个 HTTP 数据请求的 Range 跨度上限（字节，插件 `maxRangeBytes`）；
+    /// `None` = 不限。与 `origin_headers` 同属插件按次运行叠加的改写，不落库。
+    /// 读取请用 [`RequestSpec::range_window_cap`]。
+    pub max_range_bytes: Option<i64>,
 }
 
 /// 浏览器扩展/Native Messaging 捕获的原始请求体——引擎侧的传输无关表示。
@@ -726,6 +730,13 @@ impl RequestSpec {
     /// HTTP 请求场景(如 BT/HLS 元数据获取,无浏览器会话上下文)。
     pub fn empty_get() -> Self {
         Self::default()
+    }
+
+    /// 生效的 Range 跨度上限：仅 GET-like 请求（非 GET 强制单流且不发 Range）且值为正时 `Some`。
+    /// 设置后每个 HTTP 数据请求（分段 worker 与单流 / 回退单流）的 Range 都不超过它。
+    pub fn range_window_cap(&self) -> Option<i64> {
+        self.max_range_bytes
+            .filter(|cap| *cap > 0 && self.is_get_like())
     }
 
     /// GET / HEAD 请求——可以多段下载、可以做 HEAD probe。
@@ -3459,8 +3470,11 @@ async fn run_download_inner(
             // 恢复仍需从临时文件缺口继续。fresh 单流没有既有字节，即使
             // supports_range=true，download_single 也会发普通 GET，不会额外消耗
             // 一次性 URL。非 GET 继续强制单流且禁止 Range，避免 POST 续传拼接。
+            // 插件声明 `maxRangeBytes` 的源只接受有界 Range：单流也必须带 Range 窗口，视为支持。
             supports_range: p.hint_file_size > 0
-                && (p.segment_count != 1 || p.range_verified)
+                && (p.segment_count != 1
+                    || p.range_verified
+                    || p.spec.range_window_cap().is_some())
                 && p.spec.is_get_like(),
             content_type: String::new(),
             // Hint mode skips the probe, so no ETag/Last-Modified available.
@@ -3928,6 +3942,9 @@ async fn run_download_inner(
         )
         .await;
 
+        // 服务器无视 Range（RangeNotSupported）时回退单流只能发无 Range 请求；文件版本变化 /
+        // 响应错位时服务器仍接受 Range，声明了 `maxRangeBytes` 的任务回退单流必须沿用有界 Range。
+        let range_ignored = matches!(ms_outcome, Err(DownloadError::RangeNotSupported(_)));
         match ms_outcome {
             Ok(final_total) => {
                 if final_total != effective_total_bytes {
@@ -4016,7 +4033,9 @@ async fn run_download_inner(
                     &p.url,
                     &temp_path,
                     effective_total_bytes,
-                    false, // server doesn't support Range — never attempt it
+                    !range_ignored
+                        && effective_supports_range
+                        && spec_ref.current().range_window_cap().is_some(),
                     client,
                     &p.db,
                     p.sink.as_ref(),
@@ -4589,8 +4608,8 @@ struct SingleDownloadResult {
     /// 响应为准，probe/DB validator 可能描述的是旧版本。
     /// 真 206 续传为 `None`（磁盘内容与旧 validator 一致，沿用旧值）。
     latched_last_modified: Option<String>,
-    /// 真 206 本次请求的起点。调用方用它确认本轮确实推进，并在已知总大小
-    /// 尚未写满时继续发出下一个有界 Range。
+    /// 真 206 本次请求的起点；声明了 `maxRangeBytes` 时，从 0 起的 206 窗口也算（起点 0）。
+    /// 调用方用它确认本轮确实推进，并在已知总大小尚未写满时继续发出下一个有界 Range。
     resumed_range_start: Option<u64>,
 }
 
@@ -4634,6 +4653,22 @@ fn single_segment_progress(
     })
 }
 
+/// 单流每次 Range 请求的跨度：默认沿用 [`MAX_SINGLE_RESUME_RANGE_BYTES`]，插件声明
+/// `maxRangeBytes` 时取二者较小值。
+fn single_range_window(spec: &DownloadSpec) -> i64 {
+    spec.current()
+        .range_window_cap()
+        .map_or(MAX_SINGLE_RESUME_RANGE_BYTES, |cap| {
+            cap.min(MAX_SINGLE_RESUME_RANGE_BYTES)
+        })
+}
+
+/// 单流是否必须全程使用有界 Range（插件 `maxRangeBytes`）：需要服务器支持 Range 且总大小
+/// 已知才能分窗；否则只能沿用既有的无 Range / 开放式 Range 行为。
+fn single_stream_capped(spec: &DownloadSpec, total_bytes: i64, supports_range: bool) -> bool {
+    supports_range && total_bytes > 0 && spec.current().range_window_cap().is_some()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn download_single(
     task_id: &str,
@@ -4657,8 +4692,17 @@ async fn download_single(
     let _temp_file_guard = TempFileGuard::acquire(dest, task_id).await?;
     let mut clean_boundary = false;
     let mut rounds: u64 = 0;
+    let window = single_range_window(spec);
+    let capped = single_stream_capped(spec, total_bytes, supports_range);
+    // 有界窗口各轮之间的版本基线：某一轮从 0 重新服务（首轮或文件被替换后重下）时，
+    // 以该响应落库的 validator 为准；不再沿用 probe 的旧基线，否则替换后的文件会在
+    // 每一轮续传里反复判为「版本变化」。无 `maxRangeBytes` 时永不进入这条路径。
+    let mut etag_baseline = expected_etag.to_string();
+    let mut last_modified_baseline = expected_last_modified.to_string();
+    // 最近一次从 0 服务的响应所锁存的 Last-Modified，随最终结果带回调用方。
+    let mut latched_last_modified: Option<String> = None;
     loop {
-        let result = download_single_once(
+        let mut result = download_single_once(
             task_id,
             url,
             dest,
@@ -4671,17 +4715,25 @@ async fn download_single(
             speed_limiter,
             spec,
             expected_filename,
-            expected_etag,
-            expected_last_modified,
+            &etag_baseline,
+            &last_modified_baseline,
             is_resume,
             clean_boundary,
         )
         .await?;
+        if result.latched_last_modified.is_some() {
+            latched_last_modified = result.latched_last_modified.take();
+            if capped {
+                (etag_baseline, last_modified_baseline) = db.get_task_validator(task_id).await?;
+            }
+        }
 
         let Some(range_start) = result.resumed_range_start else {
+            result.latched_last_modified = latched_last_modified;
             return Ok(result);
         };
         if total_bytes <= 0 {
+            result.latched_last_modified = latched_last_modified;
             return Ok(result);
         }
 
@@ -4690,11 +4742,12 @@ async fn download_single(
             DownloadError::Other(format!("invalid negative total size: {total_bytes}"))
         })?;
         if current_len >= expected_len {
+            result.latched_last_modified = latched_last_modified;
             return Ok(result);
         }
         // 无进展或轮数异常：交给外层带退避的重试，而不是无退避地空转请求。
         rounds += 1;
-        let max_rounds = expected_len.div_ceil(MAX_SINGLE_RESUME_RANGE_BYTES as u64) + 256;
+        let max_rounds = expected_len.div_ceil(window as u64) + 256;
         if current_len <= range_start || rounds > max_rounds {
             return Err(DownloadError::Other(format!(
                 "download stalled: resumed Range made no progress before expected total: \
@@ -4703,9 +4756,7 @@ async fn download_single(
         }
         // 正常衔接（窗口恰好写满）不是重试，不写活动记录；只有服务器提前结束
         // 窗口才值得用户看到。
-        let window_end = range_start
-            .saturating_add(MAX_SINGLE_RESUME_RANGE_BYTES as u64)
-            .min(expected_len);
+        let window_end = range_start.saturating_add(window as u64).min(expected_len);
         if current_len < window_end
             && let Err(e) = crate::task_activity::record(
                 db,
@@ -4871,11 +4922,17 @@ async fn download_single_once(
     let mut downloaded: i64;
     let mut file;
 
-    let range = if want_resume && total_bytes > 0 {
-        let end = existing_len
-            .saturating_add(MAX_SINGLE_RESUME_RANGE_BYTES - 1)
+    // 插件 `maxRangeBytes`：每个请求（含首个、含重下）都必须是 ≤ cap 的有界 Range。
+    // 全新下载也发 Range 窗口（起点 0），窗口之间由 `download_single` 的外层循环衔接。
+    let capped = single_stream_capped(spec, total_bytes, supports_range);
+    let window = single_range_window(spec);
+    let ranged = want_resume || capped;
+    let request_start = if want_resume { existing_len } else { 0 };
+    let range = if ranged && total_bytes > 0 {
+        let end = request_start
+            .saturating_add(window - 1)
             .min(total_bytes - 1);
-        format!("bytes={existing_len}-{end}")
+        format!("bytes={request_start}-{end}")
     } else {
         format!("bytes={existing_len}-")
     };
@@ -4886,7 +4943,7 @@ async fn download_single_once(
             used.method.clone(),
             used,
         );
-        if want_resume {
+        if ranged {
             // 与 aria2 一致，续传首枪只发送 Range。部分一次性签名端点会把
             // If-Range 视为签名外请求头并立即作废 URL；收到 403 后再降级已经太晚。
             // 版本安全由下方对 206 响应的 ETag/Last-Modified 后验校验保证。
@@ -4895,13 +4952,21 @@ async fn download_single_once(
             req
         }
     };
+    // 放弃续传偏移后的重发：默认不带 Range 取完整文件；声明了 `maxRangeBytes` 时改为
+    // 从 0 起的首个有界窗口（无 Range 的请求会被这类端点拒绝）。
+    let full_range = format!("bytes=0-{}", (window - 1).min(total_bytes.max(1) - 1));
     let build_full = |used: &RequestSpec| {
-        build_request(
+        let req = build_request(
             client,
             spec.route_url(url).as_deref().unwrap_or(url),
             used.method.clone(),
             used,
-        )
+        );
+        if capped {
+            req.header("Range", &full_range)
+        } else {
+            req
+        }
     };
     let mut used = spec.current();
     let mut refetched_full = false;
@@ -5009,6 +5074,29 @@ async fn download_single_once(
         }
     }
 
+    // 声明了 `maxRangeBytes` 时不能退回无 Range 全量重发（端点会拒绝）。窗口响应必须
+    // 是未压缩、带 Content-Range 且起点与请求一致、总大小与已知一致的 206（缺
+    // Content-Range 无法区分「只给窗口」与「从 0 全量流」，写下去会静默截断），否则
+    // 直接报错，由用户 / 任务级重试决定。
+    if capped && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        let encoded = detect_content_encoding(resp.headers()).is_some();
+        let cr_start = parse_content_range_start(resp.headers());
+        let cr_total = parse_content_range_total(resp.headers());
+        let expected_start = if want_resume && !refetched_full {
+            existing_len
+        } else {
+            0
+        };
+        if encoded || cr_start != Some(expected_start) || cr_total.is_some_and(|t| t != total_bytes)
+        {
+            return Err(DownloadError::Other(format!(
+                "server returned an unusable 206 for a windowed Range request \
+                 (compressed={encoded}, range start={cr_start:?}, total={cr_total:?}); \
+                 expected start {expected_start}, total {total_bytes}; \
+                 refusing to write misaligned data under maxRangeBytes"
+            )));
+        }
+    }
     // 206 响应不可信时丢弃，不带 Range 重新请求完整文件：
     //   • F019：带 Content-Encoding 的 206 是压缩流任意中间字节起的一段，无法从
     //     existing_len（解压后偏移）续传，也无法当全量解压；
@@ -5017,7 +5105,11 @@ async fn download_single_once(
     //     产出缺头文件；
     //   • Content-Range 分母与已知总大小不一致：文件已变（可能变大被截断，也可能
     //     变小导致反复拿到不足 1 MiB 的尾巴），零容差，重下后由大小漂移规则校准。
-    if want_resume && !refetched_full && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+    if !capped
+        && want_resume
+        && !refetched_full
+        && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT
+    {
         let encoded = detect_content_encoding(resp.headers()).is_some();
         let missing_range_start = parse_content_range_start(resp.headers()).is_none();
         let size_changed = total_bytes > 0
@@ -5154,6 +5246,13 @@ async fn download_single_once(
         && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT
         && encoding.is_none()
         && !is_range_response_misaligned(parse_content_range_start(resp.headers()), existing_len);
+    // 有界窗口模式下，从 0 起的 206 窗口（全新下载首窗，或文件被替换 / 416 后重下的首窗）
+    // 同样要让外层循环接着发下一个窗口。上方 capped 校验已保证此类 206 带 Content-Range
+    // 且起点为 0、未压缩。
+    let window_from_zero = capped
+        && !actual_resume
+        && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT
+        && encoding.is_none();
     if want_resume && !actual_resume {
         log_info!(
             "[download-single] task {} server returned {} (encoding={:?}) instead of a plain \
@@ -5380,6 +5479,8 @@ async fn download_single_once(
             Some(u64::try_from(existing_len).map_err(|_| {
                 DownloadError::Other(format!("invalid negative resume offset: {existing_len}"))
             })?)
+        } else if window_from_zero {
+            Some(0)
         } else {
             None
         },

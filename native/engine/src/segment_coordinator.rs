@@ -5390,7 +5390,33 @@ async fn do_segment_with_retry(
         )
         .await
         {
-            Ok(dl) => return Ok(dl),
+            Ok(dl) => {
+                // 插件 `maxRangeBytes`：一次请求只覆盖一个窗口。段未写满时在段内接着发
+                // 下一个窗口（复用连接池），成功的窗口不消耗重试预算、不退避。
+                if spec.current().range_window_cap().is_none() {
+                    return Ok(dl);
+                }
+                // 段尾可能已被 coordinator 拆分收窄 / 吸收扩大，以共享状态为准。
+                let mut end = seg_end;
+                if let Ok(states) = seg_states.lock()
+                    && let Some(pos) = seg_state_pos(&states, seg_idx)
+                {
+                    end = states[pos].end_byte;
+                }
+                let next = seg_start + dl;
+                if next > end {
+                    return Ok(dl);
+                }
+                if next <= actual_start {
+                    return Err(DownloadError::Other(format!(
+                        "segment {seg_idx} made no progress within a Range window \
+                         (at {next}, segment end {end})"
+                    )));
+                }
+                actual_start = next;
+                seg_end = end;
+                attempts = 0;
+            }
             Err(DownloadError::Cancelled) => return Err(DownloadError::Cancelled),
             // 文件版本变化：重试必然拿到同样的 200（validator 永不再匹配），且旧数据
             // 已作废。立即返回，让 coordinator 走 Path B → run_download_inner 清空临时
@@ -5596,16 +5622,33 @@ async fn do_segment(
         return Ok(seg_end - seg_start + 1);
     }
 
+    // 插件 `maxRangeBytes`：本次请求的 Range 跨度 ≤ cap。段内剩余区间由
+    // `do_segment_with_retry` 逐窗口衔接；无 cap 时 `request_end == seg_end`，行为不变。
+    let window_cap = spec.current().range_window_cap();
+    let windowed = window_cap.is_some();
+    let request_end = match window_cap {
+        Some(cap) => seg_end.min(actual_start.saturating_add(cap - 1)),
+        None => seg_end,
+    };
+    // 本请求允许写入的末字节：窗口模式下不得越过窗口末尾（含开放式首段的预算延伸）。
+    let write_limit = move |effective_end: i64| {
+        if windowed {
+            effective_end.min(request_end)
+        } else {
+            effective_end
+        }
+    };
     // hint 模式首连接完全不带 Range；其余分段与 aria2 一致，只发送 Range。
     // 部分一次性签名端点会把 If-Range 视为签名外请求头并立即作废 URL，
     // 收到 403 后再重试纯 Range 已无法恢复。版本一致性由 206 响应的
-    // ETag/Last-Modified 后验校验保证。
-    let plain_first = no_range && actual_start == 0;
+    // ETag/Last-Modified 后验校验保证。有 cap 的源拒绝无 Range / 开放式 Range，
+    // 首连接也必须带有界 Range。
+    let plain_first = no_range && actual_start == 0 && !windowed;
     // 多段下载始终用 GET——上游 resolve_file_info 已确保 spec.is_get_like()。
-    let range = if open_ended {
+    let range = if open_ended && !windowed {
         format!("bytes={actual_start}-")
     } else {
-        format!("bytes={}-{}", actual_start, seg_end)
+        format!("bytes={}-{}", actual_start, request_end)
     };
     // 等响应头与 cancel、头超时竞速：惩罚型/停滞服务器可能接受 TCP 连接后长时间
     // 不回响应头（client 只有 connect_timeout，响应头无超时），不竞速则删除/取消
@@ -5788,8 +5831,10 @@ async fn do_segment(
         // 忽略/不支持 Range 时对 `bytes=0-` 返回整文件），直接采用——写循环按
         // 共享预算截断，行为与 206 无异。不置 conn_sensitive、不记录单连接
         // 缓存（这条流本身就是最优路径；其余 worker 的非 206 照常走信号路径）。
-        let accepted_open_ended_200 =
-            open_ended && actual_start == 0 && resp.status() == reqwest::StatusCode::OK;
+        let accepted_open_ended_200 = open_ended
+            && actual_start == 0
+            && resp.status() == reqwest::StatusCode::OK
+            && request_end >= seg_end;
         if !accepted_open_ended_200 {
             // 连接敏感信号：服务器对 Range 请求返回了非 206（且非版本变化）——典型于 alist
             // 代理云盘在连接压力下偶发全量响应。置位后 coordinator 衰减【主动拆分】以降低连接
@@ -6127,7 +6172,7 @@ async fn do_segment(
     let mut stream = resp.bytes_stream();
 
     let file = OpenOptions::new().write(true).open(dest).await?;
-    let seg_remaining = seg_end - actual_start + 1;
+    let seg_remaining = request_end - actual_start + 1;
     let buf_cap = buf_writer_capacity_for_segment(seg_remaining);
     let mut file = tokio::io::BufWriter::with_capacity(buf_cap, file);
     file.seek(std::io::SeekFrom::Start(actual_start as u64))
@@ -6230,7 +6275,7 @@ async fn do_segment(
 
                         // Calculate the write budget.
                         let current_pos = seg_start + seg_downloaded;
-                        let budget = (effective_end - current_pos + 1).max(0) as usize;
+                        let budget = (write_limit(effective_end) - current_pos + 1).max(0) as usize;
                         let write_len = bytes.len().min(budget);
 
                         if write_len == 0 {
@@ -6389,7 +6434,7 @@ async fn do_segment(
             effective_end = states[pos].end_byte;
         }
         let next_pos = seg_start + seg_downloaded;
-        if next_pos <= effective_end {
+        if next_pos <= write_limit(effective_end) {
             // 已写到磁盘的部分进度已通过 update_seg_state / update_segment_progress
             // 在循环内持久化（见 DB_SAVE_INTERVAL_SECS 分支）。这里仅补一次落库，
             // 确保 do_segment_with_retry 以 seg_start + downloaded_bytes 续传本段，
@@ -6407,7 +6452,7 @@ async fn do_segment(
                 "segment {} truncated: received {} bytes, expected {} (server closed stream early)",
                 seg_idx,
                 next_pos - actual_start,
-                effective_end - actual_start + 1
+                write_limit(effective_end) - actual_start + 1
             )));
         }
     }

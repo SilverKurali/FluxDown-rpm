@@ -566,6 +566,7 @@ impl PluginManager {
             ffmpeg_root: None,
             ytdlp_permitted: plugin.manifest.has_permission(PERMISSION_YTDLP),
             auth_permitted: plugin.manifest.has_permission(PERMISSION_AUTH),
+            private_network_allowed: plugin.dev,
         };
         let task_port: Option<Arc<dyn PluginTaskPort>> =
             if plugin.manifest.has_permission(PERMISSION_TASKS) {

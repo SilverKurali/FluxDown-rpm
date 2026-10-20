@@ -86,6 +86,10 @@ pub(crate) struct DownloadStrings {
     pub(crate) ignore_plugin_retry_msg: SharedString,
     pub(crate) boost_download: SharedString,
     pub(crate) cancel_boost: SharedString,
+    /// 对已完成任务点「优先下载」的提示。
+    pub(crate) boost_task_completed: SharedString,
+    /// 对已失败（已结束）任务点「优先下载」的提示。
+    pub(crate) boost_task_ended: SharedString,
     pub(crate) rename_task: SharedString,
     pub(crate) rename_task_title: SharedString,
     pub(crate) rename_task_placeholder: SharedString,
@@ -236,6 +240,8 @@ impl DownloadStrings {
             ignore_plugin_retry_msg: shared(translator.text("taskIgnorePluginRetryMsg")),
             boost_download: shared(translator.text("boostDownload")),
             cancel_boost: shared(translator.text("cancelBoost")),
+            boost_task_completed: shared(translator.text("boostTaskCompleted")),
+            boost_task_ended: shared(translator.text("boostTaskEnded")),
             rename_task: shared(translator.text("renameTask")),
             rename_task_title: shared(translator.text("renameTaskTitle")),
             rename_task_placeholder: shared(translator.text("renameTaskPlaceholder")),

@@ -28,6 +28,10 @@ pub const CLOSE_REASON_SERVICE_QUIT: &str = "service-quit";
 /// 重连后服务版本变化即重新加载页面（SPA 内嵌于新二进制）。桌面形态的更新重启仍以
 /// [`CLOSE_REASON_SERVICE_QUIT`] 关闭，由 agent 退出后重新拉起桌面界面。
 pub const CLOSE_REASON_SERVICE_RESTART: &str = "service-restart";
+/// 客户端接收服务端 WebSocket 消息（含单帧）的上限。`system.snapshot` 一次携带全部任务，
+/// 随任务数线性增长（数万任务即超过 tungstenite 默认 16 MiB 单帧上限，连接永远建不起来），
+/// 且服务端整条消息单帧发出，所以客户端的帧上限与消息上限必须一致地放宽到该值。
+pub const MAX_INBOUND_RPC_MESSAGE_BYTES: usize = 512 * 1024 * 1024;
 /// 产品版本：发布流水线经 `FLUXDOWN_APP_VERSION` 注入 tag 版本，本地构建回退到本 crate 的
 /// `CARGO_PKG_VERSION`。daemon / agent 对外自报版本、更新检查与诊断都以它为准，
 /// 各 crate 自己的 `Cargo.toml` 版本不代表产品版本。

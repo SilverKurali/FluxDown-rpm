@@ -43,6 +43,7 @@
 | DB schema | `native/engine/src/db.rs`：`SQLITE_SCHEMA` + `POSTGRES_SCHEMA` + `add_column_if_missing` |
 | HTTP 契约 | `native/api/src/types.rs`（wire，camelCase）+ `routes.rs`（路径常量）；规范文件 `website-v2/public/openapi.json`（官网 = `website-v2/`） |
 | 本机服务协议基线 / daemon 双向鉴权 | `native/protocol/src/{rpc,handshake}.rs`：角色、版本、挑战应答与会话 HTTP 凭据；daemon 保留旧 agent 静态 Bearer 兼容，新 agent 不发送长期密钥 |
+| 本机端点 / 启动失败记录（进程间本地文件） | `native/protocol/src/local_service.rs`：`gateway-endpoint.json`（agent.token 同目录）、`daemon-endpoint.json`（daemon.token 同目录）、`agent-startup-failure.json` 与 `LocalEndpoint` / `AgentStartupFailure` |
 | 慢方法调度 | `fluxdown_protocol::method::SLOW_DAEMON_METHODS`：daemon 并发调度与 agent 独立通道共用，禁止另立清单 |
 | 日志文本脱敏 | `fluxdown_logfile::SANITIZE_PATTERNS`：引擎日志与 agent 导出共用唯一正则规则源；结构化快照脱敏另见 `native/daemon/src/log_redact.rs` |
 | 移动 FFI | `native/mobile` 的 UniFFI 导出与 DTO；Kotlin / Swift 绑定由各原生工程脚本生成，不手改生成物 |
@@ -157,6 +158,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 - **「复制链接」类 UI 一律读 `origin_url`，空则回退 `url`**（torrent 任务的 `url` 是哨兵）。
 - **RSS 是无人值守链路**：任何「需要用户点一下才能继续」的东西都是 bug。建任务即落全选 + `unattended=1`（否则启动时会弹 N 次文件选择框）；引擎内部自发建任务也必须由宿主发布完整任务事实，不能仅发缺少队列等字段的进度；手动「重新下载」对**任何**状态放行。
 - **一个 data_dir 同时只有一个引擎写入者**：`Db::open_exclusive` / `connect_exclusive` 持 `<data_dir>/engine.lock`（PG 另加 advisory lock），第二个打开者得 `DbError::WriterLeaseHeld`。CLI `--local` 直接报「App 正在运行」退出；**`fluxdown_nmh` 冷启动只拉 `fluxdown-agent`**，不得回退旧 Flutter 可执行（升级目录可能残留 `flux_down`，启动它会抢走锁让 fluxdownd 失效）。
+- **本机端口：默认宽松、显式严格**：agent Gateway（桌面默认 17800）与 daemon 控制面（默认 17801）的默认端口不可用（被占用 / Windows Hyper-V·WSL·Docker 动态排除区间返回 WSAEACCES）时回退系统分配端口，并原子发布端点文件，读取方每次连接前重读；显式地址（`FLUXDOWN_BIND`、`FLUXDOWN_AGENT_BIND`、`FLUXDOWN_DAEMON_BIND` / `FLUXDOWN_DAEMON_URL`）绑定失败即启动失败、错误带地址。新增本机客户端不得写死端口直连；本机连接与握手必须有超时。细节见 `.omp/knowledge/hosts-and-api.md`「本机端口与端点发现」。
 - **空闲静默（NAS 硬盘休眠）**：无活动/排队任务、无做种、无到期 RSS、无客户端主动请求时，daemon/agent 不得周期性读写 save_dir 或 data_dir（不 fsync 的写也会被内核回写唤醒机械盘）。新增周期任务必须事件驱动、受空闲判定门控，或长周期且比对后仅在内容变化时写；定时文件跟踪扫描受 `idle_file_scan`（默认关）门控，新鲜度靠客户端获焦 / 页面可见时 `daemon.task.rescan`。落点与阻碍项清单见 `.omp/knowledge/hosts-and-api.md`「空闲静默」。
 - **宿主自身下载只走统一出口**（应用更新、受管组件、插件包、规则包、tracker / server.met 订阅等，新增同类下载同样适用；FluxCloud / 统计等自家 API 调用不在此列）：daemon / engine 内用 `fluxdown_engine::egress`，agent 经 `daemon.egress.plan` + `native/agent/src/egress.rs`，此类下载禁止裸 `reqwest::Client::builder()`。与下载任务同一全局代理；只有内容有独立来源哈希 / 签名的载荷才按下载任务的 resolver 规则交给插件改写（GitHub 加速等），改写失败或内容不符回退原地址；校验和 / 索引 / 版本清单不交给插件。细节见 `.omp/knowledge/engine.md`「egress.rs」。
 - 引擎学习/遥测类 config 键（`cdn_node_health`、`auto_route_health`、`cdn_pending_reports`、`domain_conn_caps`）**UI 不读写**。

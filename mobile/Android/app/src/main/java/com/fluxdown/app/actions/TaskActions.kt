@@ -279,7 +279,8 @@ class TaskActions(
         if (canRedownload(task)) add(FluxMenuItem.Action(s(R.string.redownloadTask), { confirmRedownload(task) }, FluxIcons.RotateCw))
         if (st == TaskStatus.Paused || st == TaskStatus.Failed) add(FluxMenuItem.Action(s(R.string.resume), { resume(listOf(task.taskId)) }, FluxIcons.Play))
         if (st.isActive || st == TaskStatus.Pending) add(FluxMenuItem.Action(s(R.string.pause), { pause(listOf(task.taskId)) }, FluxIcons.Pause))
-        if (st != TaskStatus.Completed) {
+        // 只有未结束的任务能优先下载（主机对已完成 / 失败任务拒绝 Boost）。
+        if (st != TaskStatus.Completed && st != TaskStatus.Failed) {
             add(FluxMenuItem.Action(s(if (boosted) R.string.cancelBoost else R.string.boostDownload), { boost(task, boosted) }, FluxIcons.Zap, checked = boosted))
         }
         add(FluxMenuItem.Divider)

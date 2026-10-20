@@ -469,7 +469,7 @@ fn authorized(headers: &HeaderMap, auth: &DaemonAuth) -> bool {
     bearer_token(headers).is_some_and(|credential| auth.authorizes_http(credential))
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
+pub(crate) fn temporary_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -489,13 +489,13 @@ async fn set_private_dir_permissions(path: &Path) -> Result<(), std::io::Error> 
 }
 
 #[cfg(unix)]
-async fn set_private_file_permissions(path: &Path) -> Result<(), std::io::Error> {
+pub(crate) async fn set_private_file_permissions(path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt;
     tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await
 }
 
 #[cfg(not(unix))]
-async fn set_private_file_permissions(path: &Path) -> Result<(), std::io::Error> {
+pub(crate) async fn set_private_file_permissions(path: &Path) -> Result<(), std::io::Error> {
     crate::private_fs::restrict_to_current_user(path, false).await
 }
 

@@ -104,8 +104,14 @@ export function moveViewsToQueue(views: readonly DownloadTaskView[], queueId: st
   )
 }
 
-/** Boost：同 id 再次调用即取消。 */
-export const toggleBoost = (taskId: string) => guarded(() => rpc.daemon.queue.boost({ id: taskId }))
+/** Boost：同 id 再次调用即取消。只有未结束的任务能优先下载：已完成 / 失败直接提示，不下发命令。 */
+export function toggleBoost(view: DownloadTaskView): Promise<boolean> {
+  if (view.state === 'completed' || view.state === 'failed') {
+    toast.warning(t(view.state === 'completed' ? 'boostTaskCompleted' : 'boostTaskEnded'))
+    return Promise.resolve(false)
+  }
+  return guarded(() => rpc.daemon.queue.boost({ id: view.taskId }))
+}
 
 /** 更换链接 / 修改线程数成功后，失败任务立即重试（暂停 / 等待保持原状态）；重试失败 toast。 */
 export async function resumeIfFailed(taskId: string, wasFailed: boolean): Promise<boolean> {

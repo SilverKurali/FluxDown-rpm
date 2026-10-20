@@ -18,6 +18,7 @@ use fluxdown_protocol::{
 use gpui::{App, Context, Entity, EventEmitter};
 
 use crate::agent_client::{AgentClient, AgentClientEvent};
+use crate::service_failure::ServiceFailure;
 
 /// 断线（含启动时尚未连上）多久仍未恢复才告知视图。本机回环重连与热启动首个快照都远低于此值。
 const OFFLINE_NOTICE_GRACE: Duration = Duration::from_millis(800);
@@ -38,6 +39,8 @@ pub enum SessionSignal {
     Fatal(RpcErrorData),
     /// agent 已完全退出（`system.shutdown`）：界面应随之退出。
     ServiceStopped,
+    /// agent 无法被拉起或反复启动即退出：界面应展示原因；视图随之进入只读态。
+    ServiceFailed(Arc<ServiceFailure>),
 }
 
 /// agent 会话状态：最近一次全量快照与连接健康度。
@@ -146,6 +149,10 @@ impl AgentSession {
                     self.notify_offline_now();
                     cx.emit(SessionSignal::ServiceStopped);
                 }
+                AgentClientEvent::ServiceFailed(failure) => {
+                    self.notify_offline_now();
+                    cx.emit(SessionSignal::ServiceFailed(Arc::new(failure)));
+                }
             }
         }
         cx.notify();
@@ -224,7 +231,10 @@ pub fn attach<V: SessionConsumer>(session: &Entity<AgentSession>, view: &Entity<
                     view.replace_snapshot(body, cx);
                 }
             }
-            SessionSignal::Stale | SessionSignal::Fatal(_) | SessionSignal::ServiceStopped => {
+            SessionSignal::Stale
+            | SessionSignal::Fatal(_)
+            | SessionSignal::ServiceStopped
+            | SessionSignal::ServiceFailed(_) => {
                 view.mark_stale(cx);
             }
         })

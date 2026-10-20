@@ -2234,6 +2234,13 @@ fn actor_error(error: ActorCallError) -> RpcErrorObject {
             message,
             RpcErrorData::new(ApplicationErrorCode::Conflict, false),
         ),
+        ActorCallError::Operation(ActorError::TaskStateConflict(message)) => {
+            RpcErrorObject::application(
+                message,
+                RpcErrorData::new(ApplicationErrorCode::Conflict, false)
+                    .with_reason(fluxdown_protocol::ErrorReason::TaskStateConflict),
+            )
+        }
     }
 }
 

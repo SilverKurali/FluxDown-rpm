@@ -515,6 +515,7 @@ pub fn plugin_info_to_dto(
         consent_pending_hosts: plugin.consent_pending_hosts,
         network_hosts: plugin.network_hosts,
         package_dir: plugin.package_dir,
+        package_revision: plugin.package_revision,
     }
 }
 

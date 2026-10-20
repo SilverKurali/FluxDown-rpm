@@ -2610,9 +2610,9 @@ mod tests {
                 lifecycle: Arc::new(crate::lifecycle::Lifecycle::new(
                     tokio_util::sync::CancellationToken::new(),
                     daemon.clone(),
-                    Arc::new(crate::supervisor::DaemonSupervisor::new(
+                    Arc::new(crate::supervisor::DaemonSupervisor::new(Some(
                         "127.0.0.1:9".parse().expect("test daemon address"),
-                    )),
+                    ))),
                     dir.clone(),
                 )),
                 notifier: Arc::new(crate::notification::Notifier::new(dir.clone())),

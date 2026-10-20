@@ -38,6 +38,8 @@ use crate::selection::HostSelection;
 use crate::speed_limiter::SpeedLimiter;
 use crate::transfer_activity::TaskRuntime;
 
+mod boost;
+pub use boost::BoostError;
 #[cfg(test)]
 mod import_tests;
 
@@ -3302,9 +3304,10 @@ pub struct DownloadManager {
     /// 避免不必要地唤醒 NAS/网络盘；窗口聚焦、手动重扫等主动触发路径
     /// 不受此项影响，恒会执行。
     idle_file_scan: bool,
-    /// Boost 模式当前优先任务 ID（内存级，重启清空）。None = 无优先任务。
+    /// Boost 模式当前优先任务 ID。None = 无优先任务。变化时持久化到 config
+    /// `boost_state`，重启后由 `resume_on_start` 处理（见 `boost.rs`）。
     priority_task_id: Option<String>,
-    /// 因 Boost 模式自动暂停的任务 ID（内存级，重启清空），按暂停/恢复优先级有序、去重。
+    /// 因 Boost 模式自动暂停的任务 ID，按暂停/恢复优先级有序、去重。
     /// 取消 Boost 时这些任务按此顺序自动恢复。
     auto_paused_ids: Vec<String>,
     /// 任务级自动重试：网络 stall / 瞬时错误导致任务失败后，延迟自动恢复。
@@ -3914,9 +3917,17 @@ impl DownloadManager {
         });
     }
 
-    /// resolve 回流再入（actor 上下文）。先复查 DB 生命周期，再按结果分派。
+    /// resolve 回流再入（actor 上下文）。收尾后兜底结束已离场优先任务的 Boost
+    /// （解析失败 / 裂变 / 选择取消都会让任务离开在途集合）。
     #[cfg(feature = "plugins")]
     pub async fn on_resolve_ready(&mut self, out: ResolveOutcome) {
+        self.handle_resolve_ready(out).await;
+        self.reconcile_priority().await;
+    }
+
+    /// 先复查 DB 生命周期，再按结果分派。
+    #[cfg(feature = "plugins")]
+    async fn handle_resolve_ready(&mut self, out: ResolveOutcome) {
         let task_id = out.task_id.clone();
         // 世代守卫：pending 条目必须与本 outcome 同世代才可再入。
         // - 用户在 resolve 窗口内 pause/cancel/delete 均经 clear_pending_resolve 移除条目
@@ -6286,7 +6297,13 @@ impl DownloadManager {
     /// Remove a finished task from active_tokens (called by actor loop).
     /// Only removes the entry if the generation matches, preventing a stale
     /// `TaskDone` from an old spawn from accidentally removing a newer token.
+    /// 收尾后兜底结束已离场优先任务的 Boost（见 `boost.rs`）。
     pub async fn on_task_done(&mut self, done: &TaskDone) {
+        self.handle_task_done(done).await;
+        self.reconcile_priority().await;
+    }
+
+    async fn handle_task_done(&mut self, done: &TaskDone) {
         let task_id = done.task_id.as_str();
         let generation = done.generation;
         match done.phase {
@@ -7346,7 +7363,7 @@ impl DownloadManager {
                 let stale = self.reset_stale_seeding().await;
                 self.auto_reseed_on_start(stale).await;
             }
-            self.auto_resume_on_start(reset_ids).await;
+            self.resume_on_start(reset_ids).await;
         }
     }
 
@@ -7354,50 +7371,10 @@ impl DownloadManager {
     /// 只恢复启动矫正时被复位的那批（不碰用户手动暂停的），跳过已停止队列，
     /// 并发上限与队列门控交给 `batch_resume` 的常规准入。
     async fn auto_resume_on_start(&mut self, reset_ids: Vec<String>) {
-        if reset_ids.is_empty() {
+        if reset_ids.is_empty() || !self.auto_resume_enabled().await {
             return;
         }
-        let enabled = match self.db.get_config("auto_resume_on_start").await {
-            Ok(value) => value.as_deref() == Some("true"),
-            Err(error) => {
-                crate::logger::report_warning(
-                    "download-manager",
-                    "read startup resume setting",
-                    &error,
-                );
-                return;
-            }
-        };
-        if !enabled {
-            return;
-        }
-        let rows = match self.db.load_tasks_by_ids(&reset_ids).await {
-            Ok(r) => r,
-            Err(e) => {
-                log_info!("[manager] auto_resume_on_start: load error: {}", e);
-                return;
-            }
-        };
-        let queue_of: HashMap<&str, &str> = rows
-            .iter()
-            .map(|t| (t.task_id.as_str(), t.queue_id.as_str()))
-            .collect();
-        let is_bt_of: HashMap<&str, bool> = rows
-            .iter()
-            .map(|t| (t.task_id.as_str(), is_bt_url(&t.url)))
-            .collect();
-        let ids: Vec<String> = reset_ids
-            .iter()
-            .filter(|id| {
-                if !self.bt_config.enabled && is_bt_of.get(id.as_str()).copied().unwrap_or(false) {
-                    return false;
-                }
-                let q = queue_of.get(id.as_str()).copied().unwrap_or("");
-                // 孤儿/空 queue_id 视作运行中（与 eligible_resume_task_ids 一致）。
-                self.queues.get(q).map(|q| q.is_running).unwrap_or(true)
-            })
-            .cloned()
-            .collect();
+        let ids = self.startup_resume_candidates(&reset_ids).await;
         if ids.is_empty() {
             return;
         }
@@ -7406,6 +7383,51 @@ impl DownloadManager {
             ids.len()
         );
         self.batch_resume(&ids).await;
+    }
+
+    /// config `auto_resume_on_start` 是否开启（读失败按关闭处理）。
+    async fn auto_resume_enabled(&self) -> bool {
+        match self.db.get_config("auto_resume_on_start").await {
+            Ok(value) => value.as_deref() == Some("true"),
+            Err(error) => {
+                crate::logger::report_warning(
+                    "download-manager",
+                    "read startup resume setting",
+                    &error,
+                );
+                false
+            }
+        }
+    }
+
+    /// 启动时可恢复的任务（保持 `ids` 顺序）：仍存在、未完成、所在队列运行中，
+    /// BT 被禁用时跳过 BT 任务。
+    async fn startup_resume_candidates(&self, ids: &[String]) -> Vec<String> {
+        let rows = match self.db.load_tasks_by_ids(ids).await {
+            Ok(r) => r,
+            Err(e) => {
+                log_info!("[manager] startup resume: load error: {}", e);
+                return Vec::new();
+            }
+        };
+        let by_id: HashMap<&str, &TaskInfo> =
+            rows.iter().map(|t| (t.task_id.as_str(), t)).collect();
+        ids.iter()
+            .filter(|id| {
+                let Some(task) = by_id.get(id.as_str()) else {
+                    return false;
+                };
+                if task.status == 3 || (!self.bt_config.enabled && is_bt_url(&task.url)) {
+                    return false;
+                }
+                // 孤儿/空 queue_id 视作运行中（与 eligible_resume_task_ids 一致）。
+                self.queues
+                    .get(task.queue_id.as_str())
+                    .map(|q| q.is_running)
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect()
     }
 
     /// 批量操作（启停队列/组暂停恢复/全局暂停恢复）尾部的单次任务快照广播。
@@ -12037,8 +12059,7 @@ impl DownloadManager {
             .as_deref()
             .is_some_and(|p| idset.contains(p))
         {
-            self.priority_task_id = None;
-            Some(std::mem::take(&mut self.auto_paused_ids))
+            Some(self.release_priority_for_batch().await)
         } else {
             None
         };
@@ -13430,188 +13451,6 @@ impl DownloadManager {
                 0
             }
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // Boost / Priority download
-    // -----------------------------------------------------------------------
-
-    /// Set or toggle the priority (Boost) download task.
-    ///
-    /// - If `task_id` is empty, or equals the current priority task → cancel boost.
-    /// - Otherwise: auto-pause all other active/queued tasks, ensure the target
-    ///   task is downloading, and broadcast the new state to the host.
-    pub async fn set_priority_task(&mut self, task_id: String) {
-        // Toggle off if same task or empty
-        if task_id.is_empty() || self.priority_task_id.as_deref() == Some(task_id.as_str()) {
-            self.clear_priority().await;
-            return;
-        }
-
-        // 切换 boost 目标时，保留上一轮 boost 自动暂停的任务 ID，
-        // 使它们在新 boost 结束时也能一并被恢复，避免永久卡在暂停状态。
-        // 将新目标从集合中移除（它将被启动，不需要在结束时当作"恢复对象"）。
-        self.auto_paused_ids.retain(|id| id != &task_id);
-        self.priority_task_id = None;
-
-        // Step 1: If the target task is currently waiting in pending_queue, extract it
-        // before we start pausing others.  This is critical: without this, two problems occur:
-        //   a) resume_task() has an early-return guard for tasks already in pending_queue,
-        //      so the target would never actually start.
-        //   b) drain_queue() called inside each pause_task() call below could promote
-        //      a different queued task to active, causing it to immediately get paused again.
-        // By removing the target first we guarantee it won't be touched by drain_queue.
-        let target_queued: Option<QueuedTask> = self
-            .pending_queue
-            .iter()
-            .position(|q| q.task_id == task_id)
-            .and_then(|pos| self.pending_queue.remove(pos));
-
-        // Step 2: Auto-pause all currently active tasks (except the target itself,
-        // which may already be downloading).
-        // Note: each pause invokes drain_queue(), which could promote a
-        // queued task to active.  We collect active IDs first, then pause them.
-        let active_ids: Vec<String> = self
-            .active_tasks
-            .keys()
-            .filter(|id| id.as_str() != task_id.as_str())
-            .cloned()
-            .collect();
-        // 先按恢复优先级登记暂停顺序：先前活跃的任务在前，排队任务按原 FIFO 在后。
-        // （暂停活跃任务时 drain_queue 会提拔排队头部，必须在此之前固定顺序。）
-        let queued_before: Vec<String> = self
-            .pending_queue
-            .iter()
-            .filter(|t| t.task_id != task_id.as_str())
-            .map(|t| t.task_id.clone())
-            .collect();
-        for id in active_ids.iter().chain(queued_before.iter()) {
-            self.record_auto_paused(id);
-        }
-        for id in active_ids {
-            self.pause_task_silent(&id).await;
-        }
-
-        // Step 3: Pause all remaining tasks in the pending queue (excluding the target).
-        let queued_ids: Vec<String> = self
-            .pending_queue
-            .iter()
-            .filter(|t| t.task_id != task_id.as_str())
-            .map(|t| t.task_id.clone())
-            .collect();
-        for id in queued_ids {
-            self.record_auto_paused(&id);
-            self.pause_task_silent(&id).await;
-        }
-
-        // Step 4: Mop up — drain_queue() calls in step 2/3 may have promoted additional
-        // tasks to active.  Pause anything that slipped through.
-        let stray_active: Vec<String> = self
-            .active_tasks
-            .keys()
-            .filter(|id| id.as_str() != task_id.as_str())
-            .cloned()
-            .collect();
-        for id in stray_active {
-            self.record_auto_paused(&id);
-            self.pause_task_silent(&id).await;
-        }
-
-        self.priority_task_id = Some(task_id.clone());
-
-        // Step 5: Ensure the target task is downloading.
-        // For a previously-queued target: it was removed from pending_queue in step 1
-        // so resume_task() will proceed normally (no early-return guard).
-        // For an already-active target: nothing to do.
-        if !self.active_tasks.contains_key(&task_id) {
-            // Remove from auto_paused_ids so clear_priority won't try to resume
-            // the task that's already running as priority.
-            self.auto_paused_ids.retain(|id| id != &task_id);
-            if let Some(queued) = target_queued {
-                // Task was queued but never actually started (pending_queue slot) —
-                // start it with its original request (method/body, webhook, plugin
-                // hooks) since all other tasks were paused above.
-                if queued.is_resume {
-                    self.do_resume_task(&task_id).await;
-                } else {
-                    self.do_start_task(queued).await;
-                }
-            } else {
-                // Task was paused/error — use the full resume path.
-                self.resume_task(&task_id).await;
-            }
-        }
-
-        // 验证目标任务是否真的启动成功。
-        // 若 do_resume_task / resume_task 内部出错（DB 读取失败、BT 初始化失败等），
-        // 任务不会出现在 active_tokens 中。此时必须取消 boost 并恢复已暂停的任务，
-        // 否则客户端会显示 boost 激活但实际无任务下载，产生莫名其妙的结果。
-        if !self.active_tasks.contains_key(&task_id) {
-            log_info!(
-                "[manager] boost: target task {} failed to start — cancelling boost mode",
-                task_id
-            );
-            self.clear_priority().await;
-            return;
-        }
-
-        log_info!(
-            "[manager] boost mode: priority={}, auto_paused={}",
-            task_id,
-            self.auto_paused_ids.len()
-        );
-
-        self.sink.emit(EngineEvent::PriorityTaskChanged {
-            priority_task_id: task_id,
-            auto_paused_count: self.auto_paused_ids.len() as i32,
-        });
-    }
-
-    /// 登记一个被 Boost 自动暂停的任务；已登记的保持原有顺序（去重）。
-    fn record_auto_paused(&mut self, task_id: &str) {
-        if !self.auto_paused_ids.iter().any(|id| id == task_id) {
-            self.auto_paused_ids.push(task_id.to_owned());
-        }
-    }
-
-    /// Cancel boost mode and resume all auto-paused tasks.
-    async fn clear_priority(&mut self) {
-        self.priority_task_id = None;
-        // 按暂停顺序恢复：先前活跃的任务优先拿回槽位，其后是原 FIFO 顺序的排队任务。
-        let to_resume: Vec<String> = std::mem::take(&mut self.auto_paused_ids);
-        log_info!(
-            "[manager] boost cancelled, resuming {} tasks",
-            to_resume.len()
-        );
-        for id in &to_resume {
-            // Bug 5 修复：跳过已完成的任务，避免 clear_priority 误重启已完成下载。
-            // 场景：boost 激活期间某任务恰好完成，clear_priority 时不应再 resume 它。
-            let is_completed = match self.db.load_task_by_id(id).await {
-                Ok(task) => task.is_some_and(|t| t.status == 3),
-                Err(error) => {
-                    crate::logger::report_error(
-                        "download-manager",
-                        "check boosted task completion",
-                        &error,
-                    );
-                    continue;
-                }
-            };
-            if is_completed {
-                log_info!("[manager] clear_priority: skipping completed task {}", id);
-                continue;
-            }
-            self.resume_task(id).await;
-        }
-        // 在发出 PriorityTaskChanged 之前广播最新队列位置。
-        // resume_task 对于无空余槽的任务只是将其入队，不会主动广播。
-        // 此次广播确保宿主在收到 PriorityTaskChanged 时已知道哪些任务在队列中
-        // （queuePosition > 0），使 pauseAll 能正确识别并暂停它们。
-        self.broadcast_queue_positions();
-        self.sink.emit(EngineEvent::PriorityTaskChanged {
-            priority_task_id: String::new(),
-            auto_paused_count: 0,
-        });
     }
 }
 
@@ -16667,6 +16506,139 @@ mod tests {
         assert!(!mgr.active_tasks.contains_key("p_later"));
         assert!(!mgr.pending_queue.iter().any(|q| q.task_id == "p_later"));
         cancel_all_active(&mgr);
+    }
+
+    /// 已完成 / 失败 / 不存在的任务不能设为优先：直接拒绝，绝不为它们暂停其他任务。
+    #[tokio::test]
+    async fn boost_rejects_ended_tasks_without_pausing_others() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        db.seed_builtin_queues().await.expect("seed");
+        for id in ["done", "failed", "running"] {
+            insert_paused_task_in_queue(&db, id, "").await;
+        }
+        db.update_task_status("done", 3, "").await.expect("done");
+        db.update_task_status("failed", 4, "boom")
+            .await
+            .expect("failed");
+        db.update_task_status("running", 1, "")
+            .await
+            .expect("running");
+        let mut mgr = sched_manager(&db, 4);
+        mgr.load_queues().await;
+        occupy_slot(&mut mgr, "running", 1, "", false);
+
+        assert!(matches!(
+            mgr.set_priority_task("done".into()).await,
+            Err(BoostError::Completed)
+        ));
+        assert!(matches!(
+            mgr.set_priority_task("failed".into()).await,
+            Err(BoostError::Ended)
+        ));
+        assert!(matches!(
+            mgr.set_priority_task("missing".into()).await,
+            Err(BoostError::NotFound)
+        ));
+        assert!(mgr.priority_task_id.is_none());
+        assert!(mgr.auto_paused_ids.is_empty());
+        assert!(
+            mgr.active_tasks.contains_key("running"),
+            "被拒时不得暂停其他任务"
+        );
+        cancel_all_active(&mgr);
+    }
+
+    /// 优先任务经非常规路径离场（「文件已存在」询问被取消 → 暂停）时 Boost 也必须结束，
+    /// 让位任务恢复，不能残留「取消优先」。
+    #[tokio::test]
+    async fn boost_ends_when_priority_task_leaves_through_decision_cancel() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        db.seed_builtin_queues().await.expect("seed");
+        for id in ["boosted", "yielded"] {
+            insert_paused_task_in_queue(&db, id, "").await;
+        }
+        let mut mgr = sched_manager(&db, 4);
+        mgr.load_queues().await;
+        occupy_slot(&mut mgr, "boosted", 3, "", false);
+        mgr.awaiting_decision.insert("boosted".into(), 3);
+        mgr.priority_task_id = Some("boosted".into());
+        mgr.record_auto_paused("yielded");
+
+        mgr.on_task_done(&TaskDone {
+            task_id: "boosted".into(),
+            generation: 3,
+            reserved_temp_path: None,
+            phase: TaskDonePhase::DecisionReady(crate::selection::FileExistsChoice::Cancel),
+        })
+        .await;
+
+        assert!(mgr.priority_task_id.is_none());
+        assert!(mgr.auto_paused_ids.is_empty());
+        assert!(
+            mgr.active_tasks.contains_key("yielded")
+                || mgr.pending_queue.iter().any(|q| q.task_id == "yielded"),
+            "让位任务应在 Boost 结束时恢复"
+        );
+        cancel_all_active(&mgr);
+    }
+
+    /// daemon 重启：开启启动恢复时 Boost 连同让位登记一并恢复；关闭时 Boost 结束，
+    /// 让位任务与被中断任务同等保持暂停。持久化状态读取后即清除。
+    #[tokio::test]
+    async fn boost_survives_restart_per_auto_resume_setting() {
+        for auto_resume in [true, false] {
+            let db = Db::connect("sqlite::memory:")
+                .await
+                .expect("connect mem db");
+            db.seed_builtin_queues().await.expect("seed");
+            for id in ["boosted", "yielded"] {
+                insert_paused_task_in_queue(&db, id, "").await;
+                db.update_task_status(id, 1, "").await.expect("running");
+            }
+            let mut before = sched_manager(&db, 4);
+            before.load_queues().await;
+            occupy_slot(&mut before, "boosted", 1, "", false);
+            occupy_slot(&mut before, "yielded", 2, "", false);
+            before
+                .set_priority_task("boosted".into())
+                .await
+                .expect("boost");
+            assert_eq!(before.auto_paused_ids, vec!["yielded".to_string()]);
+            cancel_all_active(&before);
+            drop(before);
+
+            db.set_config(
+                "auto_resume_on_start",
+                if auto_resume { "true" } else { "false" },
+            )
+            .await
+            .expect("config");
+            let reset = db.reset_incomplete_tasks_to_paused().await.expect("reset");
+            assert_eq!(reset, vec!["boosted".to_string()]);
+            let mut after = sched_manager(&db, 4);
+            after.load_queues().await;
+            after.resume_on_start(reset).await;
+
+            if auto_resume {
+                assert_eq!(after.priority_task_id.as_deref(), Some("boosted"));
+                assert_eq!(after.auto_paused_ids, vec!["yielded".to_string()]);
+                assert!(after.active_tasks.contains_key("boosted"));
+                assert!(!after.active_tasks.contains_key("yielded"));
+                assert!(
+                    db.get_config("boost_state").await.expect("read").is_some(),
+                    "恢复后的 Boost 重新持久化"
+                );
+            } else {
+                assert!(after.priority_task_id.is_none());
+                assert!(after.active_tasks.is_empty());
+                assert!(db.get_config("boost_state").await.expect("read").is_none());
+            }
+            cancel_all_active(&after);
+        }
     }
 
     /// 批量恢复也要清掉已排程的自动重试占位，否则队列永远被算作占用。

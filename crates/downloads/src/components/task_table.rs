@@ -500,7 +500,9 @@ pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> 
             items.push(MenuEntry::IgnorePluginRetry);
         }
         if only.is_local {
-            items.push(if only.boosted {
+            // 已完成 / 失败的任务不会处于 Boost；残留标记也只显示「优先下载」，点击给出提示。
+            let ended = matches!(only.state, TaskState::Completed | TaskState::Failed);
+            items.push(if only.boosted && !ended {
                 MenuEntry::CancelBoost
             } else {
                 MenuEntry::Boost
@@ -4896,6 +4898,15 @@ mod context_menu_tests {
 
         let not_boosted = task(true, TaskState::Downloading);
         assert!(context_menu_items(&[not_boosted]).contains(&MenuEntry::Boost));
+
+        // 已结束任务上的残留标记不提供「取消优先」，只给会提示的「优先下载」。
+        for state in [TaskState::Completed, TaskState::Failed] {
+            let mut stale = task(true, state);
+            stale.boosted = true;
+            let items = context_menu_items(&[stale]);
+            assert!(items.contains(&MenuEntry::Boost));
+            assert!(!items.contains(&MenuEntry::CancelBoost));
+        }
     }
 
     #[test]

@@ -141,9 +141,14 @@ impl RemoteConnector {
         request
             .headers_mut()
             .insert(AUTHORIZATION, self.authorization.clone());
+        // 主机快照随任务数增长且单帧发出：帧与消息上限一同放宽，否则任务多的主机永远连不上。
+        let limit = Some(fluxdown_protocol::MAX_INBOUND_RPC_MESSAGE_BYTES);
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_frame_size(limit)
+            .max_message_size(limit);
         let (socket, _response) = connect_async_tls_with_config(
             request,
-            None,
+            Some(config),
             true,
             Some(Connector::Rustls(self.tls.clone())),
         )

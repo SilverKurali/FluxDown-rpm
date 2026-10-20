@@ -831,7 +831,7 @@ impl PlanPurchaseDialog {
             .session()
             .and_then(|session| session.user.membership_ordinal);
         let badge = plan_badge(tokens, &extended, plan, membership);
-        let price = price_display(plan, self.credit_minor);
+        let price = price_display(plan, state, self.credit_minor);
         let progress = campaign_progress(plan);
         let ends = plan
             .campaign

@@ -321,7 +321,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
                 log::error!("fatal FluxDown agent error: {:?}", error.code);
             }
             SessionSignal::ServiceStopped => crate::lifecycle::service_stopped(cx),
-            SessionSignal::Stale => {}
+            SessionSignal::Stale | SessionSignal::ServiceFailed(_) => {}
         })
         .detach();
 
@@ -389,6 +389,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         crate::plugin_notices::install(cx);
         crate::plugin_contributions::install(cx);
         crate::update_notices::install(cx);
+        crate::service_notices::install(cx);
         if launch.after_update {
             after_session_settled(cx, crate::update_notices::show_installed);
         }
@@ -560,7 +561,10 @@ fn after_session_settled(cx: &mut App, run: impl FnOnce(&mut App) + 'static) {
     *subscription.borrow_mut() = Some(cx.subscribe(&session, move |_, signal, cx| {
         if matches!(
             signal,
-            SessionSignal::Snapshot(_) | SessionSignal::Stale | SessionSignal::Fatal(_)
+            SessionSignal::Snapshot(_)
+                | SessionSignal::Stale
+                | SessionSignal::Fatal(_)
+                | SessionSignal::ServiceFailed(_)
         ) && holder.borrow_mut().take().is_some()
             && let Some(run) = run.take()
         {

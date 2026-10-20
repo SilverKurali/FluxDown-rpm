@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,11 +20,15 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, header};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::preference_writes::PreferenceWrites;
-use crate::service_bootstrap::ServiceBootstrap;
+use crate::service_bootstrap::{
+    Blocked, EnsureOutcome, ListenerProbe, PROBE_TIMEOUT, ServiceBootstrap, connect_listener,
+};
+use crate::service_failure::ServiceFailure;
 
 pub type AgentFuture<T> = Pin<Box<dyn Future<Output = Result<T, RpcErrorData>> + Send + 'static>>;
 
@@ -40,6 +44,9 @@ pub enum AgentClientEvent {
     Fatal(RpcErrorData),
     /// agent 执行了完全退出（`system.shutdown`）：不再重连，界面随之退出。
     ServiceStopped,
+    /// agent 无法被拉起或反复启动即退出：不再空转拉起，界面据此展示原因。成功连接后才会再次
+    /// 报告新的失败。
+    ServiceFailed(ServiceFailure),
 }
 
 #[derive(Clone)]
@@ -189,6 +196,10 @@ async fn run_client(
     let mut replaced_incompatible = false;
     let mut link_log = ConnectionLog::default();
     let mut submission_transport = SubmissionTransport::new(submissions.clone());
+    let mut connect_timeout = ConnectTimeout::new();
+    let mut no_bearer = NoBearerGrace::default();
+    // 同一失败期只通知一次，成功连接后复位。
+    let mut failure_reported = false;
     loop {
         submissions.set_ready(false);
         let rpc_url = match crate::agent_endpoint::discover_rpc_url(
@@ -210,10 +221,23 @@ async fn run_client(
                 return;
             }
         };
-        match connect(&config, &rpc_url).await {
+        let result = connect(
+            &config,
+            &rpc_url,
+            connect_timeout.current(),
+            HANDSHAKE_TIMEOUT,
+        )
+        .await;
+        connect_timeout.observe(result.as_ref().err());
+        if !matches!(result, Err(ConnectError::NoBearer)) {
+            no_bearer.reset();
+        }
+        match result {
             Ok((socket, snapshot, buffered)) => {
                 attempt = 0;
+                failure_reported = false;
                 link_log.connected();
+                bootstrap.note_connected().await;
                 let cursor = (snapshot.epoch.clone(), snapshot.sequence);
                 let preferences_revision = match &snapshot.body {
                     SnapshotBody::Agent(body) => body.preferences.revision,
@@ -254,26 +278,47 @@ async fn run_client(
                     }
                 }
             }
-            Err(error @ (ConnectError::NoBearer | ConnectError::Refused)) => {
-                let probe_listener = matches!(error, ConnectError::NoBearer);
+            Err(
+                error
+                @ (ConnectError::NoBearer | ConnectError::Refused | ConnectError::TimedOut(_)),
+            ) => {
+                // 尚无 bearer 时端口可能已被另一桌面进程 / 直接启动的 agent / 其他用户的 agent
+                // 监听：宽限内先探测、有人监听就不拉起；宽限后无条件拉起。被拒与超时都按「可能
+                // 无人监听」走冷启动路径（Windows 对未监听回环端口约 2s 才返回拒绝）。
+                let probe_listener = matches!(error, ConnectError::NoBearer)
+                    && no_bearer.within_grace(Instant::now());
                 link_log.failed(&error);
-                match bootstrap.ensure_running(&rpc_url, probe_listener).await {
-                    Ok(true) => {
-                        if events
-                            .send(AgentClientEvent::ServiceStarting)
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(bootstrap_error) => {
-                        log::warn!("could not start fluxdown-agent: {bootstrap_error}");
-                        if events.send(AgentClientEvent::Stale).await.is_err() {
-                            return;
-                        }
-                    }
+                if spawn_agent_if_needed(
+                    &bootstrap,
+                    &config,
+                    &rpc_url,
+                    probe_listener,
+                    &mut failure_reported,
+                    &events,
+                )
+                .await
+                .is_err()
+                {
+                    return;
+                }
+            }
+            Err(error @ ConnectError::Unauthorized) => {
+                // 监听者不是本用户的 agent：拉起本用户的 agent（端口被占用时它回退到系统分配
+                // 端口并重新发布端点），下一轮重读端点与 bearer 即可连上。
+                link_log.failed(&error);
+                if spawn_agent_if_needed(
+                    &bootstrap,
+                    &config,
+                    &rpc_url,
+                    false,
+                    &mut failure_reported,
+                    &events,
+                )
+                .await
+                .is_err()
+                    || events.send(AgentClientEvent::Stale).await.is_err()
+                {
+                    return;
                 }
             }
             Err(ConnectError::Incompatible) if !replaced_incompatible => {
@@ -326,6 +371,52 @@ async fn run_client(
     }
 }
 
+/// 必要时拉起 agent，并把结果转成事件；`Err(())` 表示事件接收端已关闭（桌面退出中）。
+async fn spawn_agent_if_needed(
+    bootstrap: &ServiceBootstrap,
+    config: &AgentClientConfig,
+    rpc_url: &str,
+    probe_listener: bool,
+    failure_reported: &mut bool,
+    events: &mpsc::Sender<AgentClientEvent>,
+) -> Result<(), ()> {
+    let event = match bootstrap.ensure_running(rpc_url, probe_listener).await {
+        Ok(EnsureOutcome::Spawned) => AgentClientEvent::ServiceStarting,
+        Ok(EnsureOutcome::NotNeeded) => return Ok(()),
+        Ok(EnsureOutcome::Blocked(blocked)) => {
+            if std::mem::replace(failure_reported, true) {
+                return Ok(());
+            }
+            AgentClientEvent::ServiceFailed(service_failure(blocked, &config.bearer_path).await)
+        }
+        Err(error) => {
+            log::warn!("could not start fluxdown-agent: {error:#}");
+            AgentClientEvent::Stale
+        }
+    };
+    events.send(event).await.map_err(|_| ())
+}
+
+async fn service_failure(blocked: Blocked, bearer_path: &Path) -> ServiceFailure {
+    match blocked {
+        Blocked::Launch { program, detail } => {
+            log::error!("fluxdown-agent could not be launched ({program}): {detail}");
+            ServiceFailure::Launch { program, detail }
+        }
+        Blocked::CrashLoop {
+            status,
+            spawned_at_ms,
+        } => {
+            let startup =
+                crate::service_failure::read_startup_failure(bearer_path, spawned_at_ms).await;
+            log::error!(
+                "fluxdown-agent keeps exiting right after launch (last: {status}); startup record: {startup:?}"
+            );
+            ServiceFailure::Exited { status, startup }
+        }
+    }
+}
+
 /// 连接诊断：只记状态迁移（失败原因变化、恢复连接）与按 2 的幂递增的持续失败提醒，
 /// 不逐次记录 100ms 一次的快速重试。
 #[derive(Default)]
@@ -341,7 +432,10 @@ impl ConnectionLog {
         let since = *self.since.get_or_insert_with(Instant::now);
         let reason = error.describe();
         // 冷启动期间「尚无 bearer / 端口未监听」是预期状态，只作 info。
-        let expected = matches!(error, ConnectError::NoBearer | ConnectError::Refused);
+        let expected = matches!(
+            error,
+            ConnectError::NoBearer | ConnectError::Refused | ConnectError::TimedOut(_)
+        );
         if reason != self.last_reason {
             if expected {
                 log::info!("agent not reachable yet: {reason}");
@@ -386,18 +480,92 @@ fn retry_delay(attempt: usize) -> Duration {
     }
 }
 
-/// 握手前 `system.shutdown`：只有支持该首帧的 agent（协议 v4 起）会受理。
-async fn request_shutdown(config: &AgentClientConfig, rpc_url: &str) -> bool {
-    let Ok(mut socket) = open_socket(config, rpc_url).await else {
-        return false;
-    };
-    let mut buffered = Vec::new();
-    call_on_socket(&mut socket, 1, method::SYSTEM_SHUTDOWN, None, &mut buffered)
-        .await
-        .is_ok()
+/// 握手总超时：WS 升级、`system.hello`、`system.snapshot` 整体的上限。agent 已 bind 但尚未开始
+/// serve、或已挂死时，没有它桌面会永久停在「正在连接」。
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// 真正建连的超时上限：连续超时时逐轮加倍，封顶于此。
+const CONNECT_TIMEOUT_MAX: Duration = Duration::from_secs(5);
+/// 无 bearer 但端口有人监听时，不拉起新 agent 的宽限：监听者可能是本用户 agent 的初始化期，
+/// 也可能是其他用户的 agent；超过宽限仍无 bearer 就拉起（本用户 agent 已在时新进程会因数据
+/// 目录锁立即以成功码退出，无害）。
+const NO_BEARER_LISTENER_GRACE: Duration = Duration::from_secs(3);
+
+/// 真正建连的超时：从 [`PROBE_TIMEOUT`] 起，连续超时逐轮加倍并封顶；被拒或连上即复位。
+struct ConnectTimeout {
+    current: Duration,
 }
 
-async fn open_socket(config: &AgentClientConfig, rpc_url: &str) -> Result<Socket, ConnectError> {
+impl ConnectTimeout {
+    fn new() -> Self {
+        Self {
+            current: PROBE_TIMEOUT,
+        }
+    }
+
+    fn current(&self) -> Duration {
+        self.current
+    }
+
+    /// 记录一轮连接的失败（成功为 `None`）。没读到 bearer 的轮次没有触及网络，不改变超时。
+    fn observe(&mut self, failure: Option<&ConnectError>) {
+        match failure {
+            Some(ConnectError::TimedOut(_)) => {
+                self.current = self.current.saturating_mul(2).min(CONNECT_TIMEOUT_MAX);
+            }
+            Some(ConnectError::NoBearer) => {}
+            _ => self.current = PROBE_TIMEOUT,
+        }
+    }
+}
+
+/// 连续「无 bearer」的时间：决定是否仍在不拉起的宽限内。
+#[derive(Default)]
+struct NoBearerGrace {
+    since: Option<Instant>,
+}
+
+impl NoBearerGrace {
+    /// 本轮仍在宽限内（应先探测监听者，有人监听就不拉起）。
+    fn within_grace(&mut self, now: Instant) -> bool {
+        let since = *self.since.get_or_insert(now);
+        now.saturating_duration_since(since) < NO_BEARER_LISTENER_GRACE
+    }
+
+    fn reset(&mut self) {
+        self.since = None;
+    }
+}
+
+/// 握手前 `system.shutdown`：只有支持该首帧的 agent（协议 v4 起）会受理。
+async fn request_shutdown(config: &AgentClientConfig, rpc_url: &str) -> bool {
+    let Ok((request, stream)) = dial(config, rpc_url, CONNECT_TIMEOUT_MAX).await else {
+        return false;
+    };
+    let call = async {
+        let mut socket = upgrade(request, stream).await?;
+        let mut buffered = Vec::new();
+        call_on_socket(&mut socket, 1, method::SYSTEM_SHUTDOWN, None, &mut buffered).await
+    };
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, call).await {
+        Ok(Ok(_)) => true,
+        Ok(Err(error)) => {
+            log::warn!("shutdown request to the agent failed: {}", error.describe());
+            false
+        }
+        Err(_) => {
+            log::warn!("shutdown request to the agent timed out after {HANDSHAKE_TIMEOUT:?}");
+            false
+        }
+    }
+}
+
+/// 读 bearer 并完成 TCP 连接（超时 `connect_timeout`）。先自行建连：回环端口无人监听时按超时
+/// 判定，不等 Windows 约 2s 的拒绝。
+async fn dial(
+    config: &AgentClientConfig,
+    rpc_url: &str,
+    connect_timeout: Duration,
+) -> Result<(Request, TcpStream), ConnectError> {
     let bearer = tokio::fs::read_to_string(&config.bearer_path)
         .await
         .map_err(|_| ConnectError::NoBearer)?;
@@ -413,23 +581,52 @@ async fn open_socket(config: &AgentClientConfig, rpc_url: &str) -> Result<Socket
     request
         .headers_mut()
         .insert(header::AUTHORIZATION, authorization);
-    // 先自行完成 TCP 连接：回环端口无人监听时按超时判定，不等 Windows 约 2s 的拒绝。
-    let stream = match crate::service_bootstrap::connect_listener(rpc_url).await {
-        Ok(Some(stream)) => stream,
-        Ok(None) => return Err(ConnectError::Refused),
+    let stream = match connect_listener(rpc_url, connect_timeout).await {
+        Ok(ListenerProbe::Listening(stream)) => stream,
+        Ok(ListenerProbe::Refused) => return Err(ConnectError::Refused),
+        Ok(ListenerProbe::TimedOut) => return Err(ConnectError::TimedOut(connect_timeout)),
         Err(error) => return Err(ConnectError::Transient(format!("connect: {error}"))),
     };
-    let (socket, _) = tokio_tungstenite::client_async(request, MaybeTlsStream::Plain(stream))
-        .await
-        .map_err(classify_connect_error)?;
+    Ok((request, stream))
+}
+
+async fn upgrade(request: Request, stream: TcpStream) -> Result<Socket, ConnectError> {
+    // 代理快照内嵌完整 daemon 快照，随任务数增长且单帧发出：帧与消息上限一同放宽。
+    let limit = Some(fluxdown_protocol::MAX_INBOUND_RPC_MESSAGE_BYTES);
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_frame_size(limit)
+        .max_message_size(limit);
+    let (socket, _) = tokio_tungstenite::client_async_with_config(
+        request,
+        MaybeTlsStream::Plain(stream),
+        Some(config),
+    )
+    .await
+    .map_err(classify_connect_error)?;
     Ok(socket)
 }
 
 async fn connect(
     config: &AgentClientConfig,
     rpc_url: &str,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
 ) -> Result<(Socket, Snapshot, Vec<EventFrame>), ConnectError> {
-    let mut socket = open_socket(config, rpc_url).await?;
+    let (request, stream) = dial(config, rpc_url, connect_timeout).await?;
+    match tokio::time::timeout(handshake_timeout, handshake(request, stream)).await {
+        Ok(result) => result,
+        Err(_) => Err(ConnectError::Transient(format!(
+            "handshake timed out after {handshake_timeout:?} (agent accepted the connection but did not complete the handshake)"
+        ))),
+    }
+}
+
+/// WS 升级 + `system.hello` + `system.snapshot`；总时长由调用方限制。
+async fn handshake(
+    request: Request,
+    stream: TcpStream,
+) -> Result<(Socket, Snapshot, Vec<EventFrame>), ConnectError> {
+    let mut socket = upgrade(request, stream).await?;
     let mut buffered = Vec::new();
     let hello = serde_json::json!({
         "clientName": "fluxdown-desktop",
@@ -691,10 +888,12 @@ async fn call_on_socket(
     )))
 }
 
+/// 401 不致命：每次连接都重读 bearer，读完仍被拒说明监听者不是本用户的 agent，交给重连循环
+/// 拉起本用户的 agent（它会回退到系统分配端口并重新发布端点）。
 fn classify_connect_error(error: tokio_tungstenite::tungstenite::Error) -> ConnectError {
     match &error {
         tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 401 => {
-            ConnectError::Fatal(RpcErrorData::new(ApplicationErrorCode::Unauthorized, false))
+            ConnectError::Unauthorized
         }
         _ => ConnectError::Transient(format!("handshake: {error}")),
     }
@@ -705,6 +904,11 @@ enum ConnectError {
     NoBearer,
     /// 连接 agent 端口被拒：此刻确定无人监听。
     Refused,
+    /// TCP 建连在给定时长内未完成：无法确定是否有人监听（杀软 WFP 过滤、高负载、Windows 对
+    /// 未监听回环端口约 2s 才返回拒绝）。
+    TimedOut(Duration),
+    /// 握手被 401 拒绝：监听者不是本用户 / 本数据目录的 agent，或端点文件已陈旧。
+    Unauthorized,
     /// 握手 / 传输失败，携带诊断原因。
     Transient(String),
     /// 对端协议版本不兼容：可尝试让旧 agent 退出后由 bootstrap 拉起同级新版本。
@@ -720,6 +924,13 @@ impl ConnectError {
                 "no bearer token yet (agent not started or still initializing)".to_owned()
             }
             Self::Refused => "connection refused (agent not listening)".to_owned(),
+            Self::TimedOut(timeout) => format!(
+                "connection attempt timed out after {timeout:?} (agent not accepting loopback connections yet)"
+            ),
+            Self::Unauthorized => {
+                "agent rejected the bearer token (listener is not this user's agent, or the endpoint is stale)"
+                    .to_owned()
+            }
             Self::Transient(reason) => reason.clone(),
             Self::Incompatible => "incompatible protocol version".to_owned(),
             Self::Fatal(error) => format!("fatal: {:?}", error.code),
@@ -756,3 +967,7 @@ pub enum AgentClientError {
 #[cfg(test)]
 #[path = "agent_client_submission_tests.rs"]
 mod submission_tests;
+
+#[cfg(test)]
+#[path = "agent_client_connect_tests.rs"]
+mod connect_tests;

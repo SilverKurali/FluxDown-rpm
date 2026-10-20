@@ -69,7 +69,7 @@ Return `null` or `undefined` to pass through: FluxDown downloads `ctx.url` uncha
 | `fileName` | string | Override the saved file name. Ignored when empty. |
 | `totalBytes` | integer | File size in bytes. Used **only when `ephemeral` is `true`**, as the size hint for the skipped probe (an unknown or `0` size becomes "unknown"). Otherwise ignored: FluxDown probes the real size itself. A selected variant's `totalBytes` overrides this field first. |
 | `extraHeaders` | object | Headers to send when downloading the resolved link. They replace the headers captured with the task. |
-| `request` | object | A [`RequestPatch`](/docs/en/plugins/interceptors-guide/#requestpatch) applied to this run of the task — same rules as the `prepare` stage (same-host `url`, headers, cookies, User-Agent, `segments`, …). An invalid patch fails the task with `[插件] <identity>: <message>`. Applied on every run, never stored. If both `extraHeaders` and `request` are returned, `extraHeaders` replaces the header table first and `request` is applied on top. |
+| `request` | object | A [`RequestPatch`](/docs/en/plugins/interceptors-guide/#requestpatch) applied to this run of the task — same rules as the `prepare` stage (same-host `url`, headers, cookies, User-Agent, `segments`, `maxRangeBytes` for links that reject large `Range` spans, …). An invalid patch fails the task with `[插件] <identity>: <message>`. Applied on every run, never stored. If both `extraHeaders` and `request` are returned, `extraHeaders` replaces the header table first and `request` is applied on top. |
 | `ephemeral` | boolean | `true` = the link is one-shot / anti-hotlinked: skip the metadata probe (at the cost of weaker resume-integrity checks). Default `false`: probe normally and keep ETag-based resume validation. |
 | `rangeSupported` | boolean | `true` = you guarantee the resolved host honours HTTP Range requests (e.g. googlevideo). Combined with `ephemeral`, FluxDown still skips the probe but plans a full multi-segment download right away instead of the conservative single-stream start. Default `false`: without a probe, Range capability is learned from the first response. |
 | `variants` | array | Multiple quality/format choices — see [Variants](#variants). |
@@ -316,6 +316,7 @@ Guard rails, all enforced host-side:
 |---|---|
 | Schemes | `http` / `https` only |
 | Destinations | Publicly routable addresses only. Loopback, LAN, link-local, CGNAT, documentation/benchmark ranges and cloud-metadata IPs are blocked — checked against the literal URL, at DNS resolution (so DNS rebinding is covered), and again on every redirect hop. When the user has configured a proxy in the app, DNS is resolved by the proxy and only the literal-IP and redirect checks apply. |
+| Dev-mode exception | Plugins loaded through "Install from directory (developer mode)" are not subject to the public-address restriction: they can reach `localhost`, LAN hosts, etc. (direct connection, bypassing the global proxy) so they can talk to local services during development. Normally installed plugins are unchanged. |
 | Response body cap | 8 MB, then truncated |
 | Per-request timeout | 10 s |
 | Concurrent requests | 8, shared across all plugins |

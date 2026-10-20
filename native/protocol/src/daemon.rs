@@ -881,6 +881,10 @@ pub struct PluginDto {
     /// 插件包在 daemon 主机上的绝对目录（仅已加载插件有值）；本机桌面端据此读取 `desktop.entry`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_dir: Option<String>,
+    /// 插件包修订号：包代码被替换（安装 / 升级 / dev 安装 / dev 重载）后变化，只做相等比较；
+    /// 桌面端据此重新挂载桌面脚本视图。旧 daemon 不下发时为 0。
+    #[serde(default)]
+    pub package_revision: u64,
 }
 
 /// 插件贡献点（镜像 `engine::plugin::ContributesDecl`）。

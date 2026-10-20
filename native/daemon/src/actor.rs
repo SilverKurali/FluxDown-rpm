@@ -6,8 +6,9 @@ use std::time::Duration;
 use base64::Engine as _;
 use fluxdown_engine::Engine;
 use fluxdown_engine::download_manager::{
-    BT_DISABLED_MESSAGE, BatchItemOutcome, CreateGroupSpec, CreateRejection, FileExistsBehavior,
-    NewTaskSpec, TaskDone, UNSUPPORTED_PROTOCOL_MESSAGE, rejects_unsupported_protocol,
+    BT_DISABLED_MESSAGE, BatchItemOutcome, BoostError, CreateGroupSpec, CreateRejection,
+    FileExistsBehavior, NewTaskSpec, TaskDone, UNSUPPORTED_PROTOCOL_MESSAGE,
+    rejects_unsupported_protocol,
 };
 #[cfg(feature = "plugins")]
 use fluxdown_engine::download_manager::{ResolveOutcome, ResolvePreviewOutcome};
@@ -277,6 +278,9 @@ pub enum ActorError {
     /// 资源正被另一操作占用（如同一任务的校验已在进行）。
     #[error("conflict: {0}")]
     Conflict(String),
+    /// 任务当前状态不允许该操作（如对已完成 / 失败任务设优先下载）。
+    #[error("task state conflict: {0}")]
+    TaskStateConflict(String),
 }
 
 /// daemon actor 命令。
@@ -1117,7 +1121,11 @@ async fn execute_operation(
         ActorOperation::MoveToQueue { task_id, queue_id } => {
             engine.manager.move_task_to_queue(task_id, queue_id).await
         }
-        ActorOperation::Boost { task_id } => engine.manager.set_priority_task(task_id).await,
+        ActorOperation::Boost { task_id } => engine
+            .manager
+            .set_priority_task(task_id)
+            .await
+            .map_err(boost_error)?,
         ActorOperation::PatchConfig {
             expected_revision,
             values,
@@ -2116,6 +2124,17 @@ fn batch_delete_result(
             outcome.failed, outcome.deleted
         ))),
         Err(error) => Err(ActorError::Operation(format!("{error:#}"))),
+    }
+}
+
+/// 设优先下载被拒 → 操作结果：已完成 / 失败任务回报状态冲突，客户端据此提示。
+fn boost_error(error: BoostError) -> ActorError {
+    match error {
+        BoostError::NotFound => ActorError::NotFound,
+        BoostError::Completed | BoostError::Ended => {
+            ActorError::TaskStateConflict(error.to_string())
+        }
+        BoostError::Db(error) => ActorError::Operation(format!("{error:#}")),
     }
 }
 

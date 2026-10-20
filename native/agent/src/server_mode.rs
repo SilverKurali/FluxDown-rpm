@@ -777,28 +777,14 @@ impl ServerHandle {
 }
 
 /// daemon loopback HTTP 的流式转发客户端（无整体超时：大文件下载可以很久）。
-/// 鉴权用已认证 WebSocket 会话派生的会话级凭据，见 `DaemonClientConfig::http_session`。
+/// 鉴权与目标地址取自已认证 WebSocket 会话，见 `DaemonClientConfig::http_session`。
 struct DaemonHttp {
-    base_url: reqwest::Url,
     session: crate::daemon_client::HttpSession,
     client: reqwest::Client,
 }
 
 impl DaemonHttp {
     fn new(config: &DaemonClientConfig) -> Result<Self, BlobError> {
-        let mut base_url = reqwest::Url::parse(&config.rpc_url)
-            .map_err(|error| BlobError::Url(error.to_string()))?;
-        let scheme = match base_url.scheme() {
-            "ws" | "http" => "http",
-            "wss" | "https" => "https",
-            other => return Err(BlobError::Url(format!("unsupported scheme {other}"))),
-        };
-        base_url
-            .set_scheme(scheme)
-            .map_err(|()| BlobError::Url("scheme is not settable".to_owned()))?;
-        base_url.set_path("");
-        base_url.set_query(None);
-        base_url.set_fragment(None);
         // 只连本机回环 daemon：跳过系统根证书加载（见 `DaemonBlobClient::new`）。
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -806,7 +792,6 @@ impl DaemonHttp {
             .connect_timeout(Duration::from_secs(5))
             .build()?;
         Ok(Self {
-            base_url,
             session: config.http_session(),
             client,
         })
@@ -826,18 +811,24 @@ impl DaemonHttp {
         {
             return StatusCode::NOT_FOUND.into_response();
         }
-        let mut url = self.base_url.clone();
+        // 没有已认证的 daemon 会话时 daemon 视为不可用，绝不退回长期 token。
+        let Some(access) = self.session.access() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let mut url = access.base_url;
         match url.path_segments_mut() {
             Ok(mut path) => {
                 path.clear().extend(segments);
             }
             Err(()) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
-        // 没有已认证的 daemon 会话时 daemon 视为不可用，绝不退回长期 token。
-        let Some(credential) = self.session.credential() else {
-            return StatusCode::SERVICE_UNAVAILABLE.into_response();
-        };
-        let upstream = match self.client.get(url).bearer_auth(credential).send().await {
+        let upstream = match self
+            .client
+            .get(url)
+            .bearer_auth(access.credential)
+            .send()
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!(error = %error, "daemon file proxy request failed");

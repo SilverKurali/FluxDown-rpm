@@ -770,10 +770,9 @@ pub enum CaptureError {
 
 /// daemon 专用二进制上传端点（`POST /blobs/{torrents|plugins}`）的客户端。
 ///
-/// 鉴权用 daemon 在已认证 WebSocket 会话上派生的会话级 HTTP 凭据，不使用长期 token；
-/// base URL 由 RPC URL 换成 http(s) 并去掉路径。
+/// 鉴权与目标地址都取自已认证 WebSocket 会话（会话级凭据 + 该会话所连 daemon 的 HTTP 基址），
+/// 不使用长期 token；daemon 换端口重连后自动跟随。
 pub struct DaemonBlobClient {
-    base_url: reqwest::Url,
     session: crate::daemon_client::HttpSession,
     http: reqwest::Client,
 }
@@ -796,19 +795,6 @@ impl BlobKind {
 
 impl DaemonBlobClient {
     pub fn new(config: &crate::daemon_client::DaemonClientConfig) -> Result<Self, BlobError> {
-        let mut base_url = reqwest::Url::parse(&config.rpc_url)
-            .map_err(|error| BlobError::Url(error.to_string()))?;
-        let scheme = match base_url.scheme() {
-            "ws" | "http" => "http",
-            "wss" | "https" => "https",
-            other => return Err(BlobError::Url(format!("unsupported scheme {other}"))),
-        };
-        base_url
-            .set_scheme(scheme)
-            .map_err(|()| BlobError::Url("scheme is not settable".to_owned()))?;
-        base_url.set_path("");
-        base_url.set_query(None);
-        base_url.set_fragment(None);
         // 只连本机回环 daemon：不需要根证书库，跳过系统根证书加载（macOS 钥匙串，每次约 70ms，
         // 位于 Gateway 开始服务前的装配路径上）。
         let http = reqwest::Client::builder()
@@ -819,7 +805,6 @@ impl DaemonBlobClient {
             .timeout(std::time::Duration::from_secs(60))
             .build()?;
         Ok(Self {
-            base_url,
             session: config.http_session(),
             http,
         })
@@ -827,19 +812,19 @@ impl DaemonBlobClient {
 
     /// 上传字节并返回 daemon 分配的 `blobId`。
     pub async fn upload(&self, kind: BlobKind, bytes: Vec<u8>) -> Result<String, BlobError> {
-        let url = self
+        // 没有已认证的 daemon 会话（未连上 / 已断开）时没有可用凭据：按 daemon 不可用处理，
+        // 绝不退回长期 token。
+        let Some(access) = self.session.access() else {
+            return Err(BlobError::Status(503));
+        };
+        let url = access
             .base_url
             .join(kind.path())
             .map_err(|error| BlobError::Url(error.to_string()))?;
-        // 没有已认证的 daemon 会话（未连上 / 已断开）时没有可用凭据：按 daemon 不可用处理，
-        // 绝不退回长期 token。
-        let Some(credential) = self.session.credential() else {
-            return Err(BlobError::Status(503));
-        };
         let response = self
             .http
             .post(url)
-            .bearer_auth(credential)
+            .bearer_auth(access.credential)
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
             .body(bytes)
             .send()
@@ -1389,7 +1374,7 @@ mod tests {
         });
         let (daemon, events) = crate::daemon_client::DaemonClient::start(
             crate::daemon_client::DaemonClientConfig::new(format!("ws://{address}/rpc"), TOKEN),
-            Arc::new(crate::supervisor::DaemonSupervisor::new(address)),
+            Arc::new(crate::supervisor::DaemonSupervisor::new(Some(address))),
             tokio_util::sync::CancellationToken::new(),
         )
         .expect("start daemon client");
@@ -1845,8 +1830,9 @@ mod tests {
             stream.write_all(body).await.expect("respond body");
             head
         });
+        let rpc_url = format!("ws://{address}/rpc");
         let config = crate::daemon_client::DaemonClientConfig::new(
-            format!("ws://{address}/rpc"),
+            rpc_url.clone(),
             "long-lived-daemon-token",
         );
         let client = super::DaemonBlobClient::new(&config).expect("blob client");
@@ -1859,9 +1845,13 @@ mod tests {
         assert!(matches!(error, super::BlobError::Status(503)), "{error}");
         assert!(!server.is_finished());
 
-        config
-            .http_session()
-            .install("session-credential".to_owned());
+        config.http_session().install(
+            crate::daemon_client::DaemonHttpAccess::from_rpc_url(
+                &rpc_url,
+                "session-credential".to_owned(),
+            )
+            .expect("session access"),
+        );
         let blob_id = client
             .upload(super::BlobKind::Torrent, vec![1, 2, 3])
             .await

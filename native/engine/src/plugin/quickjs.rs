@@ -186,6 +186,7 @@ impl QuickJsScriptRuntime {
         let ffmpeg_root = host.ffmpeg_root.clone();
         let ytdlp_permitted = host.ytdlp_permitted;
         let auth_permitted = host.auth_permitted;
+        let private_network_allowed = host.private_network_allowed;
         let interrupt_ns_bridge = interrupt_ns.clone();
         // 脚本墙钟里扣除的排队时间（yt-dlp 并发槽等待）。
         let wall_pause = Arc::new(super::runtime::WallPause::default());
@@ -201,6 +202,7 @@ impl QuickJsScriptRuntime {
                 ffmpeg_root,
                 ytdlp_permitted,
                 auth_permitted,
+                private_network_allowed,
                 interrupt_ns_bridge,
                 wall_pause_bridge,
             )
@@ -701,6 +703,7 @@ pub(super) fn inject_bridge(
     ffmpeg_root: Option<PathBuf>,
     ytdlp_permitted: bool,
     auth_permitted: bool,
+    private_network_allowed: bool,
     interrupt_ns: Arc<AtomicU64>,
     wall_pause: Arc<super::runtime::WallPause>,
 ) -> Result<(), rquickjs::Error> {
@@ -722,6 +725,7 @@ pub(super) fn inject_bridge(
                         serde_json::from_str(&opts).unwrap_or_default();
                     let mut req = req;
                     req.auth_allowed = auth_permitted;
+                    req.private_network_allowed = private_network_allowed;
                     // 网络等待不烧 CPU：挂起时长补回中断预算（常驻宿主的 2 s CPU 预算依赖它）。
                     let started = Instant::now();
                     let outcome = b.http_request(&pid, req).await;

@@ -166,7 +166,7 @@ pub fn install(cx: &mut App) {
         }
         SessionSignal::Event(frame) => on_event(&frame.event, cx),
         SessionSignal::Fatal(_) | SessionSignal::ServiceStopped => clear(cx),
-        SessionSignal::Stale => {}
+        SessionSignal::Stale | SessionSignal::ServiceFailed(_) => {}
     })
     .detach();
     let store = Desktop::global(cx).settings_store.clone();

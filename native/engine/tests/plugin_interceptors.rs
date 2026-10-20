@@ -838,3 +838,169 @@ async fn broken_interceptor_script_is_rejected_at_install() {
     );
     cleanup(&work).await;
 }
+
+// ---------------------------------------------------------------------------
+// C：`maxRangeBytes` —— 只接受小区间的直链（网盘 CDN）
+// ---------------------------------------------------------------------------
+
+/// 服务器接受的最大 Range 跨度，与 [`SCRIPT_RANGE_CAP`] 里的 `maxRangeBytes` 一致。
+const RANGE_CAP: usize = 262_144;
+
+const SCRIPT_RANGE_CAP: &str = r#"
+globalThis.intercept = async (ctx) => {
+  if (ctx.stage === "prepare") {
+    return { segments: 4, maxRangeBytes: 262144 };
+  }
+  return null;
+};
+"#;
+
+#[derive(Default)]
+struct CapServerState {
+    /// 无 Range、开放式 Range 或跨度超过 [`RANGE_CAP`] 的数据请求数。
+    violations: AtomicUsize,
+    max_span: AtomicUsize,
+    data_gets: AtomicUsize,
+}
+
+/// 对 HEAD / 无 Range / 开放式 Range / 超跨度 Range 一律 403 的服务器；`armed` 时全部 403。
+fn spawn_capped_server(body: Arc<Vec<u8>>, armed: Arc<AtomicBool>) -> (u16, Arc<CapServerState>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let state = Arc::new(CapServerState::default());
+    let shared = state.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let state = shared.clone();
+            let body = body.clone();
+            let armed = armed.clone();
+            std::thread::spawn(move || serve_capped(&mut stream, &state, &body, &armed));
+        }
+    });
+    (port, state)
+}
+
+fn serve_capped(stream: &mut TcpStream, state: &CapServerState, body: &[u8], armed: &AtomicBool) {
+    const FORBIDDEN: &[u8] =
+        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let Some(req) = read_request(stream) else {
+        return;
+    };
+    if req.method == "HEAD" || armed.load(Ordering::SeqCst) {
+        write_ignoring_disconnect(stream, FORBIDDEN);
+        return;
+    }
+    let bounds = req
+        .headers
+        .get("range")
+        .and_then(|r| r.strip_prefix("bytes="))
+        .and_then(|r| r.split_once('-'))
+        .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)));
+    let Some((start, end)) = bounds else {
+        state.violations.fetch_add(1, Ordering::SeqCst);
+        write_ignoring_disconnect(stream, FORBIDDEN);
+        return;
+    };
+    let span = end.saturating_sub(start) + 1;
+    if span > RANGE_CAP || start >= body.len() {
+        state.violations.fetch_add(1, Ordering::SeqCst);
+        write_ignoring_disconnect(stream, FORBIDDEN);
+        return;
+    }
+    let end = end.min(body.len() - 1);
+    if span > 1 {
+        state.data_gets.fetch_add(1, Ordering::SeqCst);
+    }
+    state.max_span.fetch_max(end - start + 1, Ordering::SeqCst);
+    let head = format!(
+        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{}\r\nAccept-Ranges: bytes\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+        end - start + 1,
+        body.len()
+    );
+    if write_ignoring_disconnect(stream, head.as_bytes()) {
+        write_ignoring_disconnect(stream, &body[start..=end]);
+    }
+}
+
+/// `prepare` 返回的 `maxRangeBytes` 随每次运行重放：首次运行（服务器全 403）失败后，
+/// 恢复的第二次运行仍只发 ≤ 上限的有界 Range，并完整下完。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prepare_max_range_bytes_applies_on_every_run() {
+    let work = std::env::temp_dir().join(format!("fluxdown-intercept-range-{}", uniq()));
+    tokio::fs::create_dir_all(&work).await.expect("mkdir work");
+    let body: Arc<Vec<u8>> = Arc::new(
+        (0..3 * 1024 * 1024 + 4_567)
+            .map(|i| (i % 249) as u8)
+            .collect(),
+    );
+    let armed = Arc::new(AtomicBool::new(true));
+    let (port, server) = spawn_capped_server(body.clone(), armed.clone());
+
+    let mut engine = make_engine(&work).await;
+    install_plugin(
+        &engine,
+        &work.join("plugin_src"),
+        "tester@rangecap",
+        r#"["prepare"]"#,
+        SCRIPT_RANGE_CAP,
+    )
+    .await;
+    let mut done_rx = engine.manager.take_done_rx().expect("done_rx");
+
+    let id = engine
+        .manager
+        .create_task(NewTaskSpec {
+            url: format!("http://127.0.0.1:{port}/file.bin"),
+            save_dir: work.to_string_lossy().into_owned(),
+            file_name: "file.bin".to_string(),
+            segments: 1,
+            ..Default::default()
+        })
+        .await
+        .expect("create task");
+
+    let done = tokio::time::timeout(Duration::from_secs(60), done_rx.recv())
+        .await
+        .expect("first run finishes")
+        .expect("done channel open");
+    engine.manager.on_task_done(&done).await;
+    let task = engine.db.load_task_by_id(&id).await.unwrap().unwrap();
+    assert_eq!(task.status, 4, "first run must fail under 403");
+
+    armed.store(false, Ordering::SeqCst);
+    engine.manager.resume_task(&id).await;
+    let done = tokio::time::timeout(Duration::from_secs(60), done_rx.recv())
+        .await
+        .expect("second run finishes")
+        .expect("done channel open");
+    engine.manager.on_task_done(&done).await;
+    let task = engine.db.load_task_by_id(&id).await.unwrap().unwrap();
+    assert_eq!(task.status, 3, "second run failed: {}", task.error_message);
+    let bytes = tokio::fs::read(work.join(&task.file_name))
+        .await
+        .expect("read output");
+    assert!(
+        bytes == *body,
+        "downloaded content differs from server body"
+    );
+
+    assert_eq!(
+        server.violations.load(Ordering::SeqCst),
+        0,
+        "engine sent a request the capped endpoint rejects"
+    );
+    assert!(server.max_span.load(Ordering::SeqCst) <= RANGE_CAP);
+    assert!(
+        server.data_gets.load(Ordering::SeqCst) >= body.len().div_ceil(RANGE_CAP),
+        "download was not split into windows"
+    );
+
+    let notes = plugin_notes(&engine, &id).await;
+    assert!(
+        notes.iter().any(|n| n.contains("Range 跨度上限")),
+        "activity log must name the changed field: {notes:?}"
+    );
+
+    cleanup(&work).await;
+}

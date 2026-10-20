@@ -120,12 +120,14 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail, selecti
       })
     }
     if (only.source === 'local') {
+      // 已完成 / 失败的任务不会处于 Boost；残留标记也只显示「优先下载」，点击给出提示。
+      const ended = only.state === 'completed' || only.state === 'failed'
       entries.push({
         type: 'item',
         key: 'boost',
-        label: only.boosted ? t('cancelBoost') : t('boostDownload'),
+        label: only.boosted && !ended ? t('cancelBoost') : t('boostDownload'),
         icon: Zap,
-        onSelect: () => void toggleBoost(only.taskId),
+        onSelect: () => void toggleBoost(only),
       })
     }
   }

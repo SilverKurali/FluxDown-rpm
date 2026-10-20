@@ -11,6 +11,7 @@ mod digest;
 pub mod error;
 pub mod event;
 pub mod handshake;
+pub mod local_service;
 pub mod method;
 pub mod plugin_view;
 pub mod rpc;
@@ -123,9 +124,9 @@ pub use plugin_view::{
 };
 pub use rpc::{
     APP_VERSION, CLOSE_REASON_SERVICE_QUIT, CLOSE_REASON_SERVICE_RESTART, ClientHello,
-    JSONRPC_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, RequestId, RpcFailureResponse,
-    RpcIncoming, RpcNotification, RpcRequest, RpcResponse, RpcSuccessResponse, ServiceHello,
-    ServiceRole, negotiate_protocol, validate_first_request,
+    JSONRPC_VERSION, MAX_INBOUND_RPC_MESSAGE_BYTES, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    RequestId, RpcFailureResponse, RpcIncoming, RpcNotification, RpcRequest, RpcResponse,
+    RpcSuccessResponse, ServiceHello, ServiceRole, negotiate_protocol, validate_first_request,
 };
 pub use settings::{
     CUSTOM_THEMES_KEY, FILE_ICON_PACK_KEY, MAX_CUSTOM_THEME_ID_LEN, MAX_SYNC_VALUE_BYTES,

@@ -70,7 +70,7 @@ sourceHash: "485aa6e33714"
 | `fileName` | string | 覆盖保存的文件名；为空时忽略。 |
 | `totalBytes` | integer | 文件大小（字节）。**仅当 `ephemeral` 为 `true` 时**才被采用，作为跳过探测后的大小提示（未知或 `0` 视为「未知」）。其他情况下被忽略：FluxDown 会自己探测真实大小。被选中变体的 `totalBytes` 会先覆盖这个字段。 |
 | `extraHeaders` | object | 下载解析后链接时要发送的请求头，会替换任务原本捕获的请求头。 |
-| `request` | object | 应用于任务本次运行的 [`RequestPatch`](/docs/zh/plugins/interceptors-guide/#requestpatch)，规则与 `prepare` 阶段相同（同主机 `url`、请求头、Cookie、User-Agent、`segments` 等）。非法补丁会让任务失败，错误为 `[插件] <identity>: <消息>`。每次运行都会应用，不会存库。同时返回 `extraHeaders` 与 `request` 时，先由 `extraHeaders` 替换请求头表，再叠加 `request`。 |
+| `request` | object | 应用于任务本次运行的 [`RequestPatch`](/docs/zh/plugins/interceptors-guide/#requestpatch)，规则与 `prepare` 阶段相同（同主机 `url`、请求头、Cookie、User-Agent、`segments`，以及用于拒绝大 `Range` 区间的直链的 `maxRangeBytes` 等）。非法补丁会让任务失败，错误为 `[插件] <identity>: <消息>`。每次运行都会应用，不会存库。同时返回 `extraHeaders` 与 `request` 时，先由 `extraHeaders` 替换请求头表，再叠加 `request`。 |
 | `ephemeral` | boolean | `true` 表示链接是一次性 / 防盗链的：跳过元数据探测（代价是续传完整性校验变弱）。默认 `false`：正常探测并保留基于 ETag 的续传校验。 |
 | `rangeSupported` | boolean | `true` 表示你保证解析后的主机支持 HTTP Range 请求（例如 googlevideo）。与 `ephemeral` 同时使用时，FluxDown 仍然跳过探测，但会立即规划完整的多段下载，而不是保守的单流起步。默认 `false`：没有探测时，Range 能力由首个响应判断。 |
 | `variants` | array | 多个画质 / 格式选项，见[变体](#变体variants)。 |
@@ -317,6 +317,7 @@ HTTP 客户端。`opts`：
 |---|---|
 | 协议 | 仅 `http` / `https` |
 | 目标地址 | 仅限公网可路由地址。环回、局域网、链路本地、CGNAT、文档 / 基准测试地址段和云元数据 IP 都被拦截——对字面量 URL、DNS 解析结果（因此能防 DNS rebinding）以及每一跳重定向都会检查。用户在应用里配置了代理时，DNS 由代理解析，只有字面量 IP 与重定向检查生效。 |
+| 开发模式例外 | 通过「从目录安装（开发模式）」加载的插件不受上述公网限制，可访问 `localhost`、局域网等地址（直连，不走全局代理），便于连接本机服务联调；正式安装的插件行为不变。 |
 | 响应体上限 | 8 MB，超出截断 |
 | 单请求超时 | 10 秒 |
 | 并发请求 | 8，所有插件共享 |

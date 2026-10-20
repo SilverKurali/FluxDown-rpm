@@ -215,6 +215,7 @@ fn open_with(cx: &mut App, focus: bool) -> Option<WindowHandle<Root>> {
         cx.defer(crate::account_host::replay_pending);
         cx.defer(crate::plugin_notices::replay_pending);
         cx.defer(crate::update_notices::replay_pending);
+        cx.defer(crate::service_notices::replay_pending);
     }
     handle
 }

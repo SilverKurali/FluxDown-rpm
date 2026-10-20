@@ -112,6 +112,8 @@ pub struct PluginTaskCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginTaskTab {
     pub title: SharedString,
+    /// 内容修订号：变化即旧视图作废、须按工厂重建（插件包代码被替换时由 app 递增）。
+    pub revision: u64,
 }
 
 /// app 注入的跨窗口 / 跨能力入口；未注入的入口对应按钮无动作。
@@ -2015,13 +2017,23 @@ impl DownloadView {
     fn on_toggle_boost_selected(
         &mut self,
         _: &ToggleBoostSelected,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let selected = self.table_state.read(cx).delegate().selected_keys();
         let Some(key) = selected.iter().find(|key| key.is_local()) else {
             return;
         };
+        // 只有未结束的任务能优先下载：已完成 / 失败直接提示，不下发命令。
+        let ended_notice = match self.controller.store().get(key).map(|row| row.state) {
+            Some(TaskState::Completed) => Some(self.strings.boost_task_completed.clone()),
+            Some(TaskState::Failed) => Some(self.strings.boost_task_ended.clone()),
+            _ => None,
+        };
+        if let Some(notice) = ended_notice {
+            window.push_notification(Notification::warning(notice), cx);
+            return;
+        }
         self.execute_commands(
             vec![DownloadsCommand::ToggleBoost {
                 task_id: key.task_id().to_owned(),
