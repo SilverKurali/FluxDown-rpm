@@ -1,13 +1,16 @@
 /**
  * Release 下载入口（仅 302，不代理文件流量）。
  * 镜像 = 阿里云 CDN（OSS 私有 Bucket 回源，不能回退 GitHub），302 前必须确认 OSS 有该资产且大小一致。
- * source=auto / 无 source / 未知 source：中国大陆访客（ip2region 按 X-Client-IP 判定）走镜像，
- * 镜像缺该资产或其他访客走 GitHub。source=github：仅 GitHub；source=oss：仅镜像，不可用返回 503。
+ * 只有中国大陆访客（ip2region 按 X-Client-IP 判定）且像正常客户端（24 小时内读过发布清单、
+ * 非脚本 User-Agent，见 download-gate.ts）才走镜像；其余访客、脚本与镜像缺资产时走 GitHub。
+ * source=github：仅 GitHub；source=oss：可走镜像的访客在镜像不可用时返回 503，其余同 auto。
  */
 import type { APIRoute } from "astro";
 import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 import { getCached, setCached } from "@/lib/api-cache";
 import { getClientIp } from "@/lib/client-ip";
+import { recordDownload } from "@/lib/download-ban";
+import { mayUseMirror } from "@/lib/download-gate";
 import { isMainlandChinaIp } from "@/lib/geoip";
 import { cdnConfigured, cdnDownloadUrl, ossConfigured, presignOssHeadUrl, releaseObjectKey } from "@/lib/oss";
 import { DownloadLookupCache } from "@/lib/download-cache";
@@ -103,8 +106,20 @@ export const GET: APIRoute = async ({ params, url, request, clientAddress }) => 
   if (!filename) return jsonError(400, "Missing filename");
   const tag = url.searchParams.get("tag")?.trim() || "";
   const source = downloadSource(url.searchParams.get("source"));
-  const wantsMirror = source === "oss" ||
-    (source !== "github" && isMainlandChinaIp(getClientIp(request, clientAddress)));
+  const ip = getClientIp(request, clientAddress);
+  const banned = recordDownload(ip, `${tag}/${filename}`);
+  if (banned > 0) {
+    return new Response(JSON.stringify({ error: "Too many downloads from this IP; try again later." }), {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        "Retry-After": String(Math.ceil(banned / 1000)),
+      },
+    });
+  }
+  const wantsMirror = source !== "github" && isMainlandChinaIp(ip) &&
+    mayUseMirror(ip, request.headers.get("user-agent"));
 
   try {
     const { value: releases, stale } = await releaseCache().lookup(
@@ -128,10 +143,10 @@ export const GET: APIRoute = async ({ params, url, request, clientAddress }) => 
       const key = releaseObjectKey(release.tag_name, asset.name);
       if (await ossHasAsset(key, asset.size)) return downloadRedirect(cdnDownloadUrl(key), "cdn");
     }
-    if (source === "oss") return ossUnavailable();
+    if (source === "oss" && wantsMirror) return ossUnavailable();
     return downloadRedirect(asset.browser_download_url, "github", stale);
   } catch (error) {
-    if (source === "oss") return ossUnavailable();
+    if (source === "oss" && wantsMirror) return ossUnavailable();
     if (error instanceof DownloadLookupError && error.transient) {
       return jsonError(503, error.message);
     }

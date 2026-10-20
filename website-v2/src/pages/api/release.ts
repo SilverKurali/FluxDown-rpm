@@ -40,6 +40,8 @@ import type { APIRoute } from "astro";
 import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 import { getCached, setCached } from "../../lib/api-cache";
 import { withBase } from "@/lib/base";
+import { getClientIp } from "@/lib/client-ip";
+import { markReleaseViewer } from "@/lib/download-gate";
 import {
   desktopAssets,
   pickComponentRelease,
@@ -60,7 +62,9 @@ const CACHE_TTL = 12 * 60 * 60 * 1000;
 // 因此作为固定基数叠加到当前仓库的动态下载量之上。
 const DOWNLOADS_BASELINE = 55_318 + 58_320;
 
-export const GET: APIRoute = async ({ url }) => {
+export const GET: APIRoute = async ({ url, request, clientAddress }) => {
+  // 读过发布清单的访客才能拿 CDN 下载链接（见 download-gate.ts）。
+  markReleaseViewer(getClientIp(request, clientAddress));
   // 渠道：缺省 stable（官网/存量客户端不带 channel 参数 → 永远稳定版）；
   // frontier 放行 prerelease，供客户端"预览版"更新通道使用。
   const channel =
