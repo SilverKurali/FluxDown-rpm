@@ -1,7 +1,7 @@
 /**
  * 下载页客户端逻辑(由 download.astro 的 <script> 引入,仅在存在 [data-dl-root] 时运行)。
  *
- * - 拉取 /api/release(?channel=frontier),默认使用 CF 缓存 → OSS 回源 → GitHub 兜底,提供 GitHub 备用直链;
+ * - 拉取 /api/release(?channel=frontier),主链接走 /api/download(大陆访客阿里云 CDN,其余 GitHub),提供 GitHub 备用直链;
  *   失败时保留服务端渲染的 GitHub Releases 回退链接并显示错误条。
  * - 识别访客 OS / CPU 架构,决定首屏主按钮;`D` 键在本页直接触发主按钮。
  * - 复制按钮、邮件订阅表单。

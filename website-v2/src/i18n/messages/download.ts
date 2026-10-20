@@ -9,7 +9,7 @@ export const download = defineMessages({
         "Download the FluxDown desktop client for Windows, macOS and Linux — a native GPU-rendered app on a Rust download engine. Plus the headless server, CLI, Android build and browser extensions.",
     },
     source: {
-      note: "Downloads use Cloudflare cache first, fetch from OSS on a cache miss, and automatically fall back to GitHub if OSS fails. You can also use the GitHub backup link.",
+      note: "Visitors in mainland China download through our Aliyun CDN mirror; everyone else downloads from GitHub. If the mirror doesn't have the file yet, it falls back to GitHub automatically. You can also use the GitHub backup link.",
       backup: "GitHub backup",
     },
     hero: {
@@ -167,7 +167,7 @@ export const download = defineMessages({
         "下载 FluxDown 桌面客户端(Windows / macOS / Linux):GPU 原生渲染的界面,Rust 下载引擎。另有无头服务器、命令行、Android 与浏览器扩展。",
     },
     source: {
-      note: "默认优先通过 Cloudflare 缓存下载，未命中时从 OSS 回源，OSS 失败后自动回退 GitHub。也可使用 GitHub 备用链接。",
+      note: "中国大陆访客通过阿里云 CDN 镜像下载，其他地区直接从 GitHub 下载；镜像暂缺该文件时自动回退 GitHub。也可使用 GitHub 备用链接。",
       backup: "GitHub 备用下载",
     },
     hero: {

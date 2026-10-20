@@ -2,26 +2,21 @@ import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { bustApiCaches } from "../src/lib/api-cache";
 
 let configured = true;
-let cdnConfigured = false;
-let cnConfigured = false;
+let cdnConfigured = true;
+const MAINLAND_IP = "114.114.114.114";
 const signatures: string[] = [];
 mock.module("astro:env/server", () => ({ GITHUB_TOKEN: "", GITHUB_REPO: "owner/repo" }));
+mock.module("../src/lib/geoip", () => ({ isMainlandChinaIp: (ip: string) => ip === MAINLAND_IP }));
 const ossMock = () => ({
   ossConfigured: configured,
-  cnCdnConfigured: cnConfigured,
-  cdnDownloadUrl: (key: string, tag: string) => cdnConfigured
-    ? `https://cdn.example/${key}?fallback=github&tag=${encodeURIComponent(tag)}` : null,
-  cnCdnDownloadUrl: (key: string) => {
-    signatures.push("CN");
-    return `https://cn.example/${key}?auth_key=signed`;
+  cdnConfigured,
+  cdnDownloadUrl: (key: string) => {
+    signatures.push("CDN");
+    return `https://cdn.example/${key}?auth_key=signed`;
   },
   releaseObjectKey: (tag: string, name: string) => `${tag}/${name}`,
-  presignOssUrl: (method: string, key: string) => {
-    signatures.push(method);
-    return `https://oss.example/${key}`;
-  },
-  ossDownloadUrl: (key: string) => {
-    signatures.push("GET");
+  presignOssHeadUrl: (key: string) => {
+    signatures.push("HEAD");
     return `https://oss.example/${key}`;
   },
 });
@@ -38,10 +33,8 @@ let sequence = 0;
 beforeEach(() => {
   bustApiCaches();
   configured = true;
-  cdnConfigured = false;
-  cnConfigured = false;
+  cdnConfigured = true;
   mock.module("../src/lib/oss", ossMock);
-  draft = false;
   prerelease = false;
   status = 200;
   headSize = "12";
@@ -62,99 +55,86 @@ beforeEach(() => {
 });
 afterAll(() => { globalThis.fetch = originalFetch; mock.restore(); });
 
-async function get(source = "", tag = `v${sequence}`, filename = "app.zip", country = "") {
+async function get(source = "", tag = `v${sequence}`, filename = "app.zip", clientIp = "") {
   const url = new URL(`https://site.example/api/download/${filename}`);
   if (source) url.searchParams.set("source", source);
   if (tag) url.searchParams.set("tag", tag);
-  const request = new Request(url, { headers: country ? { "cf-ipcountry": country } : {} });
-  return GET({ params: { filename }, url, request } as Parameters<typeof GET>[0]);
+  const request = new Request(url, { headers: clientIp ? { "x-client-ip": clientIp } : {} });
+  return GET({ params: { filename }, url, request, clientAddress: "10.0.0.1" } as Parameters<typeof GET>[0]);
 }
 
-test("github never signs or probes OSS", async () => {
-  const response = await get("github");
+test("github never signs or probes OSS, even for mainland visitors", async () => {
+  const response = await get("github", `v${sequence}`, "app.zip", MAINLAND_IP);
   expect(response.status).toBe(302);
   expect(response.headers.get("X-Download-Source")).toBe("github");
   expect(signatures).toEqual([]);
   expect(requests.length).toBe(1);
 });
 
-test("auto uses CDN without HEAD or signing even when website OSS credentials are absent", async () => {
-  cdnConfigured = true;
-  configured = false;
-  mock.module("../src/lib/oss", ossMock);
-  headSize = "0";
-  const response = await get("auto");
-  expect(response.status).toBe(302);
-  expect(response.headers.get("X-Download-Source")).toBe("cdn");
-  expect(response.headers.get("Location")).toBe(
-    `https://cdn.example/v${sequence}/app.zip?fallback=github&tag=v${sequence}`,
-  );
-  expect(signatures).toEqual([]);
-  expect(requests.length).toBe(1);
-});
-
-test("auto without CDN retains verified OSS then GitHub fallback", async () => {
-  expect((await get("auto")).headers.get("X-Download-Source")).toBe("oss");
-  expect(signatures).toEqual(["HEAD", "GET"]);
-  sequence++;
-  headSize = "11";
+test("visitors outside mainland China go straight to GitHub without probing", async () => {
+  for (const source of ["auto", "", "unknown"]) {
+    const response = await get(source, `v${sequence}`, "app.zip", "8.8.8.8");
+    expect(response.headers.get("X-Download-Source")).toBe("github");
+  }
+  // 无 X-Client-IP 时按 TCP 对端判定，同样不是大陆。
   expect((await get("auto")).headers.get("X-Download-Source")).toBe("github");
-});
-
-test("auto CDN still requires published exact GitHub metadata", async () => {
-  cdnConfigured = true;
-  draft = true;
-  expect((await get("auto")).status).toBe(403);
-  bustApiCaches();
-  draft = false;
-  expect((await get("auto", `v${sequence}`, "unknown.zip")).status).toBe(404);
-  bustApiCaches();
-  status = 503;
-  expect((await get("auto")).status).toBe(503);
   expect(signatures).toEqual([]);
 });
 
-test("mainland visitors get a verified OSS asset through the signed Aliyun CDN, else GitHub", async () => {
-  cdnConfigured = true;
-  cnConfigured = true;
-  mock.module("../src/lib/oss", ossMock);
+test("mainland visitors get a verified OSS asset through the signed CDN, else GitHub", async () => {
   for (const source of ["auto", ""]) {
-    const response = await get(source, `v${sequence}`, "app.zip", "CN");
-    expect(response.headers.get("X-Download-Source")).toBe("cn-cdn");
-    expect(response.headers.get("Location")).toBe(`https://cn.example/v${sequence}/app.zip?auth_key=signed`);
+    const response = await get(source, `v${sequence}`, "app.zip", MAINLAND_IP);
+    expect(response.headers.get("X-Download-Source")).toBe("cdn");
+    expect(response.headers.get("Location")).toBe(`https://cdn.example/v${sequence}/app.zip?auth_key=signed`);
   }
   // HEAD 结果缓存：同一资产只探测一次。
-  expect(signatures).toEqual(["HEAD", "CN", "CN"]);
-  expect((await get("auto", `v${sequence}`, "app.zip", "HK")).headers.get("X-Download-Source")).toBe("cdn");
+  expect(signatures).toEqual(["HEAD", "CDN", "CDN"]);
   sequence++;
   headSize = "11";
   signatures.length = 0;
-  const missing = await get("auto", `v${sequence}`, "app.zip", "CN");
+  const missing = await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP);
   expect(missing.headers.get("X-Download-Source")).toBe("github");
   expect(signatures).toEqual(["HEAD"]);
 });
 
-test("mainland routing is off until the Aliyun CDN key is configured", async () => {
-  cdnConfigured = true;
-  mock.module("../src/lib/oss", ossMock);
-  const response = await get("auto", `v${sequence}`, "app.zip", "CN");
-  expect(response.headers.get("X-Download-Source")).toBe("cdn");
+test("CDN routing is off until both the CDN key and OSS credentials are configured", async () => {
+  for (const [cdn, oss] of [[false, true], [true, false]]) {
+    cdnConfigured = cdn;
+    configured = oss;
+    mock.module("../src/lib/oss", ossMock);
+    bustApiCaches();
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP)).headers.get("X-Download-Source")).toBe("github");
+    expect((await get("oss")).status).toBe(503);
+  }
   expect(signatures).toEqual([]);
 });
 
-test("legacy prefers verified OSS and forced OSS also works", async () => {
-  expect((await get()).headers.get("X-Download-Source")).toBe("oss");
-  expect((await get("oss")).headers.get("X-Download-Source")).toBe("oss");
-  expect(signatures).toEqual(["HEAD", "GET", "GET"]);
+test("forced OSS uses the CDN for any visitor", async () => {
+  const response = await get("oss", `v${sequence}`, "app.zip", "8.8.8.8");
+  expect(response.headers.get("X-Download-Source")).toBe("cdn");
+  expect(signatures).toEqual(["HEAD", "CDN"]);
 });
 
-test("size mismatch: legacy falls back, forced OSS returns 503 without Location", async () => {
+test("size mismatch: mainland falls back to GitHub, forced OSS returns 503 without Location", async () => {
   headSize = "11";
-  expect((await get()).headers.get("X-Download-Source")).toBe("github");
+  expect((await get("", `v${sequence}`, "app.zip", MAINLAND_IP)).headers.get("X-Download-Source")).toBe("github");
   const response = await get("oss");
   expect(response.status).toBe(503);
   expect(response.headers.has("Location")).toBe(false);
   expect(signatures).toEqual(["HEAD"]);
+});
+
+test("draft and missing assets never sign; explicit previews remain supported", async () => {
+  draft = true;
+  expect((await get("oss")).status).toBe(403);
+  expect(signatures).toEqual([]);
+  bustApiCaches();
+  draft = false;
+  prerelease = true;
+  expect((await get("github")).status).toBe(302);
+  expect((await get("oss", `v${sequence}`, "unknown.zip")).status).toBe(404);
+  expect((await get("github", "")).status).toBe(404);
+  expect(signatures).toEqual([]);
 });
 
 test("unconfigured OSS is explicit 503", async () => {

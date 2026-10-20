@@ -1,17 +1,15 @@
 /**
  * Release 下载入口（仅 302，不代理文件流量）。
- * source=auto：中国大陆访客先验证 OSS 再走阿里云 CDN；其余走 Cloudflare 边缘缓存（未命中 OSS 回源、
- * 失败 GitHub）；两者都没有时验证 OSS 后直连。OSS 缺少该资产一律回退 GitHub。
- * source=github：仅 GitHub；source=oss：仅已验证 OSS，不可用返回 503。
- * 无 source / 未知 source：保留旧客户端 OSS 优先、GitHub 兜底行为（大陆访客同样分流到阿里云 CDN）。
+ * 镜像 = 阿里云 CDN（OSS 私有 Bucket 回源，不能回退 GitHub），302 前必须确认 OSS 有该资产且大小一致。
+ * source=auto / 无 source / 未知 source：中国大陆访客（ip2region 按 X-Client-IP 判定）走镜像，
+ * 镜像缺该资产或其他访客走 GitHub。source=github：仅 GitHub；source=oss：仅镜像，不可用返回 503。
  */
 import type { APIRoute } from "astro";
 import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 import { getCached, setCached } from "@/lib/api-cache";
-import {
-  cdnDownloadUrl, cnCdnConfigured, cnCdnDownloadUrl, ossConfigured, ossDownloadUrl, presignOssUrl,
-  releaseObjectKey,
-} from "@/lib/oss";
+import { getClientIp } from "@/lib/client-ip";
+import { isMainlandChinaIp } from "@/lib/geoip";
+import { cdnConfigured, cdnDownloadUrl, ossConfigured, presignOssHeadUrl, releaseObjectKey } from "@/lib/oss";
 import { DownloadLookupCache } from "@/lib/download-cache";
 import { createOssProbe } from "@/lib/download-probe";
 import {
@@ -20,7 +18,6 @@ import {
   downloadSource,
   latestWithAsset,
   isGitHubDownloadUrl,
-  mayProbeOss,
   ossUnavailable,
   transientGitHubStatus,
   type DownloadRelease,
@@ -33,7 +30,7 @@ const GITHUB_HEADERS: Record<string, string> = {
   "X-GitHub-Api-Version": "2022-11-28",
   ...(GITHUB_TOKEN ? { Authorization: `Bearer ${GITHUB_TOKEN}` } : {}),
 };
-const ossHasAsset = createOssProbe((key) => presignOssUrl("HEAD", key, 60));
+const ossHasAsset = createOssProbe((key) => presignOssHeadUrl(key, 60));
 
 function releaseCache(): DownloadLookupCache<DownloadRelease[]> {
   const key = "download:lookup-cache:v2";
@@ -101,14 +98,13 @@ function jsonError(status: number, error: string): Response {
   });
 }
 
-export const GET: APIRoute = async ({ params, url, request }) => {
+export const GET: APIRoute = async ({ params, url, request, clientAddress }) => {
   const { filename } = params;
   if (!filename) return jsonError(400, "Missing filename");
   const tag = url.searchParams.get("tag")?.trim() || "";
   const source = downloadSource(url.searchParams.get("source"));
-  // 阿里云 CDN 不会回退 GitHub，所以大陆访客必须先确认 OSS 里有这个资产（结果缓存 1h）。
-  // CF-IPCountry 由 Cloudflare 写入；官网只经 Cloudflare 代理对外。
-  const mainland = cnCdnConfigured && ossConfigured && request.headers.get("cf-ipcountry") === "CN";
+  const wantsMirror = source === "oss" ||
+    (source !== "github" && isMainlandChinaIp(getClientIp(request, clientAddress)));
 
   try {
     const { value: releases, stale } = await releaseCache().lookup(
@@ -126,23 +122,11 @@ export const GET: APIRoute = async ({ params, url, request }) => {
       return jsonError(404, `Asset "${filename}" not found in release "${release.tag_name}"`);
     }
 
-    // 只有 GitHub 新鲜元数据确认的 tag + asset 才有资格获得 OSS 签名。
+    // 只有 GitHub 新鲜元数据确认的 tag + asset 才有资格获得 CDN 签名；HEAD 结果缓存 1h。
     // 过期缓存只允许 GitHub 公共 URL：撤回/转草稿后由 GitHub 自身拒绝访问。
-    if (source === "auto" && !stale && !mainland) {
-      const cdn = await cdnDownloadUrl(releaseObjectKey(release.tag_name, asset.name), release.tag_name);
-      // 不先 HEAD OSS：即使源站离线，边缘仍可能持有完整缓存。
-      if (cdn) return downloadRedirect(cdn, "cdn");
-    }
-    if (mayProbeOss(source, ossConfigured, stale)) {
+    if (wantsMirror && cdnConfigured && ossConfigured && !stale) {
       const key = releaseObjectKey(release.tag_name, asset.name);
-      if (await ossHasAsset(key, asset.size)) {
-        try {
-          const target = mainland ? cnCdnDownloadUrl(key) : await ossDownloadUrl(key);
-          if (target) return downloadRedirect(target, mainland ? "cn-cdn" : "oss");
-        } catch {
-          // 签名失败同样遵循强制 OSS 的 503 / auto 与旧客户端的 GitHub 兜底策略。
-        }
-      }
+      if (await ossHasAsset(key, asset.size)) return downloadRedirect(cdnDownloadUrl(key), "cdn");
     }
     if (source === "oss") return ossUnavailable();
     return downloadRedirect(asset.browser_download_url, "github", stale);
