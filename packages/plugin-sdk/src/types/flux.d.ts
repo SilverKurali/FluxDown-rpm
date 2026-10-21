@@ -196,9 +196,34 @@ export interface FluxCommands {
   register(id: string, handler: (ctx: { taskIds: string[] }) => Awaitable<void>): void;
 }
 
+/** Context passed as the handler's second argument. */
+export type FluxRpcContext =
+  | { readonly caller: "desktop" }
+  | {
+      readonly caller: "page";
+      /** URL of the page whose script made the call; comes from the web page, treat as untrusted. */
+      readonly pageUrl: string;
+    };
+
+export interface FluxRpcHandleOptions {
+  /**
+   * Also expose the handler to browser page scripts (`fluxdown.invoke(name, args)` in
+   * `contributes.pageScripts`). Requires the `pageScripts` permission; default `false`
+   * (desktop views only). Page-callable handlers must treat `args` and `ctx.pageUrl` as untrusted.
+   */
+  page?: boolean;
+}
+
 export interface FluxRpc {
-  /** Exposes `name` to the plugin's own desktop views via `fluxdown.invoke(name, args)`. */
-  handle(name: string, handler: (args: unknown) => Awaitable<unknown>): void;
+  /**
+   * Exposes `name` to the plugin's own desktop views via `fluxdown.invoke(name, args)`; with
+   * `{ page: true }` also to the plugin's page scripts. Old one-argument handlers keep working.
+   */
+  handle(
+    name: string,
+    handler: (args: unknown, ctx: FluxRpcContext) => Awaitable<unknown>,
+    options?: FluxRpcHandleOptions,
+  ): void;
 }
 
 export interface FluxEvents {

@@ -4,6 +4,7 @@ import {
   networkHostsOf,
   riskOf,
   validateManifest,
+  validatePageScriptFiles,
   validateSniffPack,
   VALID_PERMISSIONS,
   type PluginRisk,
@@ -75,8 +76,8 @@ describe("misc rules", () => {
     const good = { ...base, settings: [{ key: "k", title: "K", type: "number", min: 1, max: 5, default: "3" }] };
     expect(validateManifest(good, new Set()).ok).toBe(true);
   });
-  test("eight permissions", () => {
-    expect(VALID_PERMISSIONS).toHaveLength(8);
+  test("nine permissions", () => {
+    expect(VALID_PERMISSIONS).toHaveLength(9);
   });
   test("ipv6 network hosts", () => {
     const m = (host: string) => ({
@@ -107,5 +108,28 @@ describe("validateSniffPack", () => {
     const many = `{"format":"fluxdown-sniff-pack","rules":[${Array(501).fill("{}").join(",")}]}`;
     expect(validateSniffPack(many).ok).toBe(false);
     expect(validateSniffPack(new Uint8Array(256 * 1024 + 1).fill(32)).ok).toBe(false);
+  });
+});
+
+describe("validatePageScriptFiles", () => {
+  const script = { id: "demo", js: ["a.js", "b.js"] };
+  const files: Record<string, Uint8Array | string> = {
+    "a.js": "var a = 1;",
+    "b.js": new TextEncoder().encode("var b = 2;"),
+  };
+  const read = (path: string) => files[path];
+  test("concatenates with \\n;\\n", () => {
+    const result = validatePageScriptFiles(script, read);
+    expect(result.ok).toBe(true);
+    expect(result.code).toBe("var a = 1;\n;\nvar b = 2;");
+  });
+  test("rejects missing, oversized, non-UTF-8 and over-concatenated files", () => {
+    expect(validatePageScriptFiles(script, () => undefined).ok).toBe(false);
+    expect(validatePageScriptFiles(script, () => new Uint8Array(256 * 1024 + 1).fill(97)).ok).toBe(false);
+    expect(validatePageScriptFiles(script, () => new Uint8Array([0xff, 0xfe])).ok).toBe(false);
+    // 2 × 200 KiB passes per-file but exceeds the 384 KiB concatenation cap.
+    const big = { id: "demo", js: ["a.js", "b.js"] };
+    expect(validatePageScriptFiles(big, () => new Uint8Array(200 * 1024).fill(97)).ok).toBe(false);
+    expect(validatePageScriptFiles({ id: "demo", js: ["a.js"] }, () => new Uint8Array(200 * 1024).fill(97)).ok).toBe(true);
   });
 });

@@ -154,6 +154,7 @@ fn open_with(cx: &mut App, focus: bool) -> Option<WindowHandle<Root>> {
             let preferences = Desktop::preferences(cx).clone();
             activity::apply_visibility(shell, &preferences, cx);
             crate::chrome_layout::apply(shell, &preferences, cx);
+            crate::menus::apply_menu_bar_visibility(shell, &preferences, cx);
         });
 
         let settings_for_categories = settings_store.clone();

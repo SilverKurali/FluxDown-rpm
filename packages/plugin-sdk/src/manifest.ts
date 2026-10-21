@@ -15,6 +15,7 @@ export const VALID_PERMISSIONS = [
   "desktop",
   "background",
   "intercept",
+  "pageScripts",
 ] as const;
 export const VALID_INTERCEPT_STAGES = [
   "prepare",
@@ -41,6 +42,11 @@ export const TITLE_MAX_CHARS = 40;
 export const SNIFF_PACK_MAX_BYTES = 256 * 1024;
 export const SNIFF_PACK_MAX_RULES = 500;
 export const SNIFF_PACK_FORMAT = "fluxdown-sniff-pack";
+export const PAGE_SCRIPTS_MAX = 16;
+export const PAGE_SCRIPT_MATCHES_MAX = 32;
+export const PAGE_SCRIPT_JS_MAX = 8;
+export const PAGE_SCRIPT_FILE_MAX_BYTES = 256 * 1024;
+export const PAGE_SCRIPT_MAX_BYTES = 384 * 1024;
 
 const RSS_PROVIDER_ID = "rss";
 
@@ -285,6 +291,108 @@ function checkDesktop(
   }
 }
 
+const PAGE_SCRIPT_RUN_AT = ["document_start", "document_end", "document_idle"] as const;
+const PAGE_SCRIPT_WORLDS = ["isolated", "main"] as const;
+
+/**
+ * Rust `is_valid_match_pattern`: `<scheme>://<host><path>`, scheme `http`|`https`|`*`; host is
+ * `domain` or `*.domain` (`domain`: `[a-z0-9.-]`, contains `.`, no leading/trailing `.`/`-`, no
+ * empty label); no port; path starts with `/` and has no whitespace/control characters.
+ */
+export function isValidMatchPattern(pattern: unknown): pattern is string {
+  if (typeof pattern !== "string") return false;
+  const sep = pattern.indexOf("://");
+  if (sep < 0) return false;
+  const scheme = pattern.slice(0, sep);
+  if (scheme !== "http" && scheme !== "https" && scheme !== "*") return false;
+  const rest = pattern.slice(sep + 3);
+  const slash = rest.indexOf("/");
+  if (slash < 0) return false;
+  const host = rest.slice(0, slash);
+  const path = rest.slice(slash);
+  if (/[\u0000-\u001f\u007f-\u009f\s]/.test(path)) return false;
+  const domain = host.startsWith("*.") ? host.slice(2) : host;
+  return (
+    domain !== "" &&
+    domain.includes(".") &&
+    /^[a-z0-9.-]+$/.test(domain) &&
+    !/^[.-]/.test(domain) &&
+    !/[.-]$/.test(domain) &&
+    !domain.includes("..")
+  );
+}
+
+/** Rust `is_valid_page_script_id`: `^[a-z0-9][a-z0-9_-]{0,31}$`. */
+const isValidPageScriptId = (value: unknown): value is string =>
+  typeof value === "string" && /^[a-z0-9][a-z0-9_-]{0,31}$/.test(value);
+
+function checkPageScripts(errors: string[], value: unknown, files: Files, permissions: unknown) {
+  if (value === undefined || value === null) return;
+  if (!Array.isArray(value)) return void errors.push("contributes.pageScripts 须为数组");
+  if (value.length === 0) return;
+  if (value.length > PAGE_SCRIPTS_MAX) errors.push(`contributes.pageScripts 至多 ${PAGE_SCRIPTS_MAX} 项`);
+  if (!hasPermission(permissions, "pageScripts")) {
+    errors.push("声明 pageScripts 时 permissions 必须包含 pageScripts");
+  }
+  const seen = new Set<string>();
+  for (const script of value) {
+    if (!isObject(script)) {
+      errors.push("pageScript 须为对象");
+      continue;
+    }
+    unknownKeys(errors, "pageScript", script, [
+      "id", "title", "matches", "excludeMatches", "js", "runAt", "world", "allFrames",
+    ]);
+    const where = `pageScript '${String(script.id)}'`;
+    if (!isValidPageScriptId(script.id)) {
+      errors.push(`pageScript id '${String(script.id)}' 非法：须匹配 ^[a-z0-9][a-z0-9_-]{0,31}$`);
+    } else if (seen.has(script.id)) {
+      errors.push(`pageScript id '${script.id}' 重复`);
+    } else seen.add(script.id);
+    if (!validTitle(script.title)) errors.push(`${where} title 须为 1–${TITLE_MAX_CHARS} 个字符`);
+
+    const matches = script.matches;
+    if (!Array.isArray(matches) || matches.length < 1 || matches.length > PAGE_SCRIPT_MATCHES_MAX) {
+      errors.push(`${where} matches 须为 1–${PAGE_SCRIPT_MATCHES_MAX} 项`);
+    }
+    const excludes = script.excludeMatches ?? [];
+    if (!Array.isArray(excludes) || excludes.length > PAGE_SCRIPT_MATCHES_MAX) {
+      errors.push(`${where} excludeMatches 至多 ${PAGE_SCRIPT_MATCHES_MAX} 项`);
+    }
+    for (const [field, list] of [["matches", matches], ["excludeMatches", excludes]] as const) {
+      if (!Array.isArray(list)) continue;
+      for (const pattern of list) {
+        if (!isValidMatchPattern(pattern)) errors.push(`${where} ${field} '${String(pattern)}' 非法 match pattern`);
+      }
+    }
+
+    const js = script.js;
+    if (!Array.isArray(js) || js.length < 1 || js.length > PAGE_SCRIPT_JS_MAX) {
+      errors.push(`${where} js 须为 1–${PAGE_SCRIPT_JS_MAX} 项`);
+    } else {
+      const jsSeen = new Set<string>();
+      for (const file of js) {
+        if (!isSafeRelativePath(file)) {
+          errors.push(`${where} js 路径 '${String(file)}' 非法`);
+          continue;
+        }
+        if (!hasExtension(file, [".js"])) errors.push(`${where} js '${file}' 扩展名须为 .js`);
+        if (jsSeen.has(file)) errors.push(`${where} js '${file}' 重复`);
+        else jsSeen.add(file);
+        if (!inPackage(files, file)) errors.push(`包内缺少文件 '${file}'`);
+      }
+    }
+
+    if (script.runAt !== undefined && !(PAGE_SCRIPT_RUN_AT as readonly unknown[]).includes(script.runAt)) {
+      errors.push(`${where} runAt 非法，合法：${PAGE_SCRIPT_RUN_AT.join(", ")}`);
+    }
+    if (script.world !== undefined && !(PAGE_SCRIPT_WORLDS as readonly unknown[]).includes(script.world)) {
+      errors.push(`${where} world 非法，合法：${PAGE_SCRIPT_WORLDS.join(", ")}`);
+    }
+    checkOptionalBool(errors, `${where} allFrames`, script.allFrames);
+  }
+}
+
 function checkContributes(
   errors: string[],
   manifest: Obj,
@@ -294,7 +402,7 @@ function checkContributes(
   const contributes = manifest.contributes;
   if (contributes === undefined || contributes === null) return;
   if (!isObject(contributes)) return void errors.push("contributes 须为对象");
-  unknownKeys(errors, "contributes", contributes, ["views", "commands", "sniffRules"]);
+  unknownKeys(errors, "contributes", contributes, ["views", "commands", "sniffRules", "pageScripts"]);
   const hasMain = manifest.main !== undefined && manifest.main !== null;
 
   const views = contributes.views ?? [];
@@ -372,6 +480,8 @@ function checkContributes(
       if (!inPackage(files, rules)) errors.push(`包内缺少文件 '${rules}'`);
     }
   }
+
+  checkPageScripts(errors, contributes.pageScripts, files, permissions);
 }
 
 function checkSetting(errors: string[], field: unknown, seen: Set<string>) {
@@ -641,10 +751,10 @@ export function validateManifest(
   return { ok: errors.length === 0, errors };
 }
 
-/** Risk level derived from permissions: `desktop` → full; any other elevated capability → elevated. */
+/** Risk level derived from permissions: `desktop` / `pageScripts` → full; any other elevated capability → elevated. */
 export function riskOf(manifest: { permissions?: readonly string[] | null }): PluginRisk {
   const permissions = manifest.permissions ?? [];
-  if (permissions.includes("desktop")) return "full";
+  if (permissions.includes("desktop") || permissions.includes("pageScripts")) return "full";
   const elevated = ["ffmpeg", "ytdlp", "auth", "tasks", "browserRules", "background", "intercept"];
   return permissions.some((p) => elevated.includes(p)) ? "elevated" : "standard";
 }
@@ -661,7 +771,7 @@ export function networkHostsOf(manifest: {
   return [...hosts].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-/** Files that must exist at install: `main.entry`, each `desktop.entry`, `sniffRules`. */
+/** Files that must exist at install: `main.entry`, each `desktop.entry`, `sniffRules`, every pageScript `js`. */
 export function packageFilesOf(manifest: Obj): string[] {
   const files: string[] = [];
   const main = manifest.main;
@@ -676,6 +786,13 @@ export function packageFilesOf(manifest: Obj): string[] {
       }
     }
     if (typeof contributes.sniffRules === "string") files.push(contributes.sniffRules);
+    if (Array.isArray(contributes.pageScripts)) {
+      for (const script of contributes.pageScripts) {
+        if (isObject(script) && Array.isArray(script.js)) {
+          for (const file of script.js) if (typeof file === "string") files.push(file);
+        }
+      }
+    }
   }
   return files;
 }
@@ -704,4 +821,56 @@ export function validateSniffPack(content: string | Uint8Array): ValidationResul
     errors.push(`sniffRules 至多 ${SNIFF_PACK_MAX_RULES} 条规则`);
   }
   return { ok: errors.length === 0, errors };
+}
+
+/**
+ * Validates the contents of one page script's `js` files (Rust `concat_page_script`): each file
+ * ≤256 KiB and valid UTF-8, concatenated (joined with `"\n;\n"`) ≤384 KiB. `read` returns the file
+ * bytes (or text) for a package-relative path, `undefined` when missing. On success `code` is the
+ * concatenation the extension registers.
+ */
+export function validatePageScriptFiles(
+  script: { id?: unknown; js?: unknown },
+  read: (path: string) => Uint8Array | string | undefined,
+): ValidationResult & { code?: string } {
+  const errors: string[] = [];
+  const id = String(script.id);
+  const js = Array.isArray(script.js) ? script.js : [];
+  let code = "";
+  let total = 0;
+  for (let i = 0; i < js.length; i++) {
+    const file = js[i];
+    if (typeof file !== "string") return { ok: false, errors: [`pageScript '${id}' js 路径非法`] };
+    const content = read(file);
+    if (content === undefined) {
+      errors.push(`pageScript '${id}' 读取 '${file}' 失败`);
+      return { ok: false, errors };
+    }
+    const size = typeof content === "string" ? utf8Length(content) : content.byteLength;
+    if (size > PAGE_SCRIPT_FILE_MAX_BYTES) {
+      errors.push(`pageScript '${id}' 文件 '${file}' 超过 ${PAGE_SCRIPT_FILE_MAX_BYTES} 字节`);
+      return { ok: false, errors };
+    }
+    let text: string;
+    if (typeof content === "string") text = content;
+    else {
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+      } catch {
+        errors.push(`pageScript '${id}' 文件 '${file}' 不是合法 UTF-8`);
+        return { ok: false, errors };
+      }
+    }
+    if (i > 0) {
+      code += "\n;\n";
+      total += 3;
+    }
+    code += text;
+    total += size;
+    if (total > PAGE_SCRIPT_MAX_BYTES) {
+      errors.push(`pageScript '${id}' 拼接后超过 ${PAGE_SCRIPT_MAX_BYTES} 字节`);
+      return { ok: false, errors };
+    }
+  }
+  return { ok: true, errors, code };
 }

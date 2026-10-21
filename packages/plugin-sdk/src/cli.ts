@@ -21,6 +21,7 @@ import {
   riskOf,
   networkHostsOf,
   validateManifest,
+  validatePageScriptFiles,
   validateSniffPack,
 } from "./manifest";
 
@@ -245,6 +246,17 @@ function validateDist(root: string): string[] {
     const rules = manifest.contributes.sniffRules;
     if (typeof rules === "string" && files.includes(rules)) {
       errors.push(...validateSniffPack(readFileSync(join(dist, rules))).errors);
+    }
+    const scripts = manifest.contributes.pageScripts;
+    if (Array.isArray(scripts)) {
+      for (const script of scripts) {
+        if (!isRecord(script) || !Array.isArray(script.js) || !script.js.every((f) => files.includes(f as string))) {
+          continue; // reported by validateManifest as a missing / illegal file
+        }
+        errors.push(
+          ...validatePageScriptFiles(script, (path) => new Uint8Array(readFileSync(join(dist, path)))).errors,
+        );
+      }
     }
   }
   return errors;

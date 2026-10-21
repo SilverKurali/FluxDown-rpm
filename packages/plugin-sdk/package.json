@@ -1,8 +1,13 @@
 {
   "name": "fluxdown-plugin-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Types, JSX runtime, manifest validator and CLI for building FluxDown plugins.",
   "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zerx-lab/FluxDown.git",
+    "directory": "packages/plugin-sdk"
+  },
   "type": "module",
   "bin": {
     "fluxdown-plugin": "dist/cli.js"
@@ -30,6 +35,9 @@
     },
     "./types/desktop": {
       "types": "./types/desktop.d.ts"
+    },
+    "./types/page": {
+      "types": "./types/page.d.ts"
     },
     "./package.json": "./package.json"
   },

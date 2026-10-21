@@ -852,6 +852,8 @@
   "keepAwakeWhileDownloadingDesc": "Prevent the system from sleeping or turning off the display while downloads are active. Restores automatically when done",
   "analyticsEnabled": "Anonymous Usage Statistics",
   "analyticsEnabledDesc": "Help improve FluxDown by sending anonymous usage data. No personal or sensitive data is collected",
+  "showMenuBar": "Show Menu Bar",
+  "showMenuBarDesc": "Show the File, Tasks, View, Tools and Help menus in the title bar",
   "sidebarVisibility": "Sidebar Sections",
   "sidebarVisibilityDesc": "Choose which sections to show in the sidebar",
   "showSidebarStatus": "Show Status",

@@ -852,6 +852,8 @@
   "keepAwakeWhileDownloadingDesc": "有任务下载时阻止系统睡眠和息屏，任务完成后自动恢复",
   "analyticsEnabled": "匿名使用统计",
   "analyticsEnabledDesc": "发送匿名使用数据以帮助改进 FluxDown，不收集任何个人或敏感数据",
+  "showMenuBar": "显示菜单栏",
+  "showMenuBarDesc": "在标题栏显示文件、任务、视图、工具、帮助菜单",
   "sidebarVisibility": "侧边栏显示",
   "sidebarVisibilityDesc": "选择在侧边栏中显示哪些区块",
   "showSidebarStatus": "显示状态",

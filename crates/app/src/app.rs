@@ -671,6 +671,7 @@ fn apply_activity_bar_preferences(values: &BTreeMap<String, serde_json::Value>, 
     if let Err(error) = shell.update(cx, |shell, cx| {
         crate::activity::apply_visibility(shell, values, cx);
         crate::chrome_layout::apply(shell, values, cx);
+        crate::menus::apply_menu_bar_visibility(shell, values, cx);
     }) {
         log::debug!("view or window released before lifecycle update: {error:#}");
     }

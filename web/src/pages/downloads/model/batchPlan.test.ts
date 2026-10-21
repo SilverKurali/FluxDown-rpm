@@ -34,6 +34,14 @@ describe('planTaskCommand', () => {
     expect(plan.remote).toEqual([paused])
   })
 
+  test('继续跳过已完成的本地任务，删除仍包含（#935）', () => {
+    const view = (taskId: string, state: string) =>
+      ({ source: 'local', taskId, remoteStatus: null, state }) as unknown as DownloadTaskView
+    const views = [view('done', 'completed'), view('failed', 'failed'), view('paused', 'paused')]
+    expect(planTaskCommand(views, 'resume').localIds).toEqual(['failed', 'paused'])
+    expect(planTaskCommand(views, 'delete').localIds).toEqual(['done', 'failed', 'paused'])
+  })
+
   test('空选择无任何调用', () => {
     const plan = planTaskCommand([], 'delete')
     expect(plan.localIds).toEqual([])

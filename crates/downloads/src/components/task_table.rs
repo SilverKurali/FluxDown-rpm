@@ -479,7 +479,7 @@ pub(crate) enum MenuEntry {
 ///
 /// 多选时每一项都要求对**全部**选中任务成立（交集语义），resume/pause 例外
 /// ——只要选中集合中**存在**一个可恢复/可暂停的任务就显示（与工具栏按钮行为
-/// 一致：工具栏无条件对每个选中项下发命令，无效状态的任务被服务端忽略）。
+/// 一致：命令按 `task_command` 逐项生成，不适用状态的任务（如已完成任务的「继续」）被跳过）。
 pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> {
     if selection.is_empty() {
         return Vec::new();
@@ -3188,7 +3188,8 @@ pub(crate) fn row_actions(
 
 /// 单任务命令：本地任务走 daemon；远程任务只有暂停 / 继续 / 删除经 `agent.remote.command`
 /// 转发，且仅限云端状态允许该动作的任务（状态未知的任务不控制）。打开 / 显示没有本机
-/// 文件、全局命令不属于单任务，返回 `None`。
+/// 文件、全局命令不属于单任务，返回 `None`。已完成的本地任务不发「继续」：引擎对完成态的
+/// resume 会从头重新下载（#935），批量选择里混入的已完成任务必须跳过。
 fn task_command(row: &DownloadTaskView, action: ToolbarCommand) -> Option<DownloadsCommand> {
     let task_id = row.key.task_id().to_owned();
     if !row.key.is_local() {
@@ -3211,6 +3212,7 @@ fn task_command(row: &DownloadTaskView, action: ToolbarCommand) -> Option<Downlo
             }));
     }
     Some(match action {
+        ToolbarCommand::Resume if row.state == TaskState::Completed => return None,
         ToolbarCommand::Resume => DownloadsCommand::Resume { task_id },
         ToolbarCommand::Pause => DownloadsCommand::Pause { task_id },
         ToolbarCommand::Delete => DownloadsCommand::Delete {
@@ -4757,6 +4759,45 @@ mod tests {
             task_command(&row("completed"), ToolbarCommand::Delete),
             Some(DownloadsCommand::RemoteCommand(params))
                 if params.action == RemoteCommandAction::Delete
+        ));
+    }
+
+    /// #935：批量「继续」不得把已完成的本地任务交给 daemon（引擎对完成态的 resume 会从头重下）；
+    /// 暂停 / 失败的本地任务照常继续，已完成任务的删除 / 打开不受影响。
+    #[test]
+    fn local_resume_skips_completed_tasks() {
+        let row = |status: i32| {
+            let task = serde_json::from_value::<fluxdown_protocol::TaskDto>(serde_json::json!({
+                "taskId": "t1",
+                "url": "https://example.com/file",
+                "fileName": "f.bin",
+                "saveDir": "/tmp",
+                "status": status,
+                "downloadedBytes": 1,
+                "totalBytes": 1,
+                "errorMessage": "",
+                "createdAt": "100",
+                "proxyUrl": "",
+                "queueId": "main",
+                "checksum": ""
+            }))
+            .expect("task");
+            DownloadTaskView::local(&task, None, false)
+        };
+        assert!(task_command(&row(3), ToolbarCommand::Resume).is_none());
+        for status in [2, 4] {
+            assert!(matches!(
+                task_command(&row(status), ToolbarCommand::Resume),
+                Some(DownloadsCommand::Resume { task_id }) if task_id == "t1"
+            ));
+        }
+        assert!(matches!(
+            task_command(&row(3), ToolbarCommand::Delete),
+            Some(DownloadsCommand::Delete { .. })
+        ));
+        assert!(matches!(
+            task_command(&row(3), ToolbarCommand::Open),
+            Some(DownloadsCommand::OpenTask { .. })
         ));
     }
 
