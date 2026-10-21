@@ -5,7 +5,7 @@
 
 use std::{rc::Rc, sync::Arc};
 
-use fluxdown_protocol::{AgentSnapshot, ServiceEvent};
+use fluxdown_protocol::{AgentEvent, AgentSnapshot, DaemonEvent, ServiceEvent, WsServerMsg};
 use fluxdown_ui_components::tabular_numbers;
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
@@ -20,6 +20,7 @@ use crate::{
         DownloadTableDelegate, TableFilter, render_download_table, spawn_midnight_refresh,
     },
     controller::{DownloadsController, DownloadsPort, GroupSummary},
+    model::RowId,
     pages::task_detail::detail_row,
     strings::DownloadStrings,
 };
@@ -84,11 +85,36 @@ impl GroupDetailView {
 
     pub fn apply_event(&mut self, event: &ServiceEvent, cx: &mut Context<Self>) {
         let changed = self.controller.apply_event(event);
+        if self.is_other_group_task_event(event) {
+            // 控制器已应用；别组任务的进度不影响本组表格与概览，不重算可见行 / 汇总。
+            return;
+        }
         if changed {
             self.refresh_table(cx);
         } else {
             cx.notify();
         }
+    }
+
+    /// 单任务高频事件（任务变更 / 进度 / 运行态 / 元数据）涉及的任务不属于本组。
+    fn is_other_group_task_event(&self, event: &ServiceEvent) -> bool {
+        let ServiceEvent::Agent(AgentEvent::Daemon(event)) = event else {
+            return false;
+        };
+        let task_id = match event {
+            DaemonEvent::TaskChanged(task) => return task.group_id != self.group_id,
+            DaemonEvent::TaskRuntimeChanged(runtime) => &runtime.task_id,
+            DaemonEvent::Engine(
+                WsServerMsg::TaskProgress { task_id, .. }
+                | WsServerMsg::TaskMetaProbed { task_id, .. },
+            ) => task_id,
+            _ => return false,
+        };
+        let store = self.controller.store();
+        store
+            .find_local(task_id)
+            .and_then(|ix| store.row(RowId::Local(ix)))
+            .is_none_or(|row| row.group_id != self.group_id)
     }
 
     pub fn mark_stale(&mut self, cx: &mut Context<Self>) {
@@ -136,7 +162,10 @@ impl GroupDetailView {
         let tokens = theme.tokens().clone();
         let extended = theme.extended().clone();
         let summary = self.summary();
-        let status = if summary.total == 0 {
+        let status = if self.controller.tables_loading() {
+            // 任务表分页载入期间成员数不完整，不能显示「没有成员」。
+            self.strings.tasks_loading_title.clone()
+        } else if summary.total == 0 {
             self.t(cx, "groupDetailNoMembers")
         } else {
             SharedString::from(format!(

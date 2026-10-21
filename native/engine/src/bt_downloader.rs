@@ -2094,12 +2094,11 @@ pub fn rescue_stranded_staging_files(
 /// runtime thread after downloading is complete).
 ///
 /// 冲突判定同时覆盖三类占用:
-/// - **磁盘同名条目(大小写折叠)**:Windows/APFS 文件系统大小写不敏感,
-///   精确字节比较会漏判 `MOVIE (1)` vs 已存在的 `Movie (1)`,选中后
-///   move 落盘走 REPLACE 语义静默覆盖真实文件。折叠用 `to_lowercase`,
-///   非 UTF-8 名经 lossy 转换——只可能把不冲突误判为冲突(多让一个编号),
-///   决不会漏判。Linux 上折叠偏保守(ext4 大小写敏感,`movie` 与 `Movie`
-///   本可共存),代价仅是多让出一个名字,换取全平台一致的安全行为。
+/// - **磁盘同名条目**:不再整目录 `read_dir`,逐候选 `symlink_metadata`
+///   探测(见 `downloader::dedup_name_by_probe`),由文件系统自己裁决大小写:
+///   APFS/NTFS 等大小写不敏感文件系统上 `MOVIE (1)` 与已存在的 `Movie (1)` 是
+///   同一条目,探测天然命中,move 落盘不会 REPLACE 真实文件;大小写敏感文件系统
+///   上二者本就是不同文件。重度冲突(同名成百上千)时退化为一次折叠扫描。
 /// - **同名 HTTP/HLS 临时文件 `<name>.fdownloading`**:下载中的 HTTP 任务
 ///   已预订最终名(manager 启动期 dedup 认 temp),BT 完成若占用该名,
 ///   HTTP finalize rename 会覆盖 BT 产物(跨协议撞名)。
@@ -2116,52 +2115,16 @@ fn dedup_name_in_dir(
     avoid: &HashSet<String>,
     allow_overwrite: bool,
 ) -> std::io::Result<String> {
-    let temp_ext = crate::downloader::TEMP_EXT;
-    let candidate = dir.join(name);
-    let temp_candidate = dir.join(format!("{name}{temp_ext}"));
-    let final_conflict = if allow_overwrite {
-        candidate.is_dir()
-    } else {
-        candidate.exists()
-    };
-    if !final_conflict && !temp_candidate.exists() && !avoid.contains(&name.to_lowercase()) {
-        return Ok(name.to_string());
-    }
-
-    // Scan directory once (case-folded) to avoid per-candidate FS round-trips.
-    let mut existing = HashSet::new();
-    for entry in std::fs::read_dir(dir)? {
-        existing.insert(entry?.file_name().to_string_lossy().to_lowercase());
-    }
-
-    let stem = Path::new(name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(name);
-    let ext = Path::new(name).extension().and_then(|s| s.to_str());
-
-    for i in 1..=9999u32 {
-        let new_name = match ext {
-            Some(e) => format!("{} ({}).{}", stem, i, e),
-            None => format!("{} ({})", stem, i),
-        };
-        let folded = new_name.to_lowercase();
-        let folded_temp = format!("{folded}{temp_ext}");
-        if !existing.contains(&folded)
-            && !existing.contains(&folded_temp)
-            && !avoid.contains(&folded)
-        {
-            return Ok(new_name);
-        }
-    }
-    // 极端兜底:1..=9999 个编号变体全被占用时,此前返回**原名不变**,调用点
-    // (容器 / 单文件分支)会直接拿它当 dst,move_path 静默覆盖已存在文件丢数据。
-    // 改用 UUID 后缀保证唯一,杜绝覆盖。(BUG-BT-DEDUP-FALLBACK-OVERWRITE)
-    let uniq = uuid::Uuid::new_v4();
-    Ok(match ext {
-        Some(e) => format!("{} ({}).{}", stem, uniq, e),
-        None => format!("{} ({})", stem, uniq),
-    })
+    crate::downloader::dedup_name_by_probe(
+        dir,
+        name,
+        &crate::downloader::DedupRules {
+            reserved: None,
+            avoid: Some(avoid),
+            allow_overwrite,
+            companion_mp4: false,
+        },
+    )
 }
 
 struct CompletionLayoutInput<'a> {
@@ -7972,21 +7935,80 @@ mod tests {
         let dir = unique_test_dir("dedup_case_fold");
         std::fs::create_dir_all(&dir)
             .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
-        // Exact-case entry forces the early-return probe to see a conflict
-        // on every platform (Linux's Path::exists() is case-sensitive).
+        // 大小写由文件系统自己裁决:大小写不敏感文件系统(APFS/NTFS)上
+        // `Movie (1).mkv` 与 `MOVIE (1).mkv` 是同一条目,必须视为占用;大小写敏感
+        // 文件系统上二者是不同文件,rename 不会互相覆盖。
+        std::fs::write(dir.join("CaseProbe"), b"x")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        let case_insensitive = dir.join("caseprobe").exists();
         std::fs::write(dir.join("MOVIE.mkv"), b"x")
             .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
-        // Differently-cased numbered variant already occupies " (1)".
+        // Differently-cased numbered variant.
         std::fs::write(dir.join("Movie (1).mkv"), b"x")
             .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let name = super::dedup_name_in_dir(&dir, "MOVIE.mkv", &HashSet::new(), false)
             .expect("read dedup destination");
-        assert_ne!(
-            name, "MOVIE (1).mkv",
-            "case-different existing 'Movie (1).mkv' must be treated as occupied"
+        let expected = if case_insensitive {
+            "MOVIE (2).mkv"
+        } else {
+            "MOVIE (1).mkv"
+        };
+        assert_eq!(name, expected);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
+    }
+
+    /// 目录里有大量同名编号条目时,探测式去重与「整目录扫描」参照算法逐例一致:
+    /// 编号取最小可用、不覆盖任何既有条目(含 `.fdownloading` 与 `avoid` 声明)。
+    #[test]
+    fn dedup_name_in_dir_matches_directory_scan_with_many_entries() {
+        let dir = unique_test_dir("dedup_many_entries");
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(dir.join("pack.mkv"), b"x")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        for index in 1..=800u32 {
+            if index == 650 {
+                continue;
+            }
+            std::fs::write(dir.join(format!("pack ({index}).mkv")), b"x")
+                .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        }
+        // 缺口 650 只被 `.fdownloading` 临时文件占用(同样算占用),所以最小可用编号是 801。
+        std::fs::write(dir.join("pack (650).mkv.fdownloading"), b"x")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        let avoid = HashSet::new();
+        let expected = crate::downloader::dedup_reference_scan(
+            &dir,
+            "pack.mkv",
+            &HashSet::new(),
+            &avoid,
+            false,
         );
-        assert_eq!(name, "MOVIE (2).mkv");
+        let name = super::dedup_name_in_dir(&dir, "pack.mkv", &avoid, false)
+            .expect("read dedup destination");
+        assert_eq!(name, expected);
+        assert_eq!(name, "pack (801).mkv");
+
+        // claim 声明占住 801 → 802。
+        let claimed = HashSet::from(["pack (801).mkv".to_string()]);
+        let name = super::dedup_name_in_dir(&dir, "pack.mkv", &claimed, false)
+            .expect("read dedup destination");
+        assert_eq!(
+            name,
+            crate::downloader::dedup_reference_scan(
+                &dir,
+                "pack.mkv",
+                &HashSet::new(),
+                &claimed,
+                false
+            )
+        );
+        assert_eq!(name, "pack (802).mkv");
         if let Err(error) = std::fs::remove_dir_all(&dir)
             && error.kind() != std::io::ErrorKind::NotFound
         {

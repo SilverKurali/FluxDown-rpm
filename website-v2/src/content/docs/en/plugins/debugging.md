@@ -135,10 +135,12 @@ The engine reports these with the prefix `manifest 非法: ` (“manifest invali
 | `resolver timeoutMs 不可为 0` | `timeoutMs` is `0` (also checked for `auth` and `subscription`). | Use a positive integer, at most 30000 effective. |
 | `hooks.events 不可为空` | `hooks` without events. | List at least one event. |
 | `未知事件 '…'，合法：[…]` | Not one of `onStart`, `onError`, `onDone`, `onMetaProbed`, `onCancel`. | Fix the name (also applies to `main.events`). |
-| `未知权限 '…'，合法：[…]` | A permission name that does not exist. | Use one of `ffmpeg`, `ytdlp`, `auth`, `tasks`, `browserRules`, `desktop`, `background`, `intercept`. |
+| `未知权限 '…'，合法：[…]` | A permission name that does not exist. | Use one of `ffmpeg`, `ytdlp`, `auth`, `tasks`, `browserRules`, `desktop`, `background`, `intercept`, `pageScripts`. |
 | `声明 auth.entry 时 permissions 必须包含 auth` | `auth` without the `auth` permission. | Add `"auth"` to `permissions`. |
 | `声明 sniffRules 时 permissions 必须包含 browserRules` | Sniff rules without the permission. | Add `"browserRules"`. |
 | `main.background 为 true 时 permissions 必须包含 background` | `main.background` is `true` without the `background` permission. | Add `"background"`. |
+| `声明 pageScripts 时 permissions 必须包含 pageScripts` | `contributes.pageScripts` without the permission. | Add `"pageScripts"` to `permissions`. |
+| `pageScript '<id>' …` (id, title, matches, js errors) | A page script breaks a rule in the [manifest reference](/docs/en/plugins/manifest/#pagescripts). | Fix the named field. |
 | `view '<id>' 有可移植实现，必须声明 main` | A view without `desktop` (or with `portable: true`) needs a `main` script. | Declare `main`. |
 | `声明 commands 时必须声明 main` | Commands need `main`. | Declare `main`. |
 | `view id '…' 非法` / `command id '…' 非法：须匹配 ^[a-z][a-z0-9-]{0,31}$` | Id is not lowercase-letter-first, `a-z0-9-`, at most 32 characters. | Rename. |

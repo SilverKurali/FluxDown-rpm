@@ -14,7 +14,9 @@ mod completions;
 pub use completions::COMPLETION_WINDOW_LIMIT;
 use completions::CompletedTasks;
 
-use fluxdown_protocol::{AgentEvent, AgentSnapshot, DaemonEvent, ServiceEvent, TaskRuntimeDto};
+use fluxdown_protocol::{
+    AgentEvent, AgentSnapshot, DaemonEvent, ServiceEvent, TaskRuntimeDto, WsServerMsg,
+};
 use fluxdown_ui_components::{
     ControlExt as _, FluxIcon, IconControlExt as _, card, check_row, tabular_numbers,
 };
@@ -190,6 +192,11 @@ impl ProgressWindowView {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        // 任务表分页载入期间行集合只是占位：行不在不代表任务已被删除 / 完成集合已失效。
+        if self.controller.tables_loading() {
+            cx.notify();
+            return;
+        }
         if !self.refresh_completed() {
             self.close(cx);
             return;
@@ -231,9 +238,29 @@ impl ProgressWindowView {
         if let ServiceEvent::Agent(AgentEvent::DaemonConnectionChanged(connected)) = event {
             self.last_error = (!connected).then(|| self.strings.disconnected.clone());
         }
-        if self.controller.apply_event(event) {
+        let relevant = self.event_concerns_window(event);
+        // 控制器照常应用（完成集合随时要查任意任务），但与本窗口无关的单任务事件不重绘。
+        if self.controller.apply_event(event) && relevant {
             self.refresh(cx);
         }
+    }
+
+    /// 单任务的高频事件（进度 / 运行态 / 元数据 / 任务变更）只在涉及本窗口的任务（或完成集合里
+    /// 的任务）时才需要重绘；其余事件一律视为相关。
+    fn event_concerns_window(&self, event: &ServiceEvent) -> bool {
+        let ServiceEvent::Agent(AgentEvent::Daemon(event)) = event else {
+            return true;
+        };
+        let task_id = match event {
+            DaemonEvent::TaskChanged(task) => &task.task_id,
+            DaemonEvent::TaskRuntimeChanged(runtime) => &runtime.task_id,
+            DaemonEvent::Engine(
+                WsServerMsg::TaskProgress { task_id, .. }
+                | WsServerMsg::TaskMetaProbed { task_id, .. },
+            ) => task_id,
+            _ => return true,
+        };
+        *task_id == self.task_id || self.contains_completed(task_id)
     }
 
     pub fn mark_stale(&mut self, cx: &mut Context<Self>) {
@@ -587,7 +614,10 @@ impl ProgressWindowView {
                                             .flex_none()
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(task_status_color(row, cx))
-                                            .child(self.strings.task_status_text(row)),
+                                            .child(
+                                                self.strings
+                                                    .task_status_text(row, self.controller.store()),
+                                            ),
                                     )
                                     .child(
                                         div()

@@ -4459,6 +4459,13 @@
               "$ref": "#/components/schemas/PluginCommandDeclDto"
             }
           },
+          "pageScripts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginPageScriptDeclDto"
+            },
+            "description": "浏览器页面脚本声明（供授权 / 详情界面展示将在哪些网站运行脚本）。"
+          },
           "sniffRules": {
             "type": "boolean",
             "description": "是否贡献浏览器扩展嗅探规则。"
@@ -4636,6 +4643,34 @@
           },
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "PluginPageScriptDeclDto": {
+        "type": "object",
+        "description": "页面脚本贡献声明（镜像 manifest `contributes.pageScripts[]` 的展示字段）。",
+        "required": [
+          "id",
+          "title",
+          "matches",
+          "world"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "matches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "title": {
+            "type": "string"
+          },
+          "world": {
+            "type": "string",
+            "description": "`isolated` / `main`。"
           }
         }
       },
@@ -5407,11 +5442,7 @@
           "status",
           "downloadedBytes",
           "totalBytes",
-          "errorMessage",
-          "createdAt",
-          "proxyUrl",
-          "queueId",
-          "checksum"
+          "createdAt"
         ],
         "properties": {
           "autoRoute": {

@@ -392,8 +392,25 @@ private fun DownloadsListBody(
         val st = style
         if (!list.loaded || st == null || (list.taskTotal == 0 && view.connecting)) {
             item(key = "skeleton", contentType = ContentType.Skeleton) {
-                Box(Modifier.padding(horizontal = margin).cardSegment(first = true, last = true)) {
-                    FluxSkeletonRows(rows = 4, loadingLabel = str(R.string.mobileLoading))
+                val loading = list.loading
+                val label = when {
+                    loading == null -> str(R.string.mobileLoading)
+                    loading.total > 0 -> str(R.string.mobileTasksLoadingProgress, "n" to loading.total)
+                    else -> str(R.string.mobileTasksLoading)
+                }
+                Column(Modifier.padding(horizontal = margin)) {
+                    Box(Modifier.cardSegment(first = true, last = true)) {
+                        FluxSkeletonRows(rows = 4, loadingLabel = label)
+                    }
+                    // 任务表分页载入期间给出可见的进度文案（列表此时为空，不能显示空态）。
+                    if (loading != null) {
+                        FluxText(
+                            label,
+                            style = FluxTheme.type.monoS,
+                            color = FluxTheme.colors.inkFaint,
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
+                    }
                 }
             }
         } else if (list.entries.isEmpty()) {

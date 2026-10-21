@@ -21,6 +21,7 @@ pub mod diagnostics;
 pub mod egress;
 pub mod embedded;
 pub mod event_hub;
+mod event_pump;
 pub mod gateway;
 #[cfg(feature = "desktop")]
 mod hotkey;

@@ -133,16 +133,19 @@ fun TaskDetailScreen(taskId: String, inPane: Boolean, onClose: () -> Unit) {
     val categories = remember { CategoryIndexCache() }
     val holder = remember(taskId) { LastModel() }
     val live by remember(taskId) { derivedStateOf { buildDetailModel(host.value, taskId, categories) } }
-    val connecting by remember { derivedStateOf { host.value.connection == Connection.Connecting && host.value.tasks.isEmpty() } }
+    // 任务表分页载入期间（含重连后的重载）任务暂时不在列表里：不是“任务不存在”，显示加载态且不关闭详情。
+    val connecting by remember {
+        derivedStateOf { host.value.tasksLoading || (host.value.connection == Connection.Connecting && host.value.tasks.isEmpty()) }
+    }
     val closeNow by rememberUpdatedState(onClose)
     val modelOf: () -> DetailModel? = remember(taskId) { { live ?: holder.last } }
 
     LaunchedEffect(taskId) {
-        snapshotFlow { live }.collect { model ->
+        snapshotFlow { live to host.value.tasksLoading }.collect { (model, loading) ->
             if (model != null) {
                 holder.last = model
                 holder.seen = true
-            } else if (holder.seen) {
+            } else if (holder.seen && !loading) {
                 closeNow()
             }
         }

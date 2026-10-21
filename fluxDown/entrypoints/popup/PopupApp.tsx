@@ -12,6 +12,7 @@ import { checkFluxDownAvailable } from "@/utils/download-dispatch";
 import { exportConnectionDiagnostics } from "@/utils/connection-diagnostics";
 import { loadSettings, saveSettings } from "@/utils/settings";
 import { Button } from "@/ui/components/Button";
+import { HostAccessNotice } from "@/ui/components/HostAccessNotice";
 import { Icon } from "@/ui/components/Icon";
 import { IconButton } from "@/ui/components/IconButton";
 import { Tabs, type TabItem } from "@/ui/components/Tabs";
@@ -27,6 +28,7 @@ import { useThemeAttr } from "@/ui/theme";
 import "@/ui/theme/tokens.css";
 import "@/ui/theme/base.css";
 import "./popup.css";
+import { PageScriptsHint } from "./PageScriptsHint";
 
 /** 摘要中除「当前播放」外最多显示的行数。 */
 const SUMMARY_EXTRA_ROWS = 5;
@@ -206,6 +208,9 @@ export function PopupApp(): JSX.Element {
           <Toggle checked={enabled} onChange={setEnabled} label={switchLabel} />
         </div>
       </header>
+
+      <HostAccessNotice />
+      <PageScriptsHint />
 
       {siteHost ? (
         <div class="pp-site">

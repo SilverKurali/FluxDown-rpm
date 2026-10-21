@@ -90,11 +90,28 @@ export interface TaskDto {
   seedTimeLimitMinutes: number;
   /** 不活跃做种时长上限（分钟），哨兵同上。 */
   seedInactiveTimeLimitMinutes: number;
-  /** 做种上传限速（字节/秒），0 = 未设置（跟随全局）；旧 daemon 不返回。 */
-  seedUploadLimitBps?: number;
-  /** 持久化的加速路径字节（旧 daemon 不返回）。 */
-  sourceBytes?: TaskSourceBytesDto;
+  /** 做种上传限速（字节/秒），0 = 未设置（跟随全局）。 */
+  seedUploadLimitBps: number;
+  /** 持久化的加速路径字节。 */
+  sourceBytes: TaskSourceBytesDto;
 }
+
+/** 线上必带的 `TaskDto` 字段（其余默认值字段为 `skip_serializing_if`，缺省即默认值）。 */
+export type TaskDtoRequiredKey =
+  | 'taskId'
+  | 'url'
+  | 'fileName'
+  | 'saveDir'
+  | 'status'
+  | 'downloadedBytes'
+  | 'totalBytes'
+  | 'createdAt';
+
+/**
+ * 线上形态的 `TaskDto`（协议 v17）：默认值字段不上线，解码必须经 `normalizeTask`
+ * （见 `../normalize.ts`）补齐后才能进入 store。
+ */
+export type TaskDtoWire = Pick<TaskDto, TaskDtoRequiredKey> & Partial<Omit<TaskDto, TaskDtoRequiredKey>>;
 
 /** 文件字节区间进度；`active` 未知（null）时不要推断其传输状态。 */
 export interface TaskSegmentDto {

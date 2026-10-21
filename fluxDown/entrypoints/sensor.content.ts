@@ -83,19 +83,6 @@ function swallow(p: Promise<unknown>): void {
   });
 }
 
-/**
- * Firefox：把 MAIN world 钩子作为内联脚本插入页面。内联脚本在插入时同步执行，没有 load 事件可等；
- * 插入后即移除节点，钩子已装在页面全局上。
- */
-async function injectPageHooks(): Promise<void> {
-  const response = await fetch(browser.runtime.getURL("/page-hooks-main.js"));
-  if (!response.ok) throw new Error(`page hooks fetch failed: HTTP ${response.status}`);
-  const script = document.createElement("script");
-  script.text = await response.text();
-  (document.head ?? document.documentElement).append(script);
-  script.remove();
-}
-
 export default defineContentScript({
   matches: ["<all_urls>"],
   runAt: "document_start",
@@ -621,21 +608,12 @@ export default defineContentScript({
     });
 
     // ===== 启动序列 =====
-    // 1. Firefox：MV2 不支持 world: MAIN，把 unlisted script 作为内联脚本注入页面环境。
-    //    不能用 WXT 的 injectScript：MV2 下它写 script.text 后还等 load 事件，内联脚本从不触发
-    //    load / error，main 会永远挂在这里——浮钮从不创建，配置要等后台 probe 兜底才拉取。
-    if (import.meta.env.FIREFOX) {
-      try {
-        await injectPageHooks();
-      } catch (e) {
-        console.warn("[FluxDown] Failed to inject page hooks:", e);
-      }
-    }
-
-    // 2. 浮钮
+    // MAIN world 钩子由清单声明式注入（page-hooks.content.ts，document_start），先于页面脚本运行；
+    // 本脚本无需注入或等待它，配置下发后经 hooks 握手确认。
+    // 1. 浮钮
     float = createFloatButton({ ctx, tracker, pageUrl: () => matchPageUrl(top) });
 
-    // 3. 拉取配置（之后 DOM 扫描 / 跟踪 / 浮钮才真正启用）
+    // 2. 拉取配置（之后 DOM 扫描 / 跟踪 / 浮钮才真正启用）
     await loadConfig();
   },
 });

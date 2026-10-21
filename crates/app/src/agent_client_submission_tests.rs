@@ -6,8 +6,8 @@ use tokio::{net::TcpStream, sync::mpsc};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 use super::{
-    AgentClient, ClientCommand, PreferenceWrites, ServiceBootstrap, Socket, SubmissionTransport,
-    run_connected,
+    AgentClient, Bootstrap, ClientCommand, PreferenceWrites, ServiceBootstrap, Socket,
+    SubmissionTransport, run_connected,
 };
 use crate::downloads_port::AgentDownloadsPort;
 use fluxdown_ui_downloads::{
@@ -15,9 +15,9 @@ use fluxdown_ui_downloads::{
 };
 use serde_json::{Value, json};
 
-type Peer = WebSocketStream<TcpStream>;
+pub(super) type Peer = WebSocketStream<TcpStream>;
 
-async fn connected_pair() -> (Socket, Peer) {
+pub(super) async fn connected_pair() -> (Socket, Peer) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind peer");
@@ -90,8 +90,7 @@ fn rpc_import_pause_failure_disconnect_and_resume_preserve_unsent_order() {
                     socket,
                     &mut command_rx,
                     &first_events,
-                    ("test".to_owned(), 0),
-                    Vec::new(),
+                    Bootstrap::at("test", 0),
                     PreferenceWrites::new(0),
                     &mut transport,
                 )
@@ -161,8 +160,7 @@ fn rpc_import_pause_failure_disconnect_and_resume_preserve_unsent_order() {
                     socket,
                     &mut command_rx,
                     &events,
-                    ("test-reconnected".to_owned(), 0),
-                    Vec::new(),
+                    Bootstrap::at("test-reconnected", 0),
                     PreferenceWrites::new(0),
                     &mut transport,
                 )
@@ -256,8 +254,7 @@ fn queued_unsent_create_survives_disconnect_and_pause_overtakes_it() {
                     socket,
                     &mut command_rx,
                     &first_events,
-                    ("first".to_owned(), 0),
-                    Vec::new(),
+                    Bootstrap::at("first", 0),
                     PreferenceWrites::new(0),
                     &mut transport,
                 )
@@ -282,8 +279,7 @@ fn queued_unsent_create_survives_disconnect_and_pause_overtakes_it() {
                     socket,
                     &mut command_rx,
                     &events,
-                    ("reconnected".to_owned(), 0),
-                    Vec::new(),
+                    Bootstrap::at("reconnected", 0),
                     PreferenceWrites::new(0),
                     &mut transport,
                 )
@@ -343,8 +339,7 @@ fn failed_resume_preserves_running_or_paused_import_state() {
                     socket,
                     &mut command_rx,
                     &events,
-                    ("test".to_owned(), 0),
-                    Vec::new(),
+                    Bootstrap::at("test", 0),
                     PreferenceWrites::new(0),
                     &mut transport,
                 )
@@ -411,8 +406,7 @@ fn overlapping_resume_success_then_failure_keeps_successful_resume() {
                     socket,
                     &mut command_rx,
                     &events,
-                    ("test".to_owned(), 0),
-                    Vec::new(),
+                    Bootstrap::at("test", 0),
                     PreferenceWrites::new(0),
                     &mut transport,
                 )
@@ -492,8 +486,7 @@ fn create_many_resends_same_batch_after_disconnect_without_pausing_the_gate() {
                     socket,
                     &mut command_rx,
                     &first_events,
-                    ("first".to_owned(), 0),
-                    Vec::new(),
+                    Bootstrap::at("first", 0),
                     PreferenceWrites::new(0),
                     &mut transport,
                 )
@@ -533,8 +526,7 @@ fn create_many_resends_same_batch_after_disconnect_without_pausing_the_gate() {
                     socket,
                     &mut command_rx,
                     &events,
-                    ("second".to_owned(), 0),
-                    Vec::new(),
+                    Bootstrap::at("second", 0),
                     PreferenceWrites::new(0),
                     &mut transport,
                 )
@@ -590,8 +582,7 @@ fn cancelled_unsent_create_many_is_skipped_by_the_transport() {
                     socket,
                     &mut command_rx,
                     &events,
-                    ("cancelled".to_owned(), 0),
-                    Vec::new(),
+                    Bootstrap::at("cancelled", 0),
                     PreferenceWrites::new(0),
                     &mut transport,
                 )

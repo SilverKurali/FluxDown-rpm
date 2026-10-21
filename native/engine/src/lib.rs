@@ -62,6 +62,8 @@ pub(crate) mod path_scheduler;
 pub mod plugin;
 mod proc;
 pub mod proxy_config;
+/// 排队顺序的增量发布（稳定排序键 + 差异计算）。
+pub mod queue_order;
 /// `ProxyMode::Auto` 各路径单连接速率的跨重启折扣先验。
 pub mod route_health;
 /// RSS 订阅自动下载（feed 轮询 → 规则过滤 → 建任务）。

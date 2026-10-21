@@ -10,7 +10,8 @@
  *   FluxDown App
  *
  * 设计决策：
- *   - 使用 connectNative() 持久连接，复用同一 NMH 进程
+ *   - 使用 connectNative() 持久连接，复用同一 NMH 进程；后台休眠（Service Worker / Firefox event page）
+ *     会丢弃端口及内存状态，下一次请求由 getPort() 按需重建，不依赖端口保活
  *   - 请求-响应通过 msg_id 匹配（递增 ID + pending Map）
  *   - App 未运行时由 NMH 自动启动，扩展端无需关心唤起逻辑
  *   - "warmup" 消息由 NMH 本地应答（确保 App 已拉起 + 管道已连接，不转发给 App），
@@ -22,7 +23,7 @@ import { browser } from "wxt/browser";
 import type { Browser } from "wxt/browser";
 import { recordConnectionDiagnostic } from "./connection-diagnostics";
 
-const NMH_NAME = "com.fluxdown.nmh";
+export const NMH_NAME = "com.fluxdown.nmh";
 
 // 每请求超时时间（NMH 启动 App 最多需要 ~7.5s，预留充足余量）
 const REQUEST_TIMEOUT_MS = 12000;

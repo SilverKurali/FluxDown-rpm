@@ -57,7 +57,9 @@ import Testing
     for (id, bps) in upSpeeds where state.speeds[id] == nil { state.speeds[id] = LiveSpeed(down: 0, up: bps) }
     state.queues = queues
     state.groups = groups
-    state.queuePositions = positions
+    state.queueOrder = QueueOrder(sorted: positions.sorted { $0.value < $1.value }.map {
+        QueueOrderEntry(taskId: $0.key, order: Int64($0.value))
+    })
     state.priorityTaskId = boosted
     state.runtime = runtime
     return state
@@ -146,6 +148,23 @@ struct DownloadsFilterTests {
         #expect(ids(result) == ["a"])
         #expect(result.facets.matching == 1)
         #expect(result.list.taskTotal == 7)
+    }
+
+    /// 任务表分页载入中：派生结果必须声明「未载入」并带上服务端总数，空列表不是完整列表。
+    @Test func tasksLoadingStateIsNotACompleteList() {
+        var state = makeState([])
+        state.tasksLoading = true
+        state.taskTotal = 230_000
+        let loading = derive(state).list
+        #expect(!loading.loaded)
+        #expect(loading.loadingTotal == 230_000)
+        #expect(loading.visibleIds.isEmpty)
+
+        // 载入完成：同一状态不再是加载态，总数清零。
+        let done = derive(makeState(tasks)).list
+        #expect(done.loaded)
+        #expect(done.loadingTotal == 0)
+        #expect(done.taskTotal == 7)
     }
 
     @Test func unknownCategoryFallsBackToAll() {
@@ -864,6 +883,31 @@ struct DownloadsRowModelTests {
         #expect(try bar(makeTask("d", .downloading))?.progress == nil)
     }
 
+    /// 队首出队只删一个键：其余排队行的稳定键不变 → 行模型逐个相等（不重建）；名次在渲染时按键二分得到。
+    @Test func dequeuingTheHeadKeepsOtherQueuedRowsEqualAndRanksShift() throws {
+        let tasks = ["a", "b", "c"].map { makeTask($0, .pending) }
+        var deriver = DownloadsDeriver()
+        func items(_ state: HostState) -> [String: TaskItem] {
+            let result = deriver.derive(
+                DeriveInput(state: state, order: smart, filter: DownloadsFilter(), collapsed: []),
+                nowMs: 1_000_000,
+                interactionMs: 0
+            )
+            return Dictionary(uniqueKeysWithValues: result.list.sections.flatMap { $0.rows.compactMap(\.item) }.map { ($0.id, $0) })
+        }
+        var state = makeState(tasks)
+        state.queueOrder = QueueOrder(sorted: [("a", 10), ("b", 20), ("c", 30)].map { QueueOrderEntry(taskId: $0.0, order: $0.1) })
+        let before = items(state)
+        #expect(state.queueOrder.rank(of: "b") == 2)
+
+        state.queueOrder = QueueOrder(sorted: state.queueOrder.entries.filter { $0.taskId != "a" })
+        let after = items(state)
+        #expect(after["b"] == before["b"] && after["c"] == before["c"])
+        #expect(after["b"]?.visual == .queued)
+        #expect(state.queueOrder.rank(of: "b") == 1 && state.queueOrder.rank(of: "c") == 2)
+        #expect(state.queueOrder.rank(of: "a") == 0)
+    }
+
     @Test func visualStateAndRingMapping() throws {
         func item(_ task: DownloadTask, queued: Bool = false) throws -> TaskItem {
             try firstItem(derive(makeState([task], positions: queued ? [task.taskId: 3] : [:])))
@@ -969,8 +1013,13 @@ struct DownloadsRowTextTests {
     }
 
     @Test func stateStatusLines() throws {
-        func line(_ task: DownloadTask, queued: Int32 = 0) throws -> StatusLine {
-            echo.status(try item(task) { if queued > 0 { $0.queuePositions[task.taskId] = queued } }, fields: allFields)
+        func line(_ task: DownloadTask, queued: Int = 0) throws -> StatusLine {
+            let built = try item(task) {
+                guard queued > 0 else { return }
+                let fillers = (1..<queued).map { QueueOrderEntry(taskId: "f\($0)", order: Int64($0)) }
+                $0.queueOrder = QueueOrder(sorted: fillers + [QueueOrderEntry(taskId: task.taskId, order: Int64(queued))])
+            }
+            return echo.status(built, fields: allFields, queuePosition: queued)
         }
         #expect(try line(makeTask("a", .pending), queued: 3) == StatusLine(text: "subtitleQueued|pos=3", tone: .secondary))
         #expect(try line(makeTask("a", .pending)) == StatusLine(text: "statusPending", tone: .secondary))

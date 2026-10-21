@@ -255,6 +255,25 @@ impl CaptureService {
         outcome.map(|()| json!({ "taskIds": task_ids }))
     }
 
+    /// 插件页面脚本调用开始的任务（`daemon.plugin.pageInvoke` 应答）按单任务静默捕获同一规则
+    /// 登记：恰好一个任务开始时才拉起 / 通知官方 UI 弹提示窗口；新建发 `CaptureTasksStarted`，
+    /// 恢复已有任务发 `CaptureTasksResumed`。一次开始多个与批量捕获一样不弹。
+    pub fn announce_page_started(&self, created: &[String], resumed: &[String]) {
+        let (task_id, event) = match (created, resumed) {
+            ([task_id], []) => (
+                task_id,
+                AgentEvent::CaptureTasksStarted(vec![task_id.clone()]),
+            ),
+            ([], [task_id]) => (
+                task_id,
+                AgentEvent::CaptureTasksResumed(vec![task_id.clone()]),
+            ),
+            _ => return,
+        };
+        self.shell.launch_for_task_windows(task_id);
+        self.events.publish(event);
+    }
+
     async fn enqueue(&self, requests: Vec<DownloadRequest>) -> Result<Value, CaptureError> {
         let transaction_ids = {
             let mut pending = self.pending.lock().await;
@@ -1487,6 +1506,38 @@ mod tests {
         })
         .await
         .expect("capture notification lifecycle");
+    }
+
+    /// 页面脚本调用开始的任务：恰好一个才通知，新建与恢复各用各的事件；多个（含一建一恢复）不通知。
+    #[tokio::test]
+    async fn page_started_tasks_notify_only_a_single_start() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (capture, _calls, daemon_events, stop, server) = daemon_service().await;
+            let (mut events, _) = capture.events.subscribe_and_snapshot();
+            let ids = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+
+            capture.announce_page_started(&ids(&["new"]), &[]);
+            assert!(matches!(
+                events.try_recv().expect("created notification").event,
+                ServiceEvent::Agent(AgentEvent::CaptureTasksStarted(ids)) if ids == ["new"]
+            ));
+            capture.announce_page_started(&[], &ids(&["old"]));
+            assert!(matches!(
+                events.try_recv().expect("resumed notification").event,
+                ServiceEvent::Agent(AgentEvent::CaptureTasksResumed(ids)) if ids == ["old"]
+            ));
+            capture.announce_page_started(&ids(&["a"]), &ids(&["b"]));
+            capture.announce_page_started(&ids(&["a", "b"]), &[]);
+            capture.announce_page_started(&[], &[]);
+            assert!(events.try_recv().is_err(), "multi-start must stay silent");
+
+            stop.send(()).expect("stop test daemon");
+            drop(capture);
+            drop(daemon_events);
+            server.await.expect("daemon server");
+        })
+        .await
+        .expect("page start notification lifecycle");
     }
 
     #[tokio::test]

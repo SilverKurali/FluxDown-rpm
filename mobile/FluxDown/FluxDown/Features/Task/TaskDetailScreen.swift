@@ -25,11 +25,13 @@ private struct TaskDetailLoader: View {
     var body: some View {
         let state = container.store.state
         let model = TaskDetailModel(state: state, taskId: taskId)
-        let closing = seen && model == nil
+        // 任务表分页载入中查不到任务不代表已被删除：显示加载态，不触发「已不存在」自动返回。
+        let loading = state.tasksLoading || (state.connection == .connecting && state.tasks.isEmpty)
+        let closing = seen && model == nil && !loading
         Group {
             if let model {
                 TaskDetailPage(model: model)
-            } else if state.connection == .connecting && state.tasks.isEmpty {
+            } else if loading {
                 ProgressView(L("pluginCommonLoading"))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .navigationTitle(L("detail"))

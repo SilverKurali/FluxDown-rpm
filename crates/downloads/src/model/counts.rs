@@ -38,7 +38,8 @@ impl SidebarCounts {
         counts
     }
 
-    fn add(&mut self, task: &DownloadTaskView, categories: &CategoryIndex) {
+    /// 一个任务进入时计入各桶；与 [`Self::remove`] 互逆。
+    pub(crate) fn add(&mut self, task: &DownloadTaskView, categories: &CategoryIndex) {
         let mut statuses = [None; 5];
         for status in DownloadStatusFilter::ALL {
             if status.matches(task.state) {
@@ -76,6 +77,40 @@ impl SidebarCounts {
         }
     }
 
+    /// 撤销 [`Self::add`] 对同一任务（同一状态 / 分类 / 队列 / 设备）的计入；清零的分类、队列、
+    /// 设备桶一并移除，结果与对剩余任务重新 [`Self::compute`] 相同。
+    pub(crate) fn remove(&mut self, task: &DownloadTaskView, categories: &CategoryIndex) {
+        let mut statuses = [None; 5];
+        for status in DownloadStatusFilter::ALL {
+            if status.matches(task.state) {
+                let count = &mut self.by_status[status.slot()];
+                *count = count.saturating_sub(1);
+                statuses[status.slot()] = Some(status);
+            }
+        }
+        categories.for_each_match(task, |id| {
+            if let Some(buckets) = self.by_category.get_mut(id) {
+                for status in statuses.iter().flatten() {
+                    let count = &mut buckets[status.slot()];
+                    *count = count.saturating_sub(1);
+                }
+                if buckets.iter().all(|count| *count == 0) {
+                    self.by_category.remove(id);
+                }
+            }
+        });
+        match task.source {
+            TaskSource::Local => {
+                self.local = self.local.saturating_sub(1);
+                decrement(&mut self.by_queue, &task.queue_id);
+            }
+            TaskSource::Remote => {
+                self.remote = self.remote.saturating_sub(1);
+                decrement(&mut self.by_device, &task.to_device);
+            }
+        }
+    }
+
     /// 与 `tasks.filter(|task| filter.matches(task, categories)).count()` 相同。
     #[must_use]
     pub(crate) fn filter(&self, filter: &DownloadFilter) -> usize {
@@ -109,6 +144,16 @@ impl SidebarCounts {
 fn bump(buckets: &mut [usize; 5], statuses: &[Option<DownloadStatusFilter>; 5]) {
     for status in statuses.iter().flatten() {
         buckets[status.slot()] += 1;
+    }
+}
+
+/// 桶计数减一，减到零时移除桶。
+fn decrement(buckets: &mut HashMap<String, usize>, key: &str) {
+    if let Some(count) = buckets.get_mut(key) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            buckets.remove(key);
+        }
     }
 }
 

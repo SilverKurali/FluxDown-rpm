@@ -56,10 +56,11 @@ func normalizedQueueId(_ id: String) -> String { id.isEmpty ? TaskQueue.main : i
 nonisolated enum TaskVisual: Hashable {
     case downloading, queued, pending, preparing, verifying, paused, failed, seeding, missing, completed
 
-    init(_ task: DownloadTask, queuePosition: Int) {
+    /// `queued`：任务在引擎排队顺序里（有排序键）。
+    init(_ task: DownloadTask, queued: Bool) {
         switch task.status {
         case .downloading: self = .downloading
-        case .pending: self = queuePosition > 0 ? .queued : .pending
+        case .pending: self = queued ? .queued : .pending
         case .preparing: self = task.totalBytes > 0 ? .verifying : .preparing
         case .paused: self = .paused
         case .failed: self = .failed
@@ -97,8 +98,8 @@ nonisolated struct TaskItem: Identifiable, Equatable {
     let task: DownloadTask
     let speedDown: Int64
     let speedUp: Int64
-    /// >0 → 「排队 #n」。
-    let queuePosition: Int
+    /// 引擎排序键（任务在队列期间不变）；nil = 不在排队。名次不进模型：渲染可见行时按 `QueueOrder` 取。
+    let queueOrder: Int64?
     let boosted: Bool
     /// 有待答的「文件已存在」询问（任务在等用户决定，行上显示「待确认」角标）。
     let awaitingDecision: Bool
@@ -196,9 +197,12 @@ nonisolated struct DownloadsList: Equatable {
     let visibleIds: [String]
     /// 本机任务 + 远程任务总数（区分「无任务」与「筛选后为空」）。
     let taskTotal: Int
+    /// false = 任务表尚未载入完成（首个快照前 / 分页载入中）：`sections` 与计数不是完整结果，UI 只能显示加载态。
     let loaded: Bool
+    /// 载入中的服务端任务总数（进度文案）；载入完成后为 0。
+    let loadingTotal: UInt64
 
-    static let initial = DownloadsList(sections: [], visibleIds: [], taskTotal: 0, loaded: false)
+    static let initial = DownloadsList(sections: [], visibleIds: [], taskTotal: 0, loaded: false, loadingTotal: 0)
 
     var isEmpty: Bool { sections.allSatisfy { $0.count == 0 } }
 }

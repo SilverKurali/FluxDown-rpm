@@ -98,6 +98,9 @@ struct DownloadsListScreen: View {
             if loading {
                 Section {
                     ForEach(0 ..< 6, id: \.self) { _ in DownloadRowPlaceholder() }
+                } header: {
+                    // 首个快照到达前（连接中）没有进度可报；快照头已到、任务表分页载入中才显示。
+                    if !list.loaded, model.chrome.link != .connecting { loadingHeader(total: list.loadingTotal) }
                 }
             } else if !list.isEmpty {
                 ForEach(list.sections) { section in
@@ -140,6 +143,17 @@ struct DownloadsListScreen: View {
         .onScrollPhaseChange { _, _ in model.touch() }
     }
 
+    /// 任务表分页载入中的进度文案（含服务端任务总数）；占位行之上。
+    private func loadingHeader(total: UInt64) -> some View {
+        HStack(spacing: 8) {
+            ProgressView()
+            Text(total > 0 ? L("mobileTasksLoadingProgress", ["n": total]) : L("mobileTasksLoading"))
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
+    }
+
     private var footerText: String {
         var text = L("nTasks", ["n": model.facets.matching])
         if let free = model.chrome.diskFree {
@@ -150,10 +164,12 @@ struct DownloadsListScreen: View {
 
     private func row(_ item: TaskItem, style: RowStyle, editing: Bool) -> some View {
         let readOnly = model.chrome.isReadOnly
+        let queuePosition = item.visual == .queued ? model.queueOrder.rank(of: item.id) : 0
         return DownloadRowView(
             item: item,
             style: style,
             isLocalHost: container.isLocalHost,
+            queuePosition: queuePosition,
             showsRing: !editing,
             zoom: zoom,
             onOpen: editing ? nil : { onOpen(item.id) }
@@ -173,7 +189,9 @@ struct DownloadsListScreen: View {
                 }
             }
         } preview: {
-            DownloadRowView(item: item, style: style, isLocalHost: container.isLocalHost, showsRing: false)
+            DownloadRowView(
+                item: item, style: style, isLocalHost: container.isLocalHost, queuePosition: queuePosition, showsRing: false
+            )
                 .padding(.horizontal)
                 .frame(minWidth: 320)
                 .environment(actions)
@@ -471,6 +489,11 @@ struct DownloadsListScreen: View {
     /// 清除已完成任务：确认 → `deleteMany(deleteFiles: false)`（只移除记录，保留文件）。
     private func confirmClearFinished() {
         guard actions.guardWritable() else { return }
+        // 任务表还在分页载入：列表只是半份，不能据此判定「没有已完成任务」或批量清除。
+        guard !container.store.state.tasksLoading else {
+            toasts.show(text: L("mobileTasksLoading"), tone: .info, systemImage: "hourglass")
+            return
+        }
         let ids = container.store.state.tasks.filter { $0.status == .completed }.map(\.taskId)
         guard !ids.isEmpty else {
             toasts.show(text: L("mobileClearFinishedNone"), tone: .info, systemImage: "checkmark.circle")

@@ -724,7 +724,9 @@ impl RssView {
             cx,
         );
         let can_ignore = item.status == 0;
-        let task_missing = item.status == 1 && self.controller.task_status(&item).is_none();
+        let task_missing = item.status == 1
+            && !self.controller.tasks_loading
+            && self.controller.task_status(&item).is_none();
         let group = SharedString::from(format!("rss-item-{source_id}-{guid}"));
         let status_id = SharedString::from(format!("rss-status-{source_id}-{guid}"));
         let mut meta = Vec::new();

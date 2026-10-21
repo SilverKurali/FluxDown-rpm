@@ -439,6 +439,10 @@ impl DownloadView {
     /// 状态栏「全部暂停」不可用的原因（`None` = 可点）：没有等待 / 下载中的本地任务，
     /// 且本页没有进行中的导入（全部暂停同时挂起导入闸门）。
     pub(crate) fn pause_all_blocker(&self) -> Option<SharedString> {
+        // 任务表分页载入期间「有没有可暂停任务」无从判断：显示加载态而不是「没有任务」。
+        if self.controller.tables_loading() {
+            return Some(self.strings.tasks_loading_title.clone());
+        }
         let available = self.controller.has_pausable_tasks() || !self.imports.is_empty();
         (!available).then(|| self.strings.pause_all_unavailable.clone())
     }
@@ -448,6 +452,9 @@ impl DownloadView {
     pub(crate) fn resume_all_blocker(&self) -> Option<SharedString> {
         if self.import_suspended {
             return None;
+        }
+        if self.controller.tables_loading() {
+            return Some(self.strings.tasks_loading_title.clone());
         }
         match self.controller.resume_targets() {
             ResumeTargets::Some => None,
@@ -968,6 +975,8 @@ impl DownloadView {
                 ViewPrefs::from_value(value)
             }
             None if self.prefs_loaded => return,
+            // 默认分组维度取决于「是否存在组任务」：任务表载入完成前无从判断，等完整快照。
+            None if self.controller.tables_loading() => return,
             None => {
                 let mut prefs = ViewPrefs::default();
                 let has_groups = self
@@ -2135,6 +2144,10 @@ impl DownloadView {
             PageCommand::PauseAll => self.execute_toolbar(ToolbarCommand::PauseAll, cx),
             PageCommand::ResumeAll => self.execute_toolbar(ToolbarCommand::ResumeAll, cx),
             PageCommand::ClearFinished => {
+                // 任务表分页载入期间「已完成」范围不完整，不能据占位表清理。
+                if self.controller.tables_loading() {
+                    return;
+                }
                 let commands: Vec<DownloadsCommand> = self
                     .controller
                     .store()

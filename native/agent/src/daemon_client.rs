@@ -4,7 +4,7 @@
 //! （[`DAEMON_ENDPOINT_FILE`]，默认端口被占用 / 落在系统保留区间时为系统分配端口），每次连接前
 //! 重读。显式 `FLUXDOWN_DAEMON_URL` 与嵌入式宿主报告的地址是固定端点，不读该文件。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,9 +18,10 @@ use fluxdown_protocol::handshake::{
 use fluxdown_protocol::local_service::{DAEMON_ENDPOINT_FILE, LocalEndpoint};
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
-    ApplicationErrorCode, EventFrame, METHOD_NOT_FOUND_CODE, RequestId, RpcErrorData,
-    RpcErrorObject, RpcNotification, RpcRequest, RpcResponse, ServiceHello, ServiceRole, Snapshot,
-    SnapshotBody,
+    ApplicationErrorCode, DaemonEvent, DaemonSnapshot, EventFrame, FrameVerdict,
+    METHOD_NOT_FOUND_CODE, RequestId, RpcErrorData, RpcErrorObject, RpcNotification, RpcRequest,
+    RpcResponse, ServiceEvent, ServiceHello, ServiceRole, Snapshot, SnapshotBody, TablePage,
+    TableSync, WsServerMsg, judge_frame,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -1030,8 +1031,9 @@ async fn wait_until_stopped(target: &DaemonTarget, timeout: Duration) {
     }
 }
 
-/// 建立到 daemon 的已认证、已握手连接（整体受 [`HANDSHAKE_TIMEOUT`] 约束）；任何一步失败都
-/// 撤销会话 HTTP 访问参数。
+/// 建立到 daemon 的已认证、已握手连接并载入任务表；握手（建连 / 认证 / hello / 快照头）整体
+/// 受 [`HANDSHAKE_TIMEOUT`] 约束，任务表分页载入只受每页 [`TABLE_PAGE_TIMEOUT`] 约束（页数随
+/// 任务数增长）。任何一步失败都撤销会话 HTTP 访问参数。
 async fn connect(
     config: &DaemonClientConfig,
     target: &DaemonTarget,
@@ -1044,10 +1046,63 @@ async fn connect(
             HANDSHAKE_TIMEOUT.as_secs()
         ))),
     };
+    let result = match result {
+        Ok((mut socket, snapshot, mut buffered)) => {
+            load_snapshot_tables(&mut socket, snapshot, &mut buffered)
+                .await
+                .map(|snapshot| (socket, snapshot, buffered))
+        }
+        Err(error) => Err(error),
+    };
     if result.is_err() {
         config.http.clear();
     }
     result
+}
+
+/// 快照头带 `taskTotal` / `queueTotal` 时经 `system.taskPage` 分页载入整表（握手期间到达的
+/// 事件帧留在 `buffered`，由 [`run_connected`] 按快照序号回放），返回表已装入的完整快照。
+async fn load_snapshot_tables(
+    socket: &mut Socket,
+    mut snapshot: Snapshot,
+    buffered: &mut Vec<EventFrame>,
+) -> Result<Snapshot, ConnectError> {
+    let SnapshotBody::Daemon(daemon) = &mut snapshot.body else {
+        return Err(ConnectError::Fatal(protocol_error()));
+    };
+    let Some(mut sync) = TableSync::for_snapshot(snapshot.epoch.clone(), snapshot.sequence, daemon)
+    else {
+        return Ok(snapshot);
+    };
+    while let Some(params) = sync.next_request() {
+        let params = serde_json::to_value(params)
+            .map_err(|error| ConnectError::Transient(error.to_string()))?;
+        let value = tokio::time::timeout(
+            TABLE_PAGE_TIMEOUT,
+            call_on_socket(
+                socket,
+                TABLE_PAGE_REQUEST_ID,
+                method::SYSTEM_TASK_PAGE,
+                Some(params),
+                buffered,
+            ),
+        )
+        .await
+        .map_err(|_| ConnectError::Transient("daemon task page timed out".to_owned()))??;
+        let page = serde_json::from_value::<TablePage>(value)
+            .map_err(|_| ConnectError::Fatal(protocol_error()))?;
+        sync.accept(page).map_err(|error| {
+            ConnectError::Transient(format!("daemon task paging failed: {error:?}"))
+        })?;
+    }
+    let loaded = sync.into_parts();
+    if let Some(tasks) = loaded.tasks {
+        daemon.install_tasks(tasks);
+    }
+    if let Some(queue) = loaded.queue {
+        daemon.install_queue(queue);
+    }
+    Ok(snapshot)
 }
 
 async fn establish(
@@ -1107,6 +1162,15 @@ async fn establish(
     Ok((socket, snapshot, buffered))
 }
 
+/// 连接建立后一条链路的可变状态：事件游标、待处理帧队列与在途命令。
+struct Link {
+    cursor: (String, u64),
+    /// 待处理的事件帧（握手窗口内缓冲的、表重载期间到达的）；先于套接字里的新帧处理。
+    backlog: VecDeque<EventFrame>,
+    pending: HashMap<i64, oneshot::Sender<Result<Value, RpcErrorObject>>>,
+    next_id: i64,
+}
+
 async fn run_connected(
     mut socket: Socket,
     commands: &mut mpsc::Receiver<ClientCommand>,
@@ -1114,56 +1178,17 @@ async fn run_connected(
     snapshot_cursor: (String, u64),
     buffered: Vec<EventFrame>,
 ) -> Result<(), ()> {
-    let mut next_id = 10_i64;
-    let mut pending = HashMap::<i64, oneshot::Sender<Result<Value, RpcErrorObject>>>::new();
-    let mut cursor = snapshot_cursor;
-    for frame in buffered {
-        if frame.epoch == cursor.0 {
-            forward_event(frame, &mut cursor, events).await?;
-        }
-    }
-    loop {
-        tokio::select! {
-            command = commands.recv() => {
-                let Some(command) = command else { return Ok(()); };
-                let id = next_id;
-                next_id = next_id.saturating_add(1);
-                let request = RpcRequest::new(RequestId::Integer(id), command.method, command.params);
-                let text = serde_json::to_string(&request).map_err(|_| ())?;
-                pending.insert(id, command.ack);
-                if socket.send(Message::Text(text.into())).await.is_err() { break; }
-            }
-            incoming = socket.next() => {
-                let Some(Ok(Message::Text(text))) = incoming else { break; };
-                if let Ok(notification) = serde_json::from_str::<RpcNotification>(&text)
-                    && notification.method == method::SERVICE_EVENT
-                {
-                    let Some(params) = notification.params else { break; };
-                    let Ok(frame) = serde_json::from_value::<EventFrame>(params) else { break; };
-                    forward_event(frame, &mut cursor, events).await?;
-                    continue;
-                }
-                let Ok(response) = serde_json::from_str::<RpcResponse>(&text) else { break; };
-                match response {
-                    RpcResponse::Success(success) => {
-                        if let RequestId::Integer(id) = success.id
-                            && let Some(ack) = pending.remove(&id)
-                            && ack.send(Ok(success.result)).is_err() {
-                                tracing::trace!(id, "daemon caller dropped its successful response receiver");
-                            }
-                    }
-                    RpcResponse::Failure(failure) => {
-                        if let Some(RequestId::Integer(id)) = failure.id
-                            && let Some(ack) = pending.remove(&id)
-                            && ack.send(Err(failure.error)).is_err() {
-                                tracing::trace!(id, "daemon caller dropped its error response receiver");
-                            }
-                    }
-                }
-            }
-        }
-    }
-    for (id, ack) in pending {
+    let mut link = Link {
+        backlog: buffered
+            .into_iter()
+            .filter(|frame| frame.epoch == snapshot_cursor.0)
+            .collect(),
+        cursor: snapshot_cursor,
+        pending: HashMap::new(),
+        next_id: 10,
+    };
+    let outcome = drive_link(&mut socket, commands, events, &mut link).await;
+    for (id, ack) in link.pending {
         if ack.send(Err(unavailable_object())).is_err() {
             tracing::trace!(
                 id,
@@ -1171,29 +1196,316 @@ async fn run_connected(
             );
         }
     }
-    Err(())
+    outcome
 }
 
-/// 快照以前的通知可跳过；快照以后的缺口或 epoch 更换必须重新握手。
-async fn forward_event(
-    frame: EventFrame,
-    cursor: &mut (String, u64),
+/// 链路主循环：命令下发、响应路由、事件帧转发。返回 `Ok(())` = 命令通道关闭的正常收尾，
+/// `Err(())` = 链路已断或需要重新握手。
+async fn drive_link(
+    socket: &mut Socket,
+    commands: &mut mpsc::Receiver<ClientCommand>,
     events: &mpsc::Sender<DaemonClientEvent>,
+    link: &mut Link,
 ) -> Result<(), ()> {
-    if frame.epoch != cursor.0 {
-        return Err(());
+    loop {
+        while let Some(frame) = link.backlog.pop_front() {
+            handle_frame(socket, link, events, frame).await?;
+        }
+        tokio::select! {
+            command = commands.recv() => {
+                let Some(command) = command else { return Ok(()); };
+                let id = link.next_id;
+                link.next_id = link.next_id.saturating_add(1);
+                let request = RpcRequest::new(RequestId::Integer(id), command.method, command.params);
+                let text = serde_json::to_string(&request).map_err(|_| ())?;
+                link.pending.insert(id, command.ack);
+                if let Err(error) = socket.send(Message::Text(text.into())).await {
+                    tracing::warn!(%error, "daemon link dropped: request send failed");
+                    return Err(());
+                }
+            }
+            incoming = socket.next() => {
+                match decode_incoming(incoming)? {
+                    Incoming::Event(frame) => handle_frame(socket, link, events, *frame).await?,
+                    Incoming::Response(response) => route_response(&mut link.pending, response),
+                }
+            }
+        }
     }
-    if frame.sequence <= cursor.1 {
-        return Ok(());
+}
+
+/// 套接字上一条已解码的入站消息。
+enum Incoming {
+    Event(Box<EventFrame>),
+    Response(RpcResponse),
+}
+
+/// 解码一条入站 WebSocket 消息；链路异常 / 无法解码返回 `Err(())`（调用方重连）。
+fn decode_incoming(
+    incoming: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+) -> Result<Incoming, ()> {
+    let text = match incoming {
+        Some(Ok(Message::Text(text))) => text,
+        Some(Ok(Message::Close(frame))) => {
+            let (code, reason) = frame
+                .map(|frame| (u16::from(frame.code), frame.reason.to_string()))
+                .unwrap_or_default();
+            tracing::warn!(code, %reason, "daemon link closed by daemon");
+            return Err(());
+        }
+        Some(Ok(other)) => {
+            tracing::warn!(kind = ?std::mem::discriminant(&other), "daemon link dropped: unexpected non-text frame");
+            return Err(());
+        }
+        Some(Err(error)) => {
+            tracing::warn!(%error, "daemon link dropped: receive failed");
+            return Err(());
+        }
+        None => {
+            tracing::warn!("daemon link dropped: socket ended");
+            return Err(());
+        }
+    };
+    if let Ok(notification) = serde_json::from_str::<RpcNotification>(&text)
+        && notification.method == method::SERVICE_EVENT
+    {
+        let Some(params) = notification.params else {
+            tracing::warn!("daemon link dropped: event notification without params");
+            return Err(());
+        };
+        return match serde_json::from_value::<EventFrame>(params) {
+            Ok(frame) => Ok(Incoming::Event(Box::new(frame))),
+            Err(error) => {
+                tracing::warn!(%error, "daemon link dropped: undecodable event frame");
+                Err(())
+            }
+        };
     }
-    if frame.sequence != cursor.1.saturating_add(1) {
-        return Err(());
+    serde_json::from_str::<RpcResponse>(&text)
+        .map(Incoming::Response)
+        .map_err(|_| {
+            tracing::warn!("daemon link dropped: undecodable response frame");
+        })
+}
+
+/// 把响应交给等它的调用方。
+fn route_response(
+    pending: &mut HashMap<i64, oneshot::Sender<Result<Value, RpcErrorObject>>>,
+    response: RpcResponse,
+) {
+    match response {
+        RpcResponse::Success(success) => {
+            if let RequestId::Integer(id) = success.id
+                && let Some(ack) = pending.remove(&id)
+                && ack.send(Ok(success.result)).is_err()
+            {
+                tracing::trace!(id, "daemon caller dropped its successful response receiver");
+            }
+        }
+        RpcResponse::Failure(failure) => {
+            if let Some(RequestId::Integer(id)) = failure.id
+                && let Some(ack) = pending.remove(&id)
+                && ack.send(Err(failure.error)).is_err()
+            {
+                tracing::trace!(id, "daemon caller dropped its error response receiver");
+            }
+        }
+    }
+}
+
+/// 握手期间 / 表重载期间最多缓冲的事件帧数：大批量导入时 daemon 在窗口内会推送上千帧。
+const HANDSHAKE_BACKLOG_LIMIT: usize = fluxdown_protocol::TABLE_SYNC_BACKLOG_LIMIT;
+/// 任务表 / 队列位置表每页的请求超时：页数随任务数增长，所以只约束单页，不约束总时长。
+const TABLE_PAGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 握手阶段分页请求的 ID（连接建立后的调用从 10 起）。
+const TABLE_PAGE_REQUEST_ID: i64 = 5;
+
+/// 快照以前的通知可跳过；快照以后的缺口或 epoch 更换必须重新握手。判定见
+/// [`judge_frame`]：转发者合并过的帧覆盖区间可以越过游标，不再要求恰好 `cursor + 1`。
+/// `Ok(None)` = 已被覆盖、丢弃；`Ok(Some)` = 接受并已推进游标。
+fn admit_frame(cursor: &mut (String, u64), frame: EventFrame) -> Result<Option<EventFrame>, ()> {
+    match judge_frame(&cursor.0, cursor.1, &frame) {
+        FrameVerdict::Skip => return Ok(None),
+        FrameVerdict::Resync => {
+            if frame.epoch == cursor.0 {
+                tracing::warn!(
+                    cursor = cursor.1,
+                    covers_from = frame.covers_from(),
+                    received = frame.sequence,
+                    "daemon link dropped: event sequence gap"
+                );
+            } else {
+                tracing::warn!("daemon link dropped: event epoch changed");
+            }
+            return Err(());
+        }
+        FrameVerdict::Accept => {}
     }
     cursor.1 = frame.sequence;
+    Ok(Some(frame))
+}
+
+/// 判定并转发一帧。宣告表需要重载的帧（`SnapshotReplaced` 头 / `TablesReloading`）在这里
+/// 就地分页载入，再把载入结果还原成完整的等价事件转发：下游（agent 投影）只认完整事件，
+/// 广播到客户端时再由 hub 转成头。
+async fn handle_frame(
+    socket: &mut Socket,
+    link: &mut Link,
+    events: &mpsc::Sender<DaemonClientEvent>,
+    frame: EventFrame,
+) -> Result<(), ()> {
+    let Some(frame) = admit_frame(&mut link.cursor, frame)? else {
+        return Ok(());
+    };
+    if frame.event.reloads_tables() {
+        return reload_tables(socket, link, events, frame).await;
+    }
     events
         .send(DaemonClientEvent::Event(Box::new(frame)))
         .await
         .map_err(|_| ())
+}
+
+/// 分页载入 `frame` 宣告的表。载入期间到达的帧缓冲进 `link.backlog`（排在已有待处理帧之后），
+/// 响应照常路由给在途命令。
+async fn reload_tables(
+    socket: &mut Socket,
+    link: &mut Link,
+    events: &mpsc::Sender<DaemonClientEvent>,
+    frame: EventFrame,
+) -> Result<(), ()> {
+    let EventFrame {
+        epoch,
+        sequence,
+        event,
+        ..
+    } = frame;
+    let rebuilt = |event: DaemonEvent| {
+        DaemonClientEvent::Event(Box::new(EventFrame {
+            epoch: epoch.clone(),
+            sequence,
+            previous: None,
+            event: ServiceEvent::Daemon(event),
+        }))
+    };
+    let (sync, header) = match event {
+        ServiceEvent::Daemon(DaemonEvent::SnapshotReplaced(header)) => (
+            TableSync::for_snapshot(epoch.clone(), sequence, &header),
+            Some(header),
+        ),
+        ServiceEvent::Daemon(DaemonEvent::TablesReloading { tasks, queue }) => {
+            (TableSync::new(epoch.clone(), sequence, tasks, queue), None)
+        }
+        other => {
+            return events
+                .send(DaemonClientEvent::Event(Box::new(EventFrame {
+                    epoch: epoch.clone(),
+                    sequence,
+                    previous: None,
+                    event: other,
+                })))
+                .await
+                .map_err(|_| ());
+        }
+    };
+    let Some(mut sync) = sync else {
+        return match header {
+            Some(header) => events
+                .send(rebuilt(DaemonEvent::SnapshotReplaced(header)))
+                .await
+                .map_err(|_| ()),
+            None => Ok(()),
+        };
+    };
+    while let Some(params) = sync.next_request() {
+        let id = link.next_id;
+        link.next_id = link.next_id.saturating_add(1);
+        let request = RpcRequest::new(
+            RequestId::Integer(id),
+            method::SYSTEM_TASK_PAGE,
+            serde_json::to_value(params).ok(),
+        );
+        let text = serde_json::to_string(&request).map_err(|_| ())?;
+        socket
+            .send(Message::Text(text.into()))
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "daemon link dropped: table page request failed");
+            })?;
+        let page = tokio::time::timeout(TABLE_PAGE_TIMEOUT, await_page(socket, link, id))
+            .await
+            .map_err(|_| {
+                tracing::warn!("daemon link dropped: table page timed out");
+            })??;
+        sync.accept(page).map_err(|error| {
+            tracing::warn!(?error, "daemon link dropped: table reload failed");
+        })?;
+    }
+    let loaded = sync.into_parts();
+    let mut outgoing = Vec::new();
+    match header {
+        Some(mut full) => {
+            if let Some(tasks) = loaded.tasks {
+                full.install_tasks(tasks);
+            }
+            if let Some(queue) = loaded.queue {
+                full.install_queue(queue);
+            }
+            outgoing.push(rebuilt(DaemonEvent::SnapshotReplaced(full)));
+        }
+        None => {
+            if let Some(tasks) = loaded.tasks {
+                outgoing.push(rebuilt(DaemonEvent::Engine(WsServerMsg::TasksSnapshot {
+                    tasks,
+                })));
+            }
+            if let Some(queue) = loaded.queue {
+                let mut table = DaemonSnapshot::default();
+                table.install_queue(queue);
+                outgoing.push(rebuilt(DaemonEvent::Engine(
+                    WsServerMsg::QueuePositionsChanged {
+                        positions: table.queue_positions,
+                    },
+                )));
+            }
+        }
+    }
+    for event in outgoing {
+        events.send(event).await.map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+/// 等 `id` 对应的分页应答；其间的事件帧缓冲，其它响应路由给在途命令。
+async fn await_page(socket: &mut Socket, link: &mut Link, id: i64) -> Result<TablePage, ()> {
+    loop {
+        match decode_incoming(socket.next().await)? {
+            Incoming::Event(frame) => {
+                if link.backlog.len() >= HANDSHAKE_BACKLOG_LIMIT {
+                    tracing::warn!("daemon link dropped: table reload event backlog");
+                    return Err(());
+                }
+                link.backlog.push_back(*frame);
+            }
+            Incoming::Response(RpcResponse::Success(success))
+                if success.id == RequestId::Integer(id) =>
+            {
+                return serde_json::from_value::<TablePage>(success.result).map_err(|error| {
+                    tracing::warn!(%error, "daemon link dropped: undecodable table page");
+                });
+            }
+            Incoming::Response(RpcResponse::Failure(failure))
+                if failure.id == Some(RequestId::Integer(id)) =>
+            {
+                tracing::warn!(
+                    code = failure.error.code,
+                    "daemon link dropped: table page refused"
+                );
+                return Err(());
+            }
+            Incoming::Response(other) => route_response(&mut link.pending, other),
+        }
+    }
 }
 
 async fn call_on_socket(
@@ -1223,7 +1535,7 @@ async fn call_on_socket(
             };
             let frame = serde_json::from_value::<EventFrame>(params)
                 .map_err(|_| ConnectError::Fatal(protocol_error()))?;
-            if buffered.len() >= 1024 {
+            if buffered.len() >= HANDSHAKE_BACKLOG_LIMIT {
                 return Err(ConnectError::Transient(
                     "handshake event backlog".to_owned(),
                 ));
@@ -1543,6 +1855,42 @@ mod tests {
         (listener, url)
     }
 
+    /// 转发者合并过的帧覆盖区间可以越过游标（与快照重叠）：接受并推进到 `sequence`；
+    /// 覆盖起点在游标之后才是缺口。
+    #[tokio::test]
+    async fn admit_frame_accepts_coalesced_frames_overlapping_the_cursor() {
+        use fluxdown_protocol::{DaemonEvent, DaemonRuntimeStatsDto, EventFrame, ServiceEvent};
+
+        let frame = |sequence: u64, previous: Option<u64>| EventFrame {
+            epoch: "epoch".to_owned(),
+            sequence,
+            previous,
+            event: ServiceEvent::Daemon(DaemonEvent::RuntimeStatsChanged(
+                DaemonRuntimeStatsDto::default(),
+            )),
+        };
+        let mut cursor = ("epoch".to_owned(), 10_u64);
+
+        // 已被快照覆盖：跳过，不推进。
+        assert!(matches!(
+            super::admit_frame(&mut cursor, frame(10, None)),
+            Ok(None)
+        ));
+        assert_eq!(cursor.1, 10);
+        // 覆盖 (4, 14]，越过游标 10：接受。
+        assert!(matches!(
+            super::admit_frame(&mut cursor, frame(14, Some(4))),
+            Ok(Some(_))
+        ));
+        assert_eq!(cursor.1, 14);
+        // 覆盖 (15, 20]：游标 14 与 15 之间缺了 15 → 缺口。
+        assert!(super::admit_frame(&mut cursor, frame(20, Some(15))).is_err());
+        // epoch 更换。
+        let mut other = frame(15, None);
+        other.epoch = "other".to_owned();
+        assert!(super::admit_frame(&mut cursor, other).is_err());
+    }
+
     #[tokio::test]
     async fn handshake_buffers_notifications_filters_old_frames_and_reconnects_after_gap() {
         use fluxdown_protocol::{
@@ -1555,6 +1903,7 @@ mod tests {
             let frame = EventFrame {
                 epoch: epoch.into(),
                 sequence,
+                previous: None,
                 event: ServiceEvent::Daemon(DaemonEvent::TaskRuntimeChanged(TaskRuntimeDto {
                     task_id: "task".into(),
                     active_transfers: Some(sequence as u32),
@@ -1676,6 +2025,267 @@ mod tests {
         })
         .await
         .expect("websocket handshake and recovery");
+    }
+
+    /// 快照头不内嵌任务：握手期间经 `system.taskPage` 分页载入（翻页中途到达的变更留在缓冲里
+    /// 回放，不丢不重）；运行中 `TablesReloading` 在同一连接上就地重载，在途命令的应答与翻页期间
+    /// 到达的帧都不丢，下游收到的是完整的 `TasksSnapshot` 而不是宣告。
+    #[tokio::test]
+    async fn snapshot_and_reload_page_the_task_table_without_losing_concurrent_changes() {
+        use fluxdown_protocol::{
+            DaemonEvent, DaemonSnapshot, EventFrame, RpcNotification, ServiceEvent, ServiceHello,
+            ServiceRole, Snapshot, SnapshotBody, TablePage, TablePageParams, TableSection, TaskDto,
+            WsServerMsg, apply_daemon_event,
+        };
+        use futures_util::SinkExt;
+        use tokio::sync::oneshot;
+
+        fn task(id: &str, status: i32) -> TaskDto {
+            serde_json::from_value(serde_json::json!({
+                "taskId": id, "url": "https://example.com/f", "fileName": id,
+                "saveDir": "/tmp", "status": status, "downloadedBytes": 0,
+                "totalBytes": 0, "createdAt": "1"
+            }))
+            .unwrap()
+        }
+        fn frame_message(sequence: u64, event: DaemonEvent) -> Message {
+            let frame = EventFrame {
+                epoch: "e".into(),
+                sequence,
+                previous: None,
+                event: ServiceEvent::Daemon(event),
+            };
+            let notification = RpcNotification::new(
+                fluxdown_protocol::method::SERVICE_EVENT,
+                Some(serde_json::to_value(frame).unwrap()),
+            );
+            Message::Text(serde_json::to_string(&notification).unwrap().into())
+        }
+        /// 两个一页的「服务端」：不管客户端要多少都只回 2 行，逼出多次翻页。
+        fn page(rows: &[&str], sequence: u64, request: &TablePageParams) -> TablePage {
+            let mut ids: Vec<&str> = rows.to_vec();
+            ids.sort_unstable();
+            let rest: Vec<&str> = ids
+                .iter()
+                .copied()
+                .filter(|id| request.cursor.as_deref().is_none_or(|cursor| *id > cursor))
+                .collect();
+            let take: Vec<&str> = rest.iter().copied().take(2).collect();
+            TablePage {
+                epoch: "e".into(),
+                sequence,
+                section: TableSection::Tasks,
+                total: ids.len() as u64,
+                tasks: take.iter().map(|id| task(id, 2)).collect(),
+                queue: Vec::new(),
+                next_cursor: (rest.len() > 2)
+                    .then(|| take.last().map(|id| (*id).to_owned()))
+                    .flatten(),
+            }
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (listener, url) = loopback_listener().await;
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                daemon_handshake(&mut ws, TOKEN).await;
+                let hello = read_request(&mut ws).await;
+                let reply =
+                    ServiceHello::new(ServiceRole::Daemon, "daemon", "test", "instance", vec![]);
+                send_response(
+                    &mut ws,
+                    RpcResponse::success(hello.id, serde_json::to_value(reply).unwrap()),
+                )
+                .await;
+                // 头：5 个任务、序号 10。
+                let snapshot_request = read_request(&mut ws).await;
+                assert_eq!(snapshot_request.method, method::SYSTEM_SNAPSHOT);
+                let header = DaemonSnapshot {
+                    task_total: Some(5),
+                    ..DaemonSnapshot::default()
+                };
+                let snapshot = Snapshot {
+                    epoch: "e".into(),
+                    sequence: 10,
+                    body: SnapshotBody::Daemon(Box::new(header)),
+                };
+                ws.send(frame_message(11, DaemonEvent::TaskChanged(task("t9", 0))))
+                    .await
+                    .unwrap();
+                send_response(
+                    &mut ws,
+                    RpcResponse::success(
+                        snapshot_request.id,
+                        serde_json::to_value(snapshot).unwrap(),
+                    ),
+                )
+                .await;
+                // 握手期翻页：第 1 页后删掉已翻过的 t1、新增排在游标之前的 a0。
+                let mut rows = vec!["t0", "t1", "t2", "t3", "t4"];
+                let first = read_request(&mut ws).await;
+                assert_eq!(first.method, method::SYSTEM_TASK_PAGE);
+                let params: TablePageParams =
+                    serde_json::from_value(first.params.clone().unwrap()).unwrap();
+                assert_eq!(params.cursor, None);
+                send_response(
+                    &mut ws,
+                    RpcResponse::success(
+                        first.id,
+                        serde_json::to_value(page(&rows, 11, &params)).unwrap(),
+                    ),
+                )
+                .await;
+                rows.retain(|id| *id != "t1");
+                rows.push("a0");
+                ws.send(frame_message(
+                    12,
+                    DaemonEvent::TaskDeleted {
+                        task_id: "t1".into(),
+                    },
+                ))
+                .await
+                .unwrap();
+                ws.send(frame_message(13, DaemonEvent::TaskChanged(task("a0", 0))))
+                    .await
+                    .unwrap();
+                loop {
+                    let request = read_request(&mut ws).await;
+                    assert_eq!(request.method, method::SYSTEM_TASK_PAGE);
+                    let params: TablePageParams =
+                        serde_json::from_value(request.params.clone().unwrap()).unwrap();
+                    let reply = page(&rows, 13, &params);
+                    let done = reply.next_cursor.is_none();
+                    send_response(
+                        &mut ws,
+                        RpcResponse::success(request.id, serde_json::to_value(reply).unwrap()),
+                    )
+                    .await;
+                    if done {
+                        break;
+                    }
+                }
+                // 运行中：先收到一条在途命令，再宣告表重载；翻页期间命令应答与新事件交错到达。
+                let command = read_request(&mut ws).await;
+                assert_eq!(command.method, "daemon.task.pause");
+                ws.send(frame_message(
+                    14,
+                    DaemonEvent::TablesReloading {
+                        tasks: Some(3),
+                        queue: None,
+                    },
+                ))
+                .await
+                .unwrap();
+                let reload_rows = ["r0", "r1", "r2"];
+                let request = read_request(&mut ws).await;
+                assert_eq!(request.method, method::SYSTEM_TASK_PAGE);
+                ws.send(frame_message(15, DaemonEvent::TaskChanged(task("r3", 0))))
+                    .await
+                    .unwrap();
+                send_response(
+                    &mut ws,
+                    RpcResponse::success(command.id, serde_json::json!({ "ok": true })),
+                )
+                .await;
+                let params: TablePageParams =
+                    serde_json::from_value(request.params.clone().unwrap()).unwrap();
+                send_response(
+                    &mut ws,
+                    RpcResponse::success(
+                        request.id,
+                        serde_json::to_value(page(&reload_rows, 15, &params)).unwrap(),
+                    ),
+                )
+                .await;
+                let request = read_request(&mut ws).await;
+                let params: TablePageParams =
+                    serde_json::from_value(request.params.clone().unwrap()).unwrap();
+                assert_eq!(params.cursor.as_deref(), Some("r1"));
+                send_response(
+                    &mut ws,
+                    RpcResponse::success(
+                        request.id,
+                        serde_json::to_value(page(&reload_rows, 15, &params)).unwrap(),
+                    ),
+                )
+                .await;
+                ws.close(None).await.unwrap();
+            });
+
+            let config = super::DaemonClientConfig::new(url.clone(), TOKEN);
+            let (socket, snapshot, buffered) = super::connect(&config, &fixed(&url))
+                .await
+                .unwrap_or_else(|_| panic!("connect"));
+            let SnapshotBody::Daemon(mut daemon) = snapshot.body else {
+                panic!("daemon snapshot");
+            };
+            assert_eq!(
+                daemon.task_total, None,
+                "paging completes before the snapshot is handed over"
+            );
+            assert_eq!(daemon.tasks.len(), 5);
+            // 握手期缓冲的帧（11..13）按快照序号回放后收敛到服务端当前状态。
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let (command_tx, mut commands) = tokio::sync::mpsc::channel(1);
+            let (ack, answer) = oneshot::channel();
+            command_tx
+                .send(super::ClientCommand {
+                    method: "daemon.task.pause".to_owned(),
+                    params: None,
+                    ack,
+                })
+                .await
+                .unwrap();
+            let outcome = super::run_connected(
+                socket,
+                &mut commands,
+                &tx,
+                (snapshot.epoch, snapshot.sequence),
+                buffered,
+            )
+            .await;
+            assert!(outcome.is_err(), "daemon closes the connection at the end");
+            assert!(
+                answer.await.expect("ack delivered").is_ok(),
+                "the in-flight command is answered while the table reloads"
+            );
+            let mut forwarded = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                let super::DaemonClientEvent::Event(frame) = event else {
+                    panic!("only events are forwarded");
+                };
+                forwarded.push(*frame);
+            }
+            let sequences: Vec<u64> = forwarded.iter().map(|frame| frame.sequence).collect();
+            assert_eq!(sequences, [11, 12, 13, 14, 15]);
+            for frame in &forwarded[..3] {
+                let ServiceEvent::Daemon(event) = &frame.event else {
+                    panic!("daemon event");
+                };
+                apply_daemon_event(&mut daemon, event);
+            }
+            let mut ids: Vec<&str> = daemon.tasks.iter().map(|t| t.task_id.as_str()).collect();
+            ids.sort_unstable();
+            assert_eq!(ids, ["a0", "t0", "t2", "t3", "t4", "t9"]);
+            // 宣告被还原成完整的整表事件，随后是翻页期间到达的帧。
+            let ServiceEvent::Daemon(DaemonEvent::Engine(WsServerMsg::TasksSnapshot { tasks })) =
+                &forwarded[3].event
+            else {
+                panic!("TablesReloading must be forwarded as a full TasksSnapshot");
+            };
+            assert_eq!(
+                tasks.iter().map(|t| t.task_id.as_str()).collect::<Vec<_>>(),
+                ["r0", "r1", "r2"]
+            );
+            assert!(matches!(
+                &forwarded[4].event,
+                ServiceEvent::Daemon(DaemonEvent::TaskChanged(task)) if task.task_id == "r3"
+            ));
+            server.await.unwrap();
+        })
+        .await
+        .expect("paged snapshot and reload");
     }
 
     /// 插件设置保存失败时 daemon 以 `field` 标出出错的设置项；经 agent 转发给界面时必须原样保留。

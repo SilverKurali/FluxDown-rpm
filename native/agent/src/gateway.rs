@@ -16,8 +16,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
-    ApplicationErrorCode, ClientHello, EventFrame, RpcErrorData, RpcErrorObject, RpcNotification,
-    RpcRequest, RpcResponse, ServiceHello, ServiceRole, validate_first_request,
+    ApplicationErrorCode, ClientHello, EventFrame, RpcErrorData, RpcErrorObject, RpcRequest,
+    RpcResponse, ServiceHello, ServiceRole, validate_first_request,
 };
 use futures_util::StreamExt;
 use reqwest::Method;
@@ -32,6 +32,9 @@ use crate::cloud_notify::CloudNotifyService;
 use crate::daemon_client::DaemonClient;
 use crate::diagnostics::{DiagnosticsError, DiagnosticsService};
 use crate::event_hub::AgentEventHub;
+use crate::event_pump::{
+    EventPump, MAX_PENDING_FRAMES, OUTBOX_CAPACITY, finish_writer, run_writer,
+};
 use crate::lifecycle::Lifecycle;
 use crate::link::LinkService;
 use crate::platform::PlatformError;
@@ -227,8 +230,19 @@ impl GatewayService {
         }
         match request.method.as_str() {
             method::SYSTEM_PING => Ok(serde_json::json!({ "ok": true })),
-            method::SYSTEM_SNAPSHOT => serde_json::to_value(self.events.snapshot())
+            // 线上快照只带头；任务表与队列位置表经 `system.taskPage` 分页（协议 `table_sync`）。
+            method::SYSTEM_SNAPSHOT => serde_json::to_value(self.events.wire_snapshot())
                 .map_err(|error| internal_error("system snapshot", error)),
+            method::SYSTEM_TASK_PAGE => {
+                let params = parse_params::<fluxdown_protocol::TablePageParams>(request.params)?;
+                let page = self.events.task_page(&params).map_err(|_| {
+                    let mut data = RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false);
+                    data.field = Some("cursor".to_owned());
+                    data
+                })?;
+                serde_json::to_value(page)
+                    .map_err(|error| internal_error("system task page", error))
+            }
             method::SYSTEM_SHUTDOWN => {
                 self.local.lifecycle.request_quit();
                 Ok(serde_json::json!({ "ok": true }))
@@ -246,20 +260,12 @@ impl GatewayService {
                 Ok(serde_json::json!({ "ok": true }))
             }
             method::AGENT_SESSION_GET => {
-                let snapshot = self.events.snapshot();
-                let session = match snapshot.body {
-                    fluxdown_protocol::SnapshotBody::Agent(agent) => agent.session,
-                    fluxdown_protocol::SnapshotBody::Daemon(_) => None,
-                };
+                let session = self.events.inspect(|snapshot| snapshot.session.clone());
                 serde_json::to_value(session)
                     .map_err(|error| internal_error("agent session", error))
             }
             method::AGENT_GATEWAY_GET => {
-                let snapshot = self.events.snapshot();
-                let gateway = match snapshot.body {
-                    fluxdown_protocol::SnapshotBody::Agent(agent) => agent.gateway,
-                    fluxdown_protocol::SnapshotBody::Daemon(_) => Default::default(),
-                };
+                let gateway = self.events.inspect(|snapshot| snapshot.gateway.clone());
                 serde_json::to_value(gateway)
                     .map_err(|error| internal_error("gateway status", error))
             }
@@ -1358,10 +1364,11 @@ fn invalid_field(field: &str) -> RpcErrorData {
     }
 }
 
+/// 非任务字段的当前投影（会话、网关、云设备、远程任务……）：取头形态，不克隆任务表。
 fn agent_snapshot(
     events: &AgentEventHub,
 ) -> Result<fluxdown_protocol::AgentSnapshot, RpcErrorData> {
-    match events.snapshot().body {
+    match events.wire_snapshot().body {
         fluxdown_protocol::SnapshotBody::Agent(snapshot) => Ok(*snapshot),
         fluxdown_protocol::SnapshotBody::Daemon(_) => {
             Err(RpcErrorData::new(ApplicationErrorCode::Internal, false))
@@ -1777,8 +1784,11 @@ async fn rpc_upgrade(
         .into_response()
 }
 
+/// 连接循环只读套接字、受理请求，并把应答 / 控制帧放进有序出站通道；套接字写端由
+/// [`run_writer`] 独占，事件经 [`EventPump`] 合并后由它写出（见 `event_pump` 模块）。
+/// 因此慢客户端（套接字写慢）不会让广播接收停摆，也就不会因落后而 4009 断线重拉快照。
 async fn run_socket(
-    mut socket: WebSocket,
+    socket: WebSocket,
     service: Arc<GatewayService>,
     cancel: CancellationToken,
     allow_local_platform: bool,
@@ -1786,9 +1796,12 @@ async fn run_socket(
     let mut ready = false;
     let mut ui_client = false;
     let mut ui_snapshot_ready = false;
-    let mut events = None;
+    let (sink, mut incoming_frames) = socket.split();
+    let (out, outbox) = tokio::sync::mpsc::channel::<Message>(OUTBOX_CAPACITY);
+    let mut events = EventPump::new();
+    let writer = tokio::spawn(run_writer(sink, outbox, events.reader()));
     // 请求按「通道」并发处理：同一通道内严格按到达顺序，慢的云端 RPC 不再阻塞事件转发
-    // 与 daemon 命令（否则事件积压溢出广播容量 → 4009 event-gap 重连）。
+    // 与 daemon 命令。
     let mut lanes: Option<RequestLanes> = None;
     let mut responses: Option<tokio::sync::mpsc::Receiver<RpcResponse>> = None;
     loop {
@@ -1796,29 +1809,25 @@ async fn run_socket(
             _ = cancel.cancelled() => {
                 // 完全退出时客户端必须停止重连 / 重拉；仅 agent 退出（SIGTERM）时允许重拉；
                 // headless 服务器为更新重启时浏览器保持重连（见 `Lifecycle::close_reason`）。
-                let reason = service.local.lifecycle.close_reason();
-                if let Err(error) = socket.send(Message::Close(Some(CloseFrame {
-                    code: 1001,
-                    reason: reason.into(),
-                }))).await {
-                    tracing::debug!(%error, "gateway peer closed before shutdown frame");
-                }
+                send_close(&out, 1001, service.local.lifecycle.close_reason()).await;
                 break;
             }
-            incoming = socket.next() => {
+            // 写端已退出（写失败或 4009 已发出）：连接结束。
+            () = out.closed() => break,
+            incoming = incoming_frames.next() => {
                 let Some(Ok(Message::Text(text))) = incoming else { break; };
                 let request = match serde_json::from_str::<RpcRequest>(&text) {
                     Ok(request) => request,
                     Err(error) => {
                         let response = RpcResponse::parse_failure(error.to_string());
-                        if send_response(&mut socket, response).await.is_err() { break; }
+                        if send_json(&out, &response).await.is_err() { break; }
                         continue;
                     }
                 };
                 if !ready && request.method == method::SYSTEM_SHUTDOWN && request.validate().is_ok() {
                     // 握手前也受理：协议版本不兼容的新桌面程序靠它替换旧 agent。
                     let response = RpcResponse::success(request.id, serde_json::json!({ "ok": true }));
-                    if send_response(&mut socket, response).await.is_err() {
+                    if send_json(&out, &response).await.is_err() {
                         tracing::debug!("gateway shutdown acknowledgement failed; quit not requested");
                         break;
                     }
@@ -1833,18 +1842,18 @@ async fn run_socket(
                             ui_client = declares_selection_ui(&hello);
                             if ui_client { service.ui_connected().await; }
                             let (receiver, session_lanes, response_rx) = service.open_session(allow_local_platform);
-                            events = Some(receiver);
+                            events.attach(receiver, MAX_PENDING_FRAMES);
                             lanes = Some(session_lanes);
                             responses = Some(response_rx);
                             let result = match serde_json::to_value(service.session_hello(allow_local_platform)) {
                                 Ok(result) => result,
                                 Err(_) => break,
                             };
-                            if send_response(&mut socket, RpcResponse::success(id, result)).await.is_err() { break; }
+                            if send_json(&out, &RpcResponse::success(id, result)).await.is_err() { break; }
                         }
                         Err(data) => {
                             let response = RpcResponse::failure(id, RpcErrorObject::application("hello rejected", data));
-                            if send_response(&mut socket, response).await.is_err() { break; }
+                            if send_json(&out, &response).await.is_err() { break; }
                         }
                     }
                     continue;
@@ -1854,7 +1863,7 @@ async fn run_socket(
                 if ui_client && !ui_snapshot_ready && request.method == method::SYSTEM_SNAPSHOT {
                     let response = service.call_with(allow_local_platform, request).await;
                     let succeeded = matches!(&response, RpcResponse::Success(_));
-                    if send_response(&mut socket, response).await.is_err() { break; }
+                    if send_json(&out, &response).await.is_err() { break; }
                     if succeeded {
                         service.local.shell.ui_snapshot_ready();
                         ui_snapshot_ready = true;
@@ -1863,31 +1872,14 @@ async fn run_socket(
                 }
                 if let Some(lanes) = &lanes
                     && let Some(rejected) = lanes.submit(request)
-                    && send_response(&mut socket, rejected).await.is_err()
+                    && send_json(&out, &rejected).await.is_err()
                 {
                     break;
                 }
             }
-            event = receive_event(&mut events), if events.is_some() => {
-                match event {
-                    Ok(frame) => {
-                        let Ok(params) = serde_json::to_value(frame) else { break; };
-                        let notification = RpcNotification::new(method::SERVICE_EVENT, Some(params));
-                        let Ok(text) = serde_json::to_string(&notification) else { break; };
-                        if socket.send(Message::Text(text.into())).await.is_err() { break; }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if let Err(error) = socket.send(Message::Close(Some(CloseFrame { code: 4009, reason: "event-gap".into() }))).await {
-                            tracing::debug!(%error, "gateway peer closed before event-gap frame");
-                        }
-                        break;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
             response = receive_response(&mut responses), if responses.is_some() => {
                 if let Some(response) = response
-                    && send_response(&mut socket, response).await.is_err()
+                    && send_json(&out, &response).await.is_err()
                 {
                     break;
                 }
@@ -1902,6 +1894,8 @@ async fn run_socket(
             }
         }
     }
+    finish_writer(out, writer).await;
+    drop(events);
     if ui_client {
         service.ui_disconnected(ui_snapshot_ready).await;
     }
@@ -1911,20 +1905,22 @@ async fn run_socket(
     }
 }
 
-async fn send_response(socket: &mut WebSocket, response: RpcResponse) -> Result<(), ()> {
-    let text = serde_json::to_string(&response).map_err(|_| ())?;
-    socket
-        .send(Message::Text(text.into()))
-        .await
-        .map_err(|_| ())
+/// 应答序列化后放进出站通道；写端已退出时返回 `Err`。
+async fn send_json<T: serde::Serialize>(
+    out: &tokio::sync::mpsc::Sender<Message>,
+    value: &T,
+) -> Result<(), ()> {
+    let text = serde_json::to_string(value).map_err(|_| ())?;
+    out.send(Message::Text(text.into())).await.map_err(|_| ())
 }
 
-async fn receive_event(
-    receiver: &mut Option<tokio::sync::broadcast::Receiver<fluxdown_protocol::EventFrame>>,
-) -> Result<fluxdown_protocol::EventFrame, tokio::sync::broadcast::error::RecvError> {
-    match receiver {
-        Some(receiver) => receiver.recv().await,
-        None => std::future::pending().await,
+async fn send_close(out: &tokio::sync::mpsc::Sender<Message>, code: u16, reason: &'static str) {
+    let close = Message::Close(Some(CloseFrame {
+        code,
+        reason: reason.into(),
+    }));
+    if out.send(close).await.is_err() {
+        tracing::debug!(close_code = code, "gateway peer closed before close frame");
     }
 }
 
@@ -1960,7 +1956,7 @@ impl GatewayService {
         RequestLanes,
         tokio::sync::mpsc::Receiver<RpcResponse>,
     ) {
-        let (events, _) = self.events.subscribe_and_snapshot();
+        let events = self.events.subscribe();
         let (response_tx, response_rx) = tokio::sync::mpsc::channel(RESPONSE_QUEUE);
         let lanes = RequestLanes::spawn(self, response_tx, allow_local_platform);
         (events, lanes, response_rx)
@@ -3003,6 +2999,245 @@ mod tests {
         .await;
         assert!(matches!(ping, RpcResponse::Success(response) if response.result["ok"] == true));
         socket.close(None).await.expect("close old official socket");
+        harness.finish().await;
+    }
+
+    /// 慢消费者（握手后不读套接字）在进度风暴下不被 4009 断开：转发器及时接收广播并合并，
+    /// 恢复读取后收到的帧链按 `judge_frame` 无缺口地追到最后一帧。
+    #[tokio::test]
+    async fn stalled_websocket_consumer_gets_a_coalesced_gapless_chain() {
+        use fluxdown_protocol::{
+            DaemonEvent, FrameVerdict, ServiceEvent, WsServerMsg, judge_frame,
+        };
+
+        let harness = TestGateway::new("gateway_storm").await;
+        let address = harness.address().await;
+        let mut request = format!("ws://{address}/rpc")
+            .into_client_request()
+            .expect("RPC URL");
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-official-bearer"),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("official socket");
+        let hello = socket_request(
+            &mut socket,
+            1,
+            fluxdown_protocol::method::SYSTEM_HELLO,
+            serde_json::json!({
+                "clientName": "storm-test", "clientVersion": fluxdown_protocol::APP_VERSION,
+                "minProtocolVersion": fluxdown_protocol::MIN_PROTOCOL_VERSION,
+                "maxProtocolVersion": fluxdown_protocol::PROTOCOL_VERSION,
+                "requestedRole": "agent", "capabilities": []
+            }),
+        )
+        .await;
+        assert!(matches!(hello, RpcResponse::Success(_)));
+
+        // 起点 = 订阅时的游标；之后一帧都不读，数据量远超套接字缓冲，写端必然被卡住。
+        let start = harness.service.events.snapshot();
+        let epoch = start.epoch.clone();
+        let mut cursor = start.sequence;
+        let mut last = cursor;
+        for step in 0..80_000_usize {
+            let progress = DaemonEvent::Engine(WsServerMsg::TaskProgress {
+                task_id: format!("task-{}", step % 50),
+                status: 1,
+                downloaded_bytes: i64::try_from(step).expect("step"),
+                total_bytes: 1 << 40,
+                speed: 1,
+                file_name: String::new(),
+                save_dir: String::new(),
+                upload_speed: 0,
+                url: String::new(),
+                error_message: String::new(),
+                uploaded_bytes: 0,
+                seeding_status: 0,
+                seeding_message: String::new(),
+                seeding_time_secs: 0,
+            });
+            last = harness.service.events.apply_daemon_event(progress).sequence;
+            if step % 64 == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        let mut received = 0_usize;
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while cursor < last {
+                let message = socket
+                    .next()
+                    .await
+                    .expect("event frame")
+                    .expect("event socket read");
+                let value: serde_json::Value =
+                    serde_json::from_str(message.to_text().expect("event text"))
+                        .expect("event JSON");
+                assert_eq!(
+                    value["method"],
+                    fluxdown_protocol::method::SERVICE_EVENT,
+                    "slow consumer was disconnected: {message:?}"
+                );
+                let frame: fluxdown_protocol::EventFrame =
+                    serde_json::from_value(value["params"].clone()).expect("event frame");
+                assert!(matches!(frame.event, ServiceEvent::Agent(_)));
+                assert_eq!(
+                    judge_frame(&epoch, cursor, &frame),
+                    FrameVerdict::Accept,
+                    "gap after sequence {cursor}: previous {:?}",
+                    frame.previous
+                );
+                cursor = frame.sequence;
+                received += 1;
+            }
+        })
+        .await
+        .expect("storm must drain");
+        assert!(
+            received < 80_000,
+            "{received} frames: backlog must be coalesced"
+        );
+        socket.close(None).await.expect("close official socket");
+        harness.finish().await;
+    }
+
+    /// 线上快照只带头，任务表经 `system.taskPage` 分页；整表替换的广播帧同样只是头 / 重载宣告，
+    /// 任何一帧都不随任务数增长。
+    #[tokio::test]
+    async fn snapshot_is_a_header_and_tables_page_over_the_socket() {
+        use fluxdown_protocol::{
+            DaemonEvent, DaemonSnapshot, TABLE_INLINE_LIMIT, TaskDto, WsServerMsg,
+        };
+
+        fn task(index: usize) -> TaskDto {
+            serde_json::from_value(serde_json::json!({
+                "taskId": format!("t{index:05}"), "url": "https://example.com/f",
+                "fileName": "f", "saveDir": "/tmp", "status": 2, "downloadedBytes": 0,
+                "totalBytes": 0, "createdAt": "1"
+            }))
+            .expect("task fixture")
+        }
+
+        let harness = TestGateway::new("gateway_task_pages").await;
+        let total = 2_500_usize;
+        harness
+            .service
+            .events
+            .replace_daemon_snapshot(DaemonSnapshot {
+                tasks: (0..total).map(task).collect(),
+                ..DaemonSnapshot::default()
+            });
+        let address = harness.address().await;
+        let mut request = format!("ws://{address}/rpc")
+            .into_client_request()
+            .expect("RPC URL");
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-official-bearer"),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("official socket");
+        let hello = socket_request(
+            &mut socket,
+            1,
+            fluxdown_protocol::method::SYSTEM_HELLO,
+            serde_json::json!({
+                "clientName": "paging-test", "clientVersion": fluxdown_protocol::APP_VERSION,
+                "minProtocolVersion": fluxdown_protocol::MIN_PROTOCOL_VERSION,
+                "maxProtocolVersion": fluxdown_protocol::PROTOCOL_VERSION,
+                "requestedRole": "agent", "capabilities": []
+            }),
+        )
+        .await;
+        assert!(matches!(hello, RpcResponse::Success(_)));
+
+        let RpcResponse::Success(snapshot) = socket_request(
+            &mut socket,
+            2,
+            fluxdown_protocol::method::SYSTEM_SNAPSHOT,
+            serde_json::json!({}),
+        )
+        .await
+        else {
+            panic!("snapshot");
+        };
+        let daemon = &snapshot.result["body"]["snapshot"]["daemon"];
+        assert_eq!(daemon["tasks"], serde_json::json!([]));
+        assert_eq!(daemon["taskTotal"], total);
+        assert!(
+            snapshot.result.to_string().len() < 64 * 1024,
+            "the snapshot never grows with the task count"
+        );
+
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut id = 10;
+        loop {
+            let RpcResponse::Success(page) = socket_request(
+                &mut socket,
+                id,
+                fluxdown_protocol::method::SYSTEM_TASK_PAGE,
+                serde_json::json!({ "section": "tasks", "cursor": cursor, "limit": 1000 }),
+            )
+            .await
+            else {
+                panic!("task page");
+            };
+            id += 1;
+            assert_eq!(page.result["epoch"], snapshot.result["epoch"]);
+            assert_eq!(page.result["total"], total);
+            let rows = page.result["tasks"].as_array().expect("rows");
+            assert!(rows.len() <= 1000);
+            seen.extend(
+                rows.iter()
+                    .map(|row| row["taskId"].as_str().expect("task id").to_owned()),
+            );
+            cursor = page.result["nextCursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(seen.len(), total);
+        assert!(
+            seen.windows(2).all(|pair| pair[0] < pair[1]),
+            "ascending, no duplicates"
+        );
+
+        // 非法游标是参数错误，不是内部错误。
+        let refused = socket_request(
+            &mut socket,
+            id,
+            fluxdown_protocol::method::SYSTEM_TASK_PAGE,
+            serde_json::json!({ "section": "queue", "cursor": "not-a-number" }),
+        )
+        .await;
+        assert!(matches!(refused, RpcResponse::Failure(_)));
+
+        // 超过内联上限的整表事件广播成重载宣告。
+        harness
+            .service
+            .events
+            .apply_daemon_event(DaemonEvent::Engine(WsServerMsg::TasksSnapshot {
+                tasks: (0..=TABLE_INLINE_LIMIT).map(task).collect(),
+            }));
+        let notice = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = socket.next().await.expect("frame").expect("socket read");
+                let value: serde_json::Value =
+                    serde_json::from_str(message.to_text().expect("text")).expect("json");
+                if value["method"] == fluxdown_protocol::method::SERVICE_EVENT {
+                    return value["params"]["event"]["event"]["data"].clone();
+                }
+            }
+        })
+        .await
+        .expect("reload notice");
+        assert_eq!(notice["type"], "tablesReloading");
+        assert_eq!(notice["data"]["tasks"], TABLE_INLINE_LIMIT + 1);
+        socket.close(None).await.expect("close official socket");
         harness.finish().await;
     }
 

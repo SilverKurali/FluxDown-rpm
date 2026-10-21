@@ -32,7 +32,7 @@ struct DownloadsDeriver {
         let runtime: TaskRuntime?
         let down: Int64
         let up: Int64
-        let queuePosition: Int
+        let queueOrder: Int64?
         let boosted: Bool
         let awaitingDecision: Bool
         let category: TaskCategory?
@@ -209,7 +209,8 @@ struct DownloadsDeriver {
                 sections: sections,
                 visibleIds: visible,
                 taskTotal: s.tasks.count + input.remote.count,
-                loaded: true
+                loaded: !s.tasksLoading,
+                loadingTotal: s.tasksLoading ? s.taskTotal : 0
             ),
             facets: Facets(
                 folderCounts: folderCounts,
@@ -277,26 +278,26 @@ struct DownloadsDeriver {
         let down = speed?.down ?? 0
         let up = speed?.up ?? 0
         let runtime = s.runtime[task.taskId]
-        let queuePosition = Int(s.queuePositions[task.taskId] ?? 0)
+        let queueOrder = s.queueOrder.order(of: task.taskId)
         let boosted = s.priorityTaskId == task.taskId
         let category = resolveCategory(task.fileName)
         let queue = queuesById[normalizedQueueId(task.queueId)]
 
         if let previous = entries[task.taskId],
            previous.task == task, previous.runtime == runtime, previous.down == down, previous.up == up,
-           previous.queuePosition == queuePosition, previous.boosted == boosted, previous.awaitingDecision == awaitingDecision,
+           previous.queueOrder == queueOrder, previous.boosted == boosted, previous.awaitingDecision == awaitingDecision,
            previous.category == category, previous.queue == queue {
             return previous.item
         }
 
-        let visual = TaskVisual(task, queuePosition: queuePosition)
+        let visual = TaskVisual(task, queued: queueOrder != nil)
         var kind = FileKind.from(fileName: task.fileName)
         if kind == .other, task.protocol == .bt { kind = .torrent }
         let built = TaskItem(
             task: task,
             speedDown: down,
             speedUp: up,
-            queuePosition: queuePosition,
+            queueOrder: queueOrder,
             boosted: boosted,
             awaitingDecision: awaitingDecision,
             category: category,
@@ -312,7 +313,7 @@ struct DownloadsDeriver {
             connectedPeers: runtime?.connectedPeers.map { Int($0) }
         )
         entries[task.taskId] = Entry(
-            task: task, runtime: runtime, down: down, up: up, queuePosition: queuePosition,
+            task: task, runtime: runtime, down: down, up: up, queueOrder: queueOrder,
             boosted: boosted, awaitingDecision: awaitingDecision, category: category, queue: queue, item: built
         )
         return built

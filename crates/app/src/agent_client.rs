@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
-    ApplicationErrorCode, CLOSE_REASON_SERVICE_QUIT, EventFrame, RequestId, RpcErrorData,
-    RpcNotification, RpcRequest, RpcResponse, ServiceHello, ServiceRole, Snapshot, SnapshotBody,
+    AgentEvent, ApplicationErrorCode, CLOSE_REASON_SERVICE_QUIT, DaemonEvent, EventFrame,
+    FrameVerdict, QueueOrderEntryDto, RequestId, RpcErrorData, RpcNotification, RpcRequest,
+    RpcResponse, ServiceEvent, ServiceHello, ServiceRole, Snapshot, SnapshotBody, TablePage,
+    TableSync, TaskDto, judge_frame,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -32,6 +34,15 @@ use crate::service_failure::ServiceFailure;
 
 pub type AgentFuture<T> = Pin<Box<dyn Future<Output = Result<T, RpcErrorData>> + Send + 'static>>;
 
+/// 握手期（订阅到拿到快照之间）缓冲的事件帧上限。大批量导入时这段窗口里可以积压上千帧；
+/// 超限才放弃本次握手重连。
+const HANDSHAKE_EVENT_BUFFER_LIMIT: usize = 65_536;
+
+/// 任务表分页载入里单页请求的超时：每收到一页即重新计时，所以载入总时长随表大小自然伸缩
+/// （23 万任务约 115 页，不会被握手的 15s 总时限误杀），只有「一页迟迟不来」才判定失败并
+/// 整体重连重新载入。
+const TABLE_PAGE_TIMEOUT: Duration = Duration::from_secs(30);
+
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub enum AgentClientEvent {
@@ -47,6 +58,40 @@ pub enum AgentClientEvent {
     /// agent 无法被拉起或反复启动即退出：不再空转拉起，界面据此展示原因。成功连接后才会再次
     /// 报告新的失败。
     ServiceFailed(ServiceFailure),
+    /// 分页载入完成：任务表 / 队列位置表已全部到齐，会话据此装入投影并广播完整快照。
+    /// 载入期间的后续帧由连接循环缓冲，本事件之后才按序回放。
+    TablesLoaded(Box<TablesLoaded>),
+}
+
+/// [`AgentClientEvent::TablesLoaded`] 载荷：页是基准帧 `sequence` 之后某时刻的状态，装入后由
+/// 其后回放的帧收敛。
+pub struct TablesLoaded {
+    pub epoch: String,
+    /// 基准帧序号（载入触发时的投影游标）。
+    pub sequence: u64,
+    /// `Some` = 任务表已载入（按 id 升序）。
+    pub tasks: Option<Vec<TaskDto>>,
+    /// `Some` = 队列位置表已载入（按 `order` 升序）。
+    pub queue: Option<Vec<QueueOrderEntryDto>>,
+}
+
+/// 一轮在途的表分页载入（握手后，或连接中收到 `reloads_tables()` 帧）。
+struct TableLoad {
+    sync: TableSync,
+    /// 在途页请求的 id；`None` = 尚未发出。
+    request: Option<i64>,
+    /// 在途页请求的超时时刻。
+    deadline: tokio::time::Instant,
+}
+
+impl TableLoad {
+    fn new(sync: TableSync) -> Self {
+        Self {
+            sync,
+            request: None,
+            deadline: tokio::time::Instant::now() + TABLE_PAGE_TIMEOUT,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -239,9 +284,16 @@ async fn run_client(
                 link_log.connected();
                 bootstrap.note_connected().await;
                 let cursor = (snapshot.epoch.clone(), snapshot.sequence);
-                let preferences_revision = match &snapshot.body {
-                    SnapshotBody::Agent(body) => body.preferences.revision,
-                    SnapshotBody::Daemon(_) => 0,
+                let (preferences_revision, tables) = match &snapshot.body {
+                    SnapshotBody::Agent(body) => (
+                        body.preferences.revision,
+                        TableSync::for_snapshot(
+                            snapshot.epoch.clone(),
+                            snapshot.sequence,
+                            &body.daemon,
+                        ),
+                    ),
+                    SnapshotBody::Daemon(_) => (0, None),
                 };
                 if events
                     .send(AgentClientEvent::Snapshot(Box::new(snapshot)))
@@ -254,8 +306,11 @@ async fn run_client(
                     socket,
                     &mut commands,
                     &events,
-                    cursor,
-                    buffered,
+                    Bootstrap {
+                        cursor,
+                        buffered,
+                        tables,
+                    },
                     PreferenceWrites::new(preferences_revision),
                     &mut submission_transport,
                 )
@@ -591,7 +646,8 @@ async fn dial(
 }
 
 async fn upgrade(request: Request, stream: TcpStream) -> Result<Socket, ConnectError> {
-    // 代理快照内嵌完整 daemon 快照，随任务数增长且单帧发出：帧与消息上限一同放宽。
+    // 单帧上限 [`MAX_INBOUND_RPC_MESSAGE_BYTES`](32 MiB)：快照与替换事件只带头，任务表按页
+    // （约 1.6 MB）拉取，仍保留余量给大页与插件 / 配置等大字段。
     let limit = Some(fluxdown_protocol::MAX_INBOUND_RPC_MESSAGE_BYTES);
     let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .max_frame_size(limit)
@@ -676,24 +732,72 @@ enum SessionEnd {
     ServiceQuit,
 }
 
+/// 握手结果：连接循环从这里起步。
+struct Bootstrap {
+    /// 快照游标 `(epoch, sequence)`。
+    cursor: (String, u64),
+    /// 握手期缓冲的事件帧。
+    buffered: Vec<EventFrame>,
+    /// 快照头带待载入标记时的分页载入；`None` = 表已完整。
+    tables: Option<TableSync>,
+}
+
+impl Bootstrap {
+    /// 无缓冲帧、表已完整的起步（测试用）。
+    #[cfg(test)]
+    fn at(epoch: &str, sequence: u64) -> Self {
+        Self {
+            cursor: (epoch.to_owned(), sequence),
+            buffered: Vec::new(),
+            tables: None,
+        }
+    }
+}
+
 async fn run_connected(
     mut socket: Socket,
     commands: &mut mpsc::Receiver<ClientCommand>,
     events: &mpsc::Sender<AgentClientEvent>,
-    snapshot_cursor: (String, u64),
-    buffered: Vec<EventFrame>,
+    bootstrap: Bootstrap,
     mut preference_writes: PreferenceWrites,
     submissions: &mut SubmissionTransport,
 ) -> Result<SessionEnd, ()> {
+    let Bootstrap {
+        cursor: snapshot_cursor,
+        buffered,
+        tables,
+    } = bootstrap;
     let mut next_id = 10_i64;
     let mut pending = HashMap::<i64, PendingCommand>::new();
     let mut cursor = snapshot_cursor;
-    for mut frame in buffered {
-        if frame.epoch == cursor.0 {
-            preference_writes.overlay_frame(&mut frame);
-            forward_event(frame, &mut cursor, events).await?;
+    // 握手期缓冲帧里换了 epoch 的帧不属于本快照：丢弃（载入期间到达的帧则按 `judge_frame`
+    // 严格判定，epoch 变化 = 整体重连）。
+    let buffered = buffered
+        .into_iter()
+        .filter(|frame| frame.epoch == cursor.0)
+        .collect::<Vec<_>>();
+    let mut load = match tables {
+        // 握手拿到的是不含表的头：握手期事件进入缓冲，翻页载入完成后再回放。
+        Some(sync) => {
+            let mut started = TableLoad::new(sync);
+            for frame in buffered {
+                started.sync.push_frame(frame).map_err(|error| {
+                    log::warn!("table load backlog rejected a handshake frame: {error:?}");
+                })?;
+            }
+            Some(started)
         }
-    }
+        None => replay(buffered, &mut cursor, events, &mut preference_writes).await?,
+    };
+    advance_load(
+        &mut socket,
+        &mut load,
+        &mut next_id,
+        &mut cursor,
+        events,
+        &mut preference_writes,
+    )
+    .await?;
     loop {
         tokio::select! {
             admission = submissions.gate.admit(), if !submissions.unsent.is_empty() => {
@@ -724,6 +828,10 @@ async fn run_connected(
                     break;
                 }
             }
+            () = table_load_timeout(load.as_ref().map(|active| active.deadline)) => {
+                log::warn!("table page request timed out after {TABLE_PAGE_TIMEOUT:?}; resyncing");
+                break;
+            }
             incoming = socket.next() => {
                 let text = match incoming {
                     Some(Ok(Message::Text(text))) => text,
@@ -745,14 +853,51 @@ async fn run_connected(
                 {
                     let Some(params) = notification.params else { break; };
                     let Ok(mut frame) = serde_json::from_value::<EventFrame>(params) else { break; };
+                    // 载入期间：只缓冲、不应用（载入完成后按序回放）。
+                    if let Some(active) = load.as_mut() {
+                        if let Err(error) = active.sync.push_frame(frame) {
+                            log::warn!("table load backlog rejected an event frame: {error:?}");
+                            break;
+                        }
+                        continue;
+                    }
                     preference_writes.overlay_frame(&mut frame);
-                    forward_event(frame, &mut cursor, events).await?;
+                    let reload = reload_totals(&frame.event);
+                    let accepted = forward_event(frame, &mut cursor, events).await?;
+                    if accepted
+                        && let Some((tasks, queue)) = reload
+                    {
+                        // 以本帧为新基准分页重载：本帧已应用（头里的加载态落地），其后帧缓冲。
+                        load = TableSync::new(cursor.0.clone(), cursor.1, tasks, queue)
+                            .map(TableLoad::new);
+                        if advance_load(&mut socket, &mut load, &mut next_id, &mut cursor, events, &mut preference_writes).await.is_err() {
+                            break;
+                        }
+                    }
                     continue;
                 }
                 let response = serde_json::from_str::<RpcResponse>(&text).map_err(|_| ())?;
                 match response {
                     RpcResponse::Success(success) => {
                         if let RequestId::Integer(id) = success.id {
+                            if let Some(active) = load.as_mut().filter(|active| active.request == Some(id)) {
+                                active.request = None;
+                                let accepted = serde_json::from_value::<TablePage>(success.result)
+                                    .map_err(|error| {
+                                        log::warn!("malformed table page: {error}");
+                                    })
+                                    .and_then(|page| {
+                                        active.sync.accept(page).map_err(|error| {
+                                            log::warn!("table page rejected: {error:?}");
+                                        })
+                                    });
+                                if accepted.is_err()
+                                    || advance_load(&mut socket, &mut load, &mut next_id, &mut cursor, events, &mut preference_writes).await.is_err()
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
                             preference_writes.settle(id, Some(&success.result));
                             if let Some(command) = pending.remove(&id)
                                 && command.ack.send(Ok(success.result)).is_err()
@@ -763,6 +908,10 @@ async fn run_connected(
                     }
                     RpcResponse::Failure(failure) => {
                         if let Some(RequestId::Integer(id)) = failure.id {
+                            if load.as_ref().is_some_and(|active| active.request == Some(id)) {
+                                log::warn!("table page request failed: {:?}", failure.error.data.as_ref().map(|data| data.code));
+                                break;
+                            }
                             preference_writes.settle(id, None);
                             if let Some(command) = pending.remove(&id)
                                 && command.ack.send(Err(failure.error.data.unwrap_or_else(internal_error))).is_err()
@@ -811,24 +960,129 @@ async fn send_command(
         })
 }
 
+/// 本事件要求分页重载表时的 `(任务总数, 队列位置总数)`（见 [`ServiceEvent::reloads_tables`]）。
+fn reload_totals(event: &ServiceEvent) -> Option<(Option<u64>, Option<u64>)> {
+    if !event.reloads_tables() {
+        return None;
+    }
+    match event {
+        ServiceEvent::Daemon(DaemonEvent::SnapshotReplaced(header))
+        | ServiceEvent::Agent(AgentEvent::DaemonSnapshotReplaced(header))
+        | ServiceEvent::Agent(AgentEvent::Daemon(DaemonEvent::SnapshotReplaced(header))) => {
+            Some((header.task_total, header.queue_total))
+        }
+        ServiceEvent::Daemon(DaemonEvent::TablesReloading { tasks, queue })
+        | ServiceEvent::Agent(AgentEvent::Daemon(DaemonEvent::TablesReloading { tasks, queue })) => {
+            Some((*tasks, *queue))
+        }
+        _ => None,
+    }
+}
+
+async fn table_load_timeout(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// 把缓冲帧按序回放给会话（`judge_frame` 以 `cursor` 判定）。回放中遇到要求重载表的帧：应用它，
+/// 其后的帧作为新一轮载入的缓冲，返回新一轮载入。
+async fn replay(
+    frames: Vec<EventFrame>,
+    cursor: &mut (String, u64),
+    events: &mpsc::Sender<AgentClientEvent>,
+    preference_writes: &mut PreferenceWrites,
+) -> Result<Option<TableLoad>, ()> {
+    let mut frames = frames.into_iter();
+    while let Some(mut frame) = frames.next() {
+        preference_writes.overlay_frame(&mut frame);
+        let reload = reload_totals(&frame.event);
+        let accepted = forward_event(frame, cursor, events).await?;
+        let Some((tasks, queue)) = reload.filter(|_| accepted) else {
+            continue;
+        };
+        let Some(mut sync) = TableSync::new(cursor.0.clone(), cursor.1, tasks, queue) else {
+            continue;
+        };
+        for rest in frames {
+            sync.push_frame(rest).map_err(|error| {
+                log::warn!("table load backlog rejected a replayed frame: {error:?}");
+            })?;
+        }
+        return Ok(Some(TableLoad::new(sync)));
+    }
+    Ok(None)
+}
+
+/// 推进分页载入：有下一页就发请求并返回（页应答由连接循环路由回来）；全部页到齐则通知会话
+/// 装入表并回放缓冲帧，回放中遇到新的重载帧则继续新一轮。
+async fn advance_load(
+    socket: &mut Socket,
+    load: &mut Option<TableLoad>,
+    next_id: &mut i64,
+    cursor: &mut (String, u64),
+    events: &mpsc::Sender<AgentClientEvent>,
+    preference_writes: &mut PreferenceWrites,
+) -> Result<(), ()> {
+    while let Some(mut current) = load.take() {
+        if let Some(params) = current.sync.next_request() {
+            let id = *next_id;
+            *next_id = next_id.saturating_add(1);
+            let params = serde_json::to_value(&params).map_err(|error| {
+                log::error!("could not encode table page params: {error}");
+            })?;
+            let request = RpcRequest::new(
+                RequestId::Integer(id),
+                method::SYSTEM_TASK_PAGE,
+                Some(params),
+            );
+            let text = serde_json::to_string(&request).map_err(|error| {
+                log::error!("could not encode table page request: {error}");
+            })?;
+            socket
+                .send(Message::Text(text.into()))
+                .await
+                .map_err(|error| {
+                    log::debug!("table page request send failed: {error}");
+                })?;
+            current.request = Some(id);
+            current.deadline = tokio::time::Instant::now() + TABLE_PAGE_TIMEOUT;
+            *load = Some(current);
+            return Ok(());
+        }
+        let epoch = current.sync.epoch().to_owned();
+        let sequence = current.sync.base_sequence();
+        let loaded = current.sync.into_parts();
+        events
+            .send(AgentClientEvent::TablesLoaded(Box::new(TablesLoaded {
+                epoch,
+                sequence,
+                tasks: loaded.tasks,
+                queue: loaded.queue,
+            })))
+            .await
+            .map_err(|_| ())?;
+        *load = replay(loaded.backlog, cursor, events, preference_writes).await?;
+    }
+    Ok(())
+}
+
+/// 把一帧交给会话；返回帧是否被接受（旧帧 / 已被快照覆盖的帧返回 `false`）。
 async fn forward_event(
     frame: EventFrame,
     cursor: &mut (String, u64),
     events: &mpsc::Sender<AgentClientEvent>,
-) -> Result<(), ()> {
-    if frame.epoch != cursor.0 {
-        return Err(());
+) -> Result<bool, ()> {
+    match judge_frame(&cursor.0, cursor.1, &frame) {
+        FrameVerdict::Skip => return Ok(false),
+        FrameVerdict::Resync => return Err(()),
+        FrameVerdict::Accept => cursor.1 = frame.sequence,
     }
-    if frame.sequence <= cursor.1 {
-        return Ok(());
-    }
-    if frame.sequence != cursor.1.saturating_add(1) {
-        return Err(());
-    }
-    cursor.1 = frame.sequence;
     events
         .send(AgentClientEvent::Event(Box::new(frame)))
         .await
+        .map(|()| true)
         .map_err(|_| ())
 }
 
@@ -860,7 +1114,7 @@ async fn call_on_socket(
             };
             let frame = serde_json::from_value::<EventFrame>(params)
                 .map_err(|_| ConnectError::Fatal(protocol_error()))?;
-            if buffered.len() >= 1024 {
+            if buffered.len() >= HANDSHAKE_EVENT_BUFFER_LIMIT {
                 return Err(ConnectError::Transient(format!(
                     "event backlog overflow during {method_name}"
                 )));
@@ -971,3 +1225,7 @@ mod submission_tests;
 #[cfg(test)]
 #[path = "agent_client_connect_tests.rs"]
 mod connect_tests;
+
+#[cfg(test)]
+#[path = "agent_client_table_tests.rs"]
+mod table_tests;

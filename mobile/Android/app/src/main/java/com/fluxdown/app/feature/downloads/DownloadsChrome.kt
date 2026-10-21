@@ -191,7 +191,8 @@ private fun SelectionDockContent(modifier: Modifier, reservedEnd: Dp) {
             }
         }
         container.store.state.collect { s ->
-            if (nav.selection.isEmpty()) return@collect
+            // 任务表载入中列表是空的，不能据此判定“已选任务都被删除了”。
+            if (nav.selection.isEmpty() || s.tasksLoading) return@collect
             val ids = if (nav.selection.size > 8) s.tasks.mapTo(HashSet()) { it.taskId } else null
             val gone = nav.selection.filter { id -> if (ids != null) id !in ids else s.tasks.none { it.taskId == id } }
             if (gone.isNotEmpty()) nav.selection.removeAll(gone.toSet())

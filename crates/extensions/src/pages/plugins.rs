@@ -1149,6 +1149,7 @@ impl ExtensionsView {
             risk: risk_of(&entry.permissions).to_owned(),
             permissions: permissions.clone(),
             network_hosts: hosts.clone(),
+            page_scripts: Vec::new(),
         };
         let view = cx.entity().downgrade();
         let plugin_id = entry.plugin_id;

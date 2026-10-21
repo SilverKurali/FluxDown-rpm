@@ -327,10 +327,10 @@ impl RemoteTaskService {
                 _ => ErrorReason::CloudUnreachable,
             }),
         };
-        let fluxdown_protocol::SnapshotBody::Agent(snapshot) = self.events.snapshot().body else {
-            return;
-        };
-        if snapshot.cloud_connection != connection {
+        let unchanged = self
+            .events
+            .inspect(|snapshot| snapshot.cloud_connection == connection);
+        if !unchanged {
             self.events
                 .publish(AgentEvent::CloudConnectionChanged(connection));
         }

@@ -312,12 +312,14 @@ fn ws_server_msg_queue_positions_changed_variant() {
         positions: vec![QueuePositionDto {
             task_id: "t1".into(),
             position: 3,
+            order: 7,
         }],
     };
     let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
     assert_eq!(v["type"], "queuePositionsChanged");
     assert_eq!(v["positions"][0]["taskId"], "t1");
     assert_eq!(v["positions"][0]["position"], 3);
+    assert_eq!(v["positions"][0]["order"], 7);
 }
 
 #[test]

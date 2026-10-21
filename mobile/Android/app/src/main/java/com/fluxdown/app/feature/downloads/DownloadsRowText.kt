@@ -119,6 +119,7 @@ private fun firstLine(s: String): String? = s.lineSequence().map { it.trim() }.f
 /**
  * 元信息行（§3.7 taskMeta）：按状态拼接，失败行整行 coralText 且不追加尾部字段。
  * 字段可选项来自视图偏好 [fields]，尾部顺序固定：协议 · 来源 · 队列 · 创建时间。
+ * [queuePosition] = 排队名次（1 起），只对排队行有意义：由渲染方按可见行取，不随任务行模型缓存。
  */
 internal fun buildRowMeta(
     colors: FluxColors,
@@ -126,6 +127,7 @@ internal fun buildRowMeta(
     item: TaskItem,
     fields: Set<CardField>,
     nowSec: Long,
+    queuePosition: Int,
 ): AnnotatedString = colors.buildTaskMeta {
     val task = item.task
     val showSize = CardField.Size in fields
@@ -152,7 +154,7 @@ internal fun buildRowMeta(
             if (showSize && total > 0) part(doneOfTotal)
         }
         TaskVisualState.Queued -> {
-            part(t.queued(item.queuePosition))
+            part(t.queued(queuePosition))
             if (showSize) part(totalSize)
         }
         TaskVisualState.Pending -> {

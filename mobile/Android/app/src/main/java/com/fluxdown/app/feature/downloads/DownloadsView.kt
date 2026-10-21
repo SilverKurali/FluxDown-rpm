@@ -26,6 +26,7 @@ import com.fluxdown.core.protocol.preferences
 import com.fluxdown.core.format.Format
 import com.fluxdown.core.format.Measure
 import com.fluxdown.core.model.FileConflicts
+import com.fluxdown.core.model.QueueOrder
 import com.fluxdown.core.model.TaskStatus
 import com.fluxdown.core.store.Connection
 import com.fluxdown.core.store.HostState
@@ -112,6 +113,10 @@ class DownloadsView internal constructor(private val container: AppContainer) {
     internal var remoteTargets by mutableStateOf<Map<String, RemoteTarget>>(emptyMap())
         private set
 
+    /** 排队顺序（稳定键 → 名次）；排队行读它得到「排队 #n」，顺序变化只重组读它的可见行。 */
+    internal var queueOrder by mutableStateOf(QueueOrder.Empty)
+        private set
+
     /** 远程任务命令与行内过渡态。 */
     internal val remoteCommands = RemoteCommands(container)
 
@@ -195,6 +200,10 @@ class DownloadsView internal constructor(private val container: AppContainer) {
         }
         launch {
             container.store.state.map { it.speedHistory }.distinctUntilChanged().collect { wave.update(it) }
+        }
+        launch {
+            // 名次只在渲染可见排队行时按键二分取：顺序变化（队首出队等）只重组读它的可见行，不重建任务行模型。
+            container.store.state.map { it.queueOrder }.distinctUntilChanged().collect { queueOrder = it }
         }
         launch {
             val cache = DeriveCache()

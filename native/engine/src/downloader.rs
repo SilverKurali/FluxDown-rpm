@@ -2747,79 +2747,351 @@ pub async fn dedup_filename(
     avoid: &std::collections::HashSet<String>,
     overwrite: &crate::file_exists::OverwritePolicy,
 ) -> String {
-    // Phase 1: fast probe — most of the time there is no conflict.
-    let candidate = dir.join(name);
-    let temp_candidate = PathBuf::from(format!("{}{}", candidate.display(), TEMP_EXT));
-    // Also check the in-flight reservation set BEFORE the async disk probes
-    // so that two tasks starting simultaneously both see each other's claim.
-    let final_conflict = if overwrite.permits(name) {
-        // overwrite 模式:仅目录算最终名冲突(文件不能覆盖目录);普通
-        // 文件存在 = 保留原名,finalize 时覆盖。
-        tokio::fs::metadata(&candidate)
-            .await
-            .map(|m| m.is_dir())
-            .unwrap_or(false)
-    } else {
-        tokio::fs::try_exists(&candidate).await.unwrap_or(false)
-    };
-    if !reserved.contains(&temp_candidate)
-        && !avoid.contains(&name.to_lowercase())
-        && !final_conflict
-        && !tokio::fs::try_exists(&temp_candidate)
-            .await
-            .unwrap_or(false)
-    {
-        return name.to_string();
-    }
-
-    // Phase 2: conflict detected — scan directory into memory to avoid
-    // up to 19998 filesystem calls in the dedup loop.
-    //
-    // 条目名**小写折叠**后入集:Windows/APFS 大小写不敏感,精确字节比较会
-    // 漏判 `MOVIE (1).mp4` vs 已存在的 `Movie (1).mp4`,finalize rename 的
-    // REPLACE 语义会静默覆盖真实文件。非 UTF-8 名经 lossy 转换,只可能把
-    // 不冲突误判为冲突(多让一个编号),决不会漏判。
-    let existing: std::collections::HashSet<String> = {
-        let mut set = std::collections::HashSet::new();
-        if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                set.insert(entry.file_name().to_string_lossy().to_lowercase());
-            }
+    let dir_owned = dir.to_path_buf();
+    let name_owned = name.to_string();
+    let reserved = reserved.clone();
+    let avoid = avoid.clone();
+    let allow_overwrite = overwrite.permits(name);
+    // 磁盘探测是同步 stat(重度冲突时退化为一次目录扫描),放进阻塞池,
+    // 不占用 async 工作线程。
+    let joined = tokio::task::spawn_blocking(move || {
+        dedup_name_by_probe(
+            &dir_owned,
+            &name_owned,
+            &DedupRules {
+                reserved: Some(&reserved),
+                avoid: Some(&avoid),
+                allow_overwrite,
+                companion_mp4: false,
+            },
+        )
+    })
+    .await;
+    match joined {
+        Ok(Ok(chosen)) => chosen,
+        Ok(Err(error)) => {
+            crate::logger::report_warning("downloader", "probe filename collisions", &error);
+            uuid_suffixed_name(name)
         }
-        set
-    };
+        Err(error) => {
+            crate::logger::report_warning("downloader", "join filename dedup probe", &error);
+            uuid_suffixed_name(name)
+        }
+    }
+}
 
+/// 编号探测阶段逐个 `stat` 的候选数上限。超过后改为整目录扫描一次再在内存里
+/// 找空位:同名文件成千上万时,逐个 stat 的总开销(≈ 2k 次系统调用)会超过一次
+/// `read_dir`。扫描发生在调用方的锁之外,不会阻塞 actor。
+const DEDUP_PROBE_LIMIT: u32 = 32;
+
+/// 编号上限(`name (1)` … `name (9999)`),之后用 UUID 兜底。
+const DEDUP_MAX_NUMBER: u32 = 9999;
+
+/// [`dedup_name_by_probe`] 的冲突规则。
+#[derive(Clone, Copy)]
+pub(crate) struct DedupRules<'a> {
+    /// 在途任务已预订的 `.fdownloading` 路径(精确路径比较)。
+    pub reserved: Option<&'a std::collections::HashSet<std::path::PathBuf>>,
+    /// **小写折叠**的额外占用名(如其他任务已声明但尚未落盘的名字)。
+    pub avoid: Option<&'a std::collections::HashSet<String>>,
+    /// 原名对应的同名**普通最终文件**可被覆盖(`file_exists_behavior ==
+    /// overwrite`):仅目录、`.fdownloading` 临时文件、`reserved`/`avoid` 命中算
+    /// 冲突。编号变体恒按保守语义,绝不覆盖真实文件。
+    pub allow_overwrite: bool,
+    /// HLS:成品是 `<stem>.mp4`,同 stem 的 `.mp4` 已存在同样算冲突。
+    pub companion_mp4: bool,
+}
+
+/// `name` 的 `.mp4` 伴生名(同 stem)。
+fn companion_mp4_name(name: &str) -> String {
     let stem = Path::new(name)
         .file_stem()
-        .and_then(|s| s.to_str())
+        .and_then(|stem| stem.to_str())
         .unwrap_or(name);
-    let ext = Path::new(name).extension().and_then(|s| s.to_str());
+    format!("{stem}.mp4")
+}
 
-    for i in 1..=9999 {
-        let new_name = if let Some(ext) = ext {
-            format!("{} ({}).{}", stem, i, ext)
-        } else {
-            format!("{} ({})", stem, i)
-        };
-        let temp_name = format!("{}{}", new_name, TEMP_EXT);
-        let temp_path = dir.join(&temp_name);
-        // Check the final/in-progress disk files, the in-flight set AND avoid.
-        if !reserved.contains(&temp_path)
-            && !avoid.contains(&new_name.to_lowercase())
-            && !existing.contains(&new_name.to_lowercase())
-            && !existing.contains(&temp_name.to_lowercase())
+/// 条目是否存在(不跟随符号链接:悬空链接也占名,rename 会覆盖它)。
+/// 名字过长等「不可能存在」的错误视为不存在,真正的创建错误由后续写入报告。
+fn entry_exists(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename
+            ) =>
         {
-            return new_name;
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// 路径(跟随符号链接)是否为目录;不存在视为否。
+fn path_is_dir(path: &Path) -> std::io::Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_dir()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// 单个候选名是否已被占用(逐项 stat)。`overwrite_final` 为真时仅目录算最终名
+/// 冲突。**先探临时文件再探最终文件**:兄弟任务恰在两次探测之间把 temp
+/// rename 成最终名时,必有一次命中,不会漏判。
+fn candidate_taken_by_probe(
+    dir: &Path,
+    candidate: &str,
+    rules: &DedupRules<'_>,
+    overwrite_final: bool,
+) -> std::io::Result<bool> {
+    let temp_name = format!("{candidate}{TEMP_EXT}");
+    let temp_path = dir.join(&temp_name);
+    if rules
+        .reserved
+        .is_some_and(|reserved| reserved.contains(&temp_path))
+        || rules
+            .avoid
+            .is_some_and(|avoid| avoid.contains(&candidate.to_lowercase()))
+    {
+        return Ok(true);
+    }
+    if entry_exists(&temp_path)? {
+        return Ok(true);
+    }
+    let final_path = dir.join(candidate);
+    let companion = rules
+        .companion_mp4
+        .then(|| dir.join(companion_mp4_name(candidate)));
+    if overwrite_final {
+        if path_is_dir(&final_path)? {
+            return Ok(true);
+        }
+        if let Some(companion) = &companion
+            && path_is_dir(companion)?
+        {
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+    if entry_exists(&final_path)? {
+        return Ok(true);
+    }
+    match &companion {
+        Some(companion) => entry_exists(companion),
+        None => Ok(false),
+    }
+}
+
+/// 整目录扫描结果(条目名小写折叠)下判定候选名是否被占用。
+fn candidate_taken_in_scan(
+    dir: &Path,
+    candidate: &str,
+    rules: &DedupRules<'_>,
+    existing: &std::collections::HashSet<String>,
+) -> bool {
+    let folded = candidate.to_lowercase();
+    let temp_name = format!("{candidate}{TEMP_EXT}");
+    rules
+        .reserved
+        .is_some_and(|reserved| reserved.contains(&dir.join(&temp_name)))
+        || rules.avoid.is_some_and(|avoid| avoid.contains(&folded))
+        || existing.contains(&folded)
+        || existing.contains(&temp_name.to_lowercase())
+        || (rules.companion_mp4 && existing.contains(&companion_mp4_name(candidate).to_lowercase()))
+}
+
+/// 目录条目名集合(小写折叠)。目录不存在 = 空集。
+fn scan_dir_folded(dir: &Path) -> std::io::Result<std::collections::HashSet<String>> {
+    let mut existing = std::collections::HashSet::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(existing),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        existing.insert(entry?.file_name().to_string_lossy().to_lowercase());
+    }
+    Ok(existing)
+}
+
+/// `name` 加 UUID 后缀的唯一名(编号变体全被占用时的兜底,杜绝覆盖)。
+pub(crate) fn uuid_suffixed_name(name: &str) -> String {
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(name);
+    let unique = uuid::Uuid::new_v4();
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => format!("{stem} ({unique}).{ext}"),
+        None => format!("{stem} ({unique})"),
+    }
+}
+
+/// 按编号升序产出候选名的游标(`name`、`name (1)` … `name (9999)`),每次
+/// [`DedupCursor::next_free`] 返回下一个不冲突的候选。
+///
+/// 不再为每次冲突 `read_dir` 整个目录(数万文件目录下每次数十毫秒):前
+/// [`DEDUP_PROBE_LIMIT`] 个编号逐个 `symlink_metadata` 探测,由文件系统自己
+/// 裁决大小写(APFS/NTFS 等大小写不敏感文件系统上,探测天然把仅大小写不同
+/// 的条目视为同一条目;大小写敏感的文件系统上它们本就是不同文件,rename 不会
+/// 互相覆盖);之后才退化为一次折叠扫描(游标内只扫一次,供后续候选复用)。
+/// **游标不持任何锁**:「预订」类调用方在锁外推进游标、锁内 `insert`,插入冲突
+/// 就继续取下一个候选,不必从头重探。
+pub(crate) struct DedupCursor<'a> {
+    dir: &'a Path,
+    name: &'a str,
+    rules: DedupRules<'a>,
+    /// 下一个待检查的编号(0 = 原名)。
+    next: u32,
+    /// 重度冲突时一次性扫得的目录条目(小写折叠)。
+    scan: Option<std::collections::HashSet<String>>,
+}
+
+impl<'a> DedupCursor<'a> {
+    pub(crate) fn new(dir: &'a Path, name: &'a str, rules: DedupRules<'a>) -> Self {
+        Self {
+            dir,
+            name,
+            rules,
+            next: 0,
+            scan: None,
         }
     }
-    // 极端兜底:1..=9999 个编号变体全被占用时,此前返回**原名不变**,finalize
-    // rename 会静默覆盖已存在文件丢数据。与 BT 侧 `dedup_name_in_dir` 对齐,
-    // 用 UUID 后缀保证唯一。(BUG-BT-DEDUP-FALLBACK-OVERWRITE 的 HTTP 同类)
-    let uniq = uuid::Uuid::new_v4();
-    match ext {
-        Some(e) => format!("{} ({}).{}", stem, uniq, e),
-        None => format!("{} ({})", stem, uniq),
+
+    /// 下一个不冲突的候选名;`1..=9999` 耗尽返回 `None`(调用方自行 UUID 兜底)。
+    ///
+    /// 目录不存在视为空目录;其余 I/O 错误(如父路径不是目录)返回 `Err`,
+    /// 由调用方决定如何处置,绝不当作「空闲」。
+    pub(crate) fn next_free(&mut self) -> std::io::Result<Option<String>> {
+        let path = Path::new(self.name);
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(self.name);
+        let ext = path.extension().and_then(|ext| ext.to_str());
+        while self.next <= DEDUP_MAX_NUMBER {
+            let index = self.next;
+            self.next += 1;
+            let candidate = match (index, ext) {
+                (0, _) => self.name.to_string(),
+                (_, Some(ext)) => format!("{stem} ({index}).{ext}"),
+                (_, None) => format!("{stem} ({index})"),
+            };
+            let taken = if index <= DEDUP_PROBE_LIMIT {
+                // 原名按 `allow_overwrite` 放行普通文件;编号变体恒按保守语义。
+                let overwrite_final = index == 0 && self.rules.allow_overwrite;
+                candidate_taken_by_probe(self.dir, &candidate, &self.rules, overwrite_final)?
+            } else {
+                // 重度冲突:扫描一次,在内存里找空位。条目名小写折叠(非 UTF-8 经
+                // lossy 转换,只可能多让一个编号,不会漏判)。
+                if self.scan.is_none() {
+                    self.scan = Some(scan_dir_folded(self.dir)?);
+                }
+                self.scan.as_ref().is_some_and(|existing| {
+                    candidate_taken_in_scan(self.dir, &candidate, &self.rules, existing)
+                })
+            };
+            if !taken {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
     }
+}
+
+/// 同步重名去重核心(HTTP 序幕、HTTP 完成期、BT 完成期共用):返回在 `dir` 里
+/// 不与既有条目 / 在途预订 / `avoid` 冲突的最小可用名(`name`、`name (1)` …),
+/// 编号耗尽时用 UUID 后缀兜底。**不持任何锁**,探测规则见 [`DedupCursor`]。
+pub(crate) fn dedup_name_by_probe(
+    dir: &Path,
+    name: &str,
+    rules: &DedupRules<'_>,
+) -> std::io::Result<String> {
+    Ok(DedupCursor::new(dir, name, *rules)
+        .next_free()?
+        // 极端兜底:编号变体全被占用时返回原名会导致落盘覆盖,用 UUID 后缀保证唯一。
+        .unwrap_or_else(|| uuid_suffixed_name(name)))
+}
+
+/// 仅按磁盘状态复核一个已选定的候选名是否仍空闲(不看预订集合 / avoid)。
+/// 预订公开之后复核:兄弟任务在「探测 → 预订」窗口内完成并释放预订时,其最终
+/// 文件已在磁盘上,此处必然命中。`allow_overwrite` 仅对原名有意义。
+pub(crate) fn name_free_on_disk(
+    dir: &Path,
+    candidate: &str,
+    allow_overwrite: bool,
+    companion_mp4: bool,
+) -> std::io::Result<bool> {
+    let rules = DedupRules {
+        reserved: None,
+        avoid: None,
+        allow_overwrite,
+        companion_mp4,
+    };
+    candidate_taken_by_probe(dir, candidate, &rules, allow_overwrite).map(|taken| !taken)
+}
+
+/// 旧算法的参照实现(整目录 `read_dir`、条目名小写折叠、编号 1..=9999),仅供
+/// 测试断言探测式去重与旧算法结果一致。耗尽编号返回空串(测试不覆盖该分支)。
+#[cfg(test)]
+pub(crate) fn dedup_reference_scan(
+    dir: &Path,
+    name: &str,
+    reserved: &std::collections::HashSet<std::path::PathBuf>,
+    avoid: &std::collections::HashSet<String>,
+    allow_overwrite: bool,
+) -> String {
+    let existing: std::collections::HashSet<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    let reserved_or_avoided = |candidate: &str| {
+        reserved.contains(&dir.join(format!("{candidate}{TEMP_EXT}")))
+            || avoid.contains(&candidate.to_lowercase())
+    };
+    let temp_taken =
+        |candidate: &str| existing.contains(&format!("{candidate}{TEMP_EXT}").to_lowercase());
+    let original_taken = reserved_or_avoided(name)
+        || temp_taken(name)
+        || if allow_overwrite {
+            dir.join(name).is_dir()
+        } else {
+            existing.contains(&name.to_lowercase())
+        };
+    if !original_taken {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let ext = path.extension().and_then(|s| s.to_str());
+    for index in 1..=9999 {
+        let candidate = match ext {
+            Some(ext) => format!("{stem} ({index}).{ext}"),
+            None => format!("{stem} ({index})"),
+        };
+        if !reserved_or_avoided(&candidate)
+            && !temp_taken(&candidate)
+            && !existing.contains(&candidate.to_lowercase())
+        {
+            return candidate;
+        }
+    }
+    String::new()
 }
 
 /// Temporary file extension used during download (like Chrome's `.crdownload`).
@@ -4288,7 +4560,13 @@ async fn run_download_inner(
     // API 要求句柄具备写权限，对只读句柄（File::open 的默认行为）会返回
     // ERROR_ACCESS_DENIED (os error 5)，导致下载在 100% 完成后于 rename 前
     // 失败。Linux/macOS 的 fsync 允许只读 fd，故此 bug 仅在 Windows 触发。
-    {
+    //
+    // 单流路径(`single_result` 为 Some)在流结束时已由 `persist_single_progress`
+    // flush + `sync_data` 同一个写句柄,此后到 rename 之间没有任何新写入(校验和只
+    // 读),这里再 reopen + sync_all 只是重复一次整盘刷写(macOS 上是 F_FULLFSYNC,
+    // 每次数毫秒,小文件批量下载时占掉一半以上的单任务耗时),故跳过。多段路径由
+    // 多个 worker 各自写入,没有统一的「流结束」同步点,仍在此处整体 sync_all。
+    if single_result.is_none() {
         let temp_file = OpenOptions::new()
             .write(true)
             .open(&temp_path)
@@ -6856,16 +7134,19 @@ mod tests {
         tokio::fs::create_dir_all(&dir)
             .await
             .expect("test filesystem operation succeeds");
-        // Exact-case entry forces Phase 1's `try_exists()` probe to see a
-        // conflict on every platform (Linux's exists() is case-sensitive,
-        // unlike Windows/APFS where a bare `Test.txt` would already do it).
+        // 大小写由文件系统自己裁决:APFS/NTFS 等大小写不敏感文件系统上
+        // `Test (1).txt` 与 `TEST (1).txt` 是同一条目,必须视为占用;大小写敏感
+        // 文件系统上二者是不同文件,rename 不会互相覆盖,可以共存。
+        tokio::fs::write(dir.join("CaseProbe"), b"")
+            .await
+            .expect("test fixture write succeeds");
+        let case_insensitive = tokio::fs::try_exists(dir.join("caseprobe"))
+            .await
+            .expect("probe filesystem case sensitivity");
         tokio::fs::write(dir.join("TEST.txt"), b"")
             .await
             .expect("test fixture write succeeds");
-        tokio::fs::write(dir.join("Test.txt"), b"")
-            .await
-            .expect("test fixture write succeeds");
-        // Differently-cased numbered variant already occupies " (1)".
+        // Differently-cased numbered variant occupies " (1)" on case-insensitive filesystems.
         tokio::fs::write(dir.join("Test (1).txt"), b"")
             .await
             .expect("test fixture write succeeds");
@@ -6878,11 +7159,12 @@ mod tests {
             &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
-        assert_ne!(
-            result, "TEST (1).txt",
-            "case-different existing 'Test (1).txt' must be treated as occupied"
-        );
-        assert_eq!(result, "TEST (2).txt");
+        let expected = if case_insensitive {
+            "TEST (2).txt"
+        } else {
+            "TEST (1).txt"
+        };
+        assert_eq!(result, expected);
 
         if let Err(error) = tokio::fs::remove_dir_all(&dir).await
             && error.kind() != std::io::ErrorKind::NotFound
@@ -8594,6 +8876,116 @@ mod tests {
         assert_eq!(result, "Movie (1).mkv");
 
         if let Err(error) = tokio::fs::remove_dir_all(&dir).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            panic!("test filesystem cleanup failed: {error}");
+        }
+    }
+
+    fn touch(dir: &std::path::Path, name: &str) {
+        std::fs::write(dir.join(name), b"x").expect("test fixture write succeeds");
+    }
+
+    /// `dedup_filename` 与旧「整目录扫描」参照算法给出同一个名字,且等于 `expected`。
+    async fn assert_matches_reference(
+        dir: &std::path::Path,
+        reserved: &std::collections::HashSet<std::path::PathBuf>,
+        avoid: &std::collections::HashSet<String>,
+        expected: &str,
+    ) {
+        let reference = super::dedup_reference_scan(dir, "a.bin", reserved, avoid, false);
+        let actual = dedup_filename(
+            dir,
+            "a.bin",
+            reserved,
+            avoid,
+            &crate::file_exists::OverwritePolicy::Never,
+        )
+        .await;
+        assert_eq!(actual, reference, "must match the directory-scan algorithm");
+        assert_eq!(actual, expected);
+    }
+
+    /// 目录里有大量同名编号条目时,探测式去重(含超过逐项探测上限后的扫描回退)与
+    /// 旧「整目录扫描」算法逐例一致:编号取最小可用,`.fdownloading` / `reserved` /
+    /// `avoid` 都算占用,绝不返回已存在条目。
+    #[tokio::test]
+    async fn dedup_filename_matches_directory_scan_with_many_entries() {
+        let dir =
+            std::env::temp_dir().join(format!("fluxdown_test_dedup_many_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("test filesystem operation succeeds");
+        touch(&dir, "a.bin");
+        // 1..=600 全部存在,但留两个缺口:7(落在逐项探测窗口内)与 450(在扫描回退区)。
+        for index in 1..=600u32 {
+            if index != 7 && index != 450 {
+                touch(&dir, &format!("a ({index}).bin"));
+            }
+        }
+        let none_reserved = std::collections::HashSet::new();
+        let none_avoided = std::collections::HashSet::new();
+
+        // 缺口 7 最小。
+        assert_matches_reference(&dir, &none_reserved, &none_avoided, "a (7).bin").await;
+        // 7 被 `.fdownloading` 占住 → 下一个缺口 450。
+        touch(&dir, "a (7).bin.fdownloading");
+        assert_matches_reference(&dir, &none_reserved, &none_avoided, "a (450).bin").await;
+        // 450 被在途预订占住 → 601。
+        let reserved = std::collections::HashSet::from([dir.join("a (450).bin.fdownloading")]);
+        assert_matches_reference(&dir, &reserved, &none_avoided, "a (601).bin").await;
+        // 601 被 avoid(小写折叠)占住 → 602。
+        let avoid = std::collections::HashSet::from(["a (601).bin".to_string()]);
+        assert_matches_reference(&dir, &reserved, &avoid, "a (602).bin").await;
+
+        // 原名自由时原样返回,不做任何编号。
+        let fresh = dedup_filename(
+            &dir,
+            "other.bin",
+            &none_reserved,
+            &none_avoided,
+            &crate::file_exists::OverwritePolicy::Never,
+        )
+        .await;
+        assert_eq!(fresh, "other.bin");
+
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            panic!("test filesystem cleanup failed: {error}");
+        }
+    }
+
+    /// 1..=9999 全被占用时回退 UUID 后缀名,不返回任何已存在条目。
+    #[tokio::test]
+    async fn dedup_filename_falls_back_to_uuid_when_numbers_exhausted() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_test_dedup_exhausted_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("test filesystem operation succeeds");
+        touch(&dir, "a.bin");
+        for index in 1..=9999u32 {
+            touch(&dir, &format!("a ({index}).bin"));
+        }
+        let result = dedup_filename(
+            &dir,
+            "a.bin",
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &crate::file_exists::OverwritePolicy::Never,
+        )
+        .await;
+        assert!(result.starts_with("a ("), "{result}");
+        assert!(result.ends_with(").bin"), "{result}");
+        assert!(
+            !dir.join(&result).exists(),
+            "the fallback name must not collide with an existing entry"
+        );
+        let inner = &result["a (".len()..result.len() - ").bin".len()];
+        assert!(
+            inner.parse::<u32>().is_err() && uuid::Uuid::parse_str(inner).is_ok(),
+            "fallback must be a uuid suffix, got {result}"
+        );
+        if let Err(error) = std::fs::remove_dir_all(&dir)
             && error.kind() != std::io::ErrorKind::NotFound
         {
             panic!("test filesystem cleanup failed: {error}");

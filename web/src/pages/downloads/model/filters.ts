@@ -49,6 +49,24 @@ export type SidebarSelection =
 
 export const SELECTION_ALL: SidebarSelection = { kind: 'download', filter: FILTER_ALL }
 
+/** 视图是否属于侧栏当前选中项（筛选 + 分类 / 队列 / 设备）。 */
+export function selectionMatches(selection: SidebarSelection, view: DownloadTaskView, categories: CategoryIndex): boolean {
+  switch (selection.kind) {
+    case 'download':
+      return filterMatches(selection.filter, view, categories)
+    case 'queue':
+      return view.source === 'local' && view.queueId === selection.queueId
+    case 'device':
+      if (selection.deviceId === LOCAL_DEVICE) return view.source === 'local'
+      return view.source === 'remote' && view.toDevice === selection.deviceId
+  }
+}
+
+/** 选中项不筛掉任何任务（「全部」且不限分类）。 */
+export function selectsEverything(selection: SidebarSelection): boolean {
+  return selection.kind === 'download' && selection.filter.status === 'all' && selection.filter.category === null
+}
+
 export function sameSelection(a: SidebarSelection, b: SidebarSelection): boolean {
   if (a.kind !== b.kind) return false
   switch (a.kind) {

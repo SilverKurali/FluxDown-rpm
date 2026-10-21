@@ -151,34 +151,40 @@ impl DownloadView {
                             this.controller.is_stale() || this.selected_stale_keys(cx).is_empty()
                         });
                         menu.item(
-                            PopupMenuItem::new(delete_task.clone())
-                                .icon(FluxIcon::Trash2)
-                                .on_click({
-                                    let view = view.clone();
-                                    move |_, _, cx| {
-                                        let Ok(()) = view.update(cx, |this, cx| {
-                                            this.execute_toolbar(ToolbarCommand::Delete, cx);
-                                        }) else {
-                                            // 视图已释放，结束这次回调而不再更新状态。
-                                            return;
-                                        };
-                                    }
-                                }),
+                            PopupMenuItem::element({
+                                let label = delete_task.clone();
+                                move |_, _| div().text_color(destructive).child(label.clone())
+                            })
+                            .icon(Icon::new(FluxIcon::Trash2).text_color(destructive))
+                            .on_click({
+                                let view = view.clone();
+                                move |_, _, cx| {
+                                    let Ok(()) = view.update(cx, |this, cx| {
+                                        this.execute_toolbar(ToolbarCommand::Delete, cx);
+                                    }) else {
+                                        // 视图已释放，结束这次回调而不再更新状态。
+                                        return;
+                                    };
+                                }
+                            }),
                         )
                         .item(
-                            PopupMenuItem::new(delete_with_files.clone())
-                                .icon(FluxIcon::Trash2)
-                                .on_click({
-                                    let view = view.clone();
-                                    move |_, window, cx| {
-                                        let Ok(()) = view.update(cx, |this, cx| {
-                                            this.delete_selected_with_files(window, cx);
-                                        }) else {
-                                            // 视图已释放，结束这次回调而不再更新状态。
-                                            return;
-                                        };
-                                    }
-                                }),
+                            PopupMenuItem::element({
+                                let label = delete_with_files.clone();
+                                move |_, _| div().text_color(destructive).child(label.clone())
+                            })
+                            .icon(Icon::new(FluxIcon::Trash2).text_color(destructive))
+                            .on_click({
+                                let view = view.clone();
+                                move |_, window, cx| {
+                                    let Ok(()) = view.update(cx, |this, cx| {
+                                        this.delete_selected_with_files(window, cx);
+                                    }) else {
+                                        // 视图已释放，结束这次回调而不再更新状态。
+                                        return;
+                                    };
+                                }
+                            }),
                         )
                         .separator()
                         .item(

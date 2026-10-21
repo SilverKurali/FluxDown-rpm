@@ -419,9 +419,10 @@ final class NotificationService: NSObject {
 
     private func process(state: HostState, hostID: String) {
         DiagnosticsSummary.shared.reset(ifHostIsNot: hostID)
+        // 任务表分页载入中视同未就绪：空表 / 半份表不是「任务被删除 / 新出现」，丢弃基线，载入完成后静默重新播种。
         let delta = tracker.ingest(
-            hostID: hostID, isLive: state.connection == .live, tasks: state.tasks, selections: state.selections,
-            now: Int64(Date().timeIntervalSince1970)
+            hostID: hostID, isLive: state.connection == .live && !state.tasksLoading, tasks: state.tasks,
+            selections: state.selections, now: Int64(Date().timeIntervalSince1970)
         )
         guard !delta.isEmpty else { return }
 

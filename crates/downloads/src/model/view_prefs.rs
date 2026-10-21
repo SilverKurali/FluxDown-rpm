@@ -125,6 +125,15 @@ impl ViewSortKey {
         matches!(self, Self::Progress | Self::Speed)
     }
 
+    /// 该键在 [`TaskStore`](super::TaskStore) 变更记录里的位掩码（与 `RowChange::Updated::sort`
+    /// 的下标一致）。
+    pub(crate) fn change_bit(self) -> u16 {
+        Self::CYCLE
+            .iter()
+            .position(|candidate| *candidate == self)
+            .map_or(u16::MAX, |ix| 1 << ix)
+    }
+
     /// 比较器实际读取的值是否相同；所有排序都包含添加顺序与任务 key 的平局回退。
     /// NaN 不视为相同，无法证明其与其他行的比较结果不变时重新排序。
     pub(super) fn same_value(self, left: &DownloadTaskView, right: &DownloadTaskView) -> bool {
@@ -143,6 +152,11 @@ impl ViewSortKey {
             }
             Self::Status => left.state.status_rank() == right.state.status_rank(),
         }
+    }
+
+    /// 该行的排队键是否影响排序：只有智能排序的排队档按键排列。
+    pub(super) fn orders_by_queue_key(self, task: &DownloadTaskView) -> bool {
+        matches!(self, Self::Smart) && smart_tier(task) == 2
     }
 }
 
@@ -339,13 +353,9 @@ fn added_order(left: &DownloadTaskView, right: &DownloadTaskView) -> Ordering {
         .then_with(|| left.queue_order.cmp(&right.queue_order))
 }
 
-/// 引擎待启动顺序；不在队列中的（位置 0）排在所有已知位置之后。
-fn queue_slot(task: &DownloadTaskView) -> u32 {
-    if task.queue_position == 0 {
-        u32::MAX
-    } else {
-        task.queue_position
-    }
+/// 引擎待启动顺序（排序键升序）；不在队列中的排在所有已知键之后。
+fn queue_slot(task: &DownloadTaskView) -> i64 {
+    task.queue_key.unwrap_or(i64::MAX)
 }
 
 /// 智能排序：先按 [`smart_tier`]；活跃档按添加顺序正序（新任务接在末尾，不把其他行往下推），
@@ -568,8 +578,8 @@ mod tests {
             task("dl-new", 1, "30", 1),
             task("dl-old", 1, "15", 1),
             task("preparing", 5, "35", 1),
-            with("queued-2", 0, "10", |row| row.queue_position = 2),
-            with("queued-1", 0, "20", |row| row.queue_position = 1),
+            with("queued-2", 0, "10", |row| row.queue_key = Some(200)),
+            with("queued-1", 0, "20", |row| row.queue_key = Some(100)),
             task("queued-unknown", 0, "5", 1),
             with("boosted", 0, "90", |row| row.boosted = true),
         ];

@@ -234,10 +234,19 @@ async fn next(session: &HostSession) -> HostSignalDto {
         .expect("host session closed unexpectedly")
 }
 
+/// 首个任务表完整的快照：快照头（`tasks_loading`）先到，随后是载入完成的完整快照。
 async fn first_snapshot(session: &HostSession) -> HostSnapshotDto {
-    match next(session).await {
-        HostSignalDto::Snapshot { snapshot } => snapshot,
-        other => panic!("first signal must be a Snapshot, got {other:?}"),
+    loop {
+        match next(session).await {
+            HostSignalDto::Snapshot { snapshot } if snapshot.tasks_loading => {
+                assert!(
+                    snapshot.tasks.is_empty(),
+                    "a loading snapshot carries no half table"
+                );
+            }
+            HostSignalDto::Snapshot { snapshot } => return snapshot,
+            other => panic!("expected a Snapshot while bootstrapping, got {other:?}"),
+        }
     }
 }
 
@@ -415,7 +424,8 @@ async fn local_host_downloads_then_pauses_resumes_and_deletes() {
                         },
                 }) if task_id == slow_id && error_message == "deleted" => return,
                 Some(HostSignalDto::Snapshot { snapshot })
-                    if snapshot.tasks.iter().all(|task| task.task_id != slow_id) =>
+                    if !snapshot.tasks_loading
+                        && snapshot.tasks.iter().all(|task| task.task_id != slow_id) =>
                 {
                     return;
                 }

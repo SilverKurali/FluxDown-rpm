@@ -3,7 +3,7 @@
 import { Copy, Download, MoreHorizontal, Pause, Play, RotateCw, Trash2 } from 'lucide-react'
 import { useEffect, useMemo } from 'react'
 import { useT } from '../../../i18n'
-import { TASK_STATUS, downloadTaskFile, rpc, useDaemon, useTasks } from '../../../lib/rpc'
+import { TASK_STATUS, downloadTaskFile, rpc, useDaemon, useTasks, useTasksLoading } from '../../../lib/rpc'
 import type { GroupDto, TaskDto } from '../../../lib/rpc'
 import { ActionMenu, Badge, Button, Dialog, EmptyState, Icon, ProgressBar, SectionHeader, Tooltip, confirmDialog, toast } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
@@ -44,6 +44,7 @@ export function GroupDetailDialog({ groupId }: { groupId: string }) {
   const t = useT()
   const group = useDaemon((daemon) => daemon.groups.find((item) => item.groupId === groupId), undefined)
   const tasks = useTasks()
+  const loading = useTasksLoading()
   const members = useMemo(() => tasks.filter((task) => task.groupId === groupId), [tasks, groupId])
   const summary = useMemo(() => summarize(members), [members])
 
@@ -54,11 +55,17 @@ export function GroupDetailDialog({ groupId }: { groupId: string }) {
   if (!group) return null
 
   return (
-    <Dialog open onOpenChange={(open) => !open && closeGroupDetail()} size="lg" title={group.name || group.groupId} description={statusLine(t, summary)}>
+    <Dialog open onOpenChange={(open) => !open && closeGroupDetail()} size="lg" title={group.name || group.groupId} description={loading ? t('tasksLoadingTitle') : statusLine(t, summary)}>
       <div className="flex flex-col gap-3 pb-2">
         <Overview group={group} summary={summary} />
         <SectionHeader>{t('groupDetailMembersTab')}</SectionHeader>
-        {members.length === 0 ? <EmptyState icon={Download} title={t('groupDetailNoMembers')} className="py-6" /> : <MemberTable members={members} />}
+        {loading ? (
+          <EmptyState icon={Download} title={t('tasksLoadingTitle')} className="py-6" />
+        ) : members.length === 0 ? (
+          <EmptyState icon={Download} title={t('groupDetailNoMembers')} className="py-6" />
+        ) : (
+          <MemberTable members={members} />
+        )}
       </div>
     </Dialog>
   )

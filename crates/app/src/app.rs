@@ -362,15 +362,16 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
                         });
                         crate::lifecycle::keep_alive(cx, task).detach();
                     }
-                    if let Some(task_id) = message.progress_task {
-                        crate::progress_windows::user_started_on_launch(task_id, cx);
-                    }
                     if message.settings {
                         crate::windows::settings::open(cx);
                     } else if message.new_download {
                         crate::windows::new_download::open_default(cx);
                     } else if message.activate {
                         crate::windows::main::reveal(cx);
+                    }
+                    // 窗口动作之后再判定：唤起时刚打开的主窗口应先就位，进度窗口按它是否在场决定。
+                    if let Some(task_id) = message.progress_task {
+                        crate::progress_windows::user_started_on_launch(task_id, cx);
                     }
                 });
                 if acknowledgement.send(()).is_err() {
@@ -394,7 +395,9 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             after_session_settled(cx, crate::update_notices::show_installed);
         }
         crate::progress_windows::install(cx);
-        if let Some(task_id) = launch.progress_task.clone() {
+        if launch.capture_only
+            && let Some(task_id) = launch.progress_task.clone()
+        {
             // 须先于下方「无待确认即退出」登记：意图的界面保活会推迟那次退出。
             crate::progress_windows::user_started_on_launch(task_id, cx);
         }
@@ -418,6 +421,15 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         } else {
             // 等快照就绪后开主窗口，避免首帧闪连接态。
             after_session_settled(cx, crate::windows::main::reveal);
+        }
+        if !launch.capture_only
+            && let Some(task_id) = launch.progress_task.clone()
+        {
+            // 非驻留拉起会同时打开主窗口：排在上面的开窗决定之后登记（同一快照信号里后执行），
+            // 进度窗口才不会先弹出又被随后打开的主窗口盖住。
+            after_session_settled(cx, move |cx| {
+                crate::progress_windows::user_started_on_launch(task_id, cx);
+            });
         }
         // 主窗口的首帧 / 快照订阅先注册，捕获确认后开，避免主窗口覆盖待确认窗口。
         // --capture 仍不创建主窗口；其空窗退出检查在异步回调里执行。

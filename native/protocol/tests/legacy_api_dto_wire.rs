@@ -163,13 +163,43 @@ fn task_dto_serializes_camel_case_with_correct_values() {
     assert_eq!(v["queueOrder"], 7);
     assert_eq!(v["downloadedBytes"], 10);
     assert_eq!(v["totalBytes"], 100);
-    assert_eq!(v["errorMessage"], "");
     assert_eq!(v["createdAt"], "1700000000");
-    assert_eq!(v["proxyUrl"], "");
-    assert_eq!(v["queueId"], "");
-    assert_eq!(v["checksum"], "");
-    assert_eq!(v["ignoreTlsErrors"], false);
     assert_eq!(v["groupId"], "g1");
+    // 默认值字段不上线；缺省反序列化回同一个 DTO。
+    for absent in [
+        "errorMessage",
+        "proxyUrl",
+        "queueId",
+        "checksum",
+        "ignoreTlsErrors",
+        "fileMissing",
+        "completedAt",
+        "referrer",
+        "rssSourceId",
+        "originUrl",
+        "autoRoute",
+        "sourceBytes",
+        "seedingMessage",
+        "seedingTimeSecs",
+        "seedRatioLimitMilli",
+        "seedPostRatioLimitMilli",
+        "seedTimeLimitMinutes",
+        "seedInactiveTimeLimitMinutes",
+        "seedUploadLimitBps",
+    ] {
+        assert!(v.get(absent).is_none(), "{absent} must be omitted");
+    }
+    let back: TaskDto = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!(back, dto);
+    // 自定义做种上限与非空字段仍然上线。
+    let custom = TaskDto {
+        seed_ratio_limit_milli: 0,
+        error_message: "boom".to_string(),
+        ..dto
+    };
+    let v = serde_json::to_value(&custom).unwrap();
+    assert_eq!(v["seedRatioLimitMilli"], 0);
+    assert_eq!(v["errorMessage"], "boom");
     // 蛇形字段名不应残留（防止漏掉 rename_all）。
     assert!(v.get("task_id").is_none());
     assert!(v.get("file_name").is_none());

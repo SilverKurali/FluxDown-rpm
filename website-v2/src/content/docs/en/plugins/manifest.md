@@ -60,7 +60,7 @@ A plugin may declare any combination of `resolvers`, `subscriptions`, `hooks`, `
 | `interceptors` | no | object | Task interceptors (request rewrite, segment filtering, post-processing). See [`interceptors`](#interceptors). |
 | `auth` | no | object | Platform login entry. See [`auth`](#auth). |
 | `main` | no | object | Always-on script for portable views, commands and background logic. See [`main`](#main). |
-| `contributes` | no | object | Views, commands and browser sniff rules. See [`contributes`](#contributes). |
+| `contributes` | no | object | Views, commands, browser sniff rules and page scripts. See [`contributes`](#contributes). |
 | `permissions` | no | array | Capability grants; unknown values are rejected. See [`permissions`](#permissions). |
 | `settings` | no | array | Declarative settings fields. See [`settings[]`](#settings). |
 
@@ -216,7 +216,8 @@ Validation runs after `auth`, in this order: `entry` path → `stages` non-empty
                 "desktop": { "entry": "ui/dashboard.js", "networkHosts": ["api.example.com"] },
                 "portable": true }],
     "commands": [{ "id": "refresh", "title": "Refresh", "palette": true, "taskMenu": false }],
-    "sniffRules": "rules.json"
+    "sniffRules": "rules.json",
+    "pageScripts": [{ "id": "hello", "title": "Hello", "matches": ["https://*.example.com/*"], "js": ["page/hello.js"] }]
   }
 }
 ```
@@ -304,6 +305,48 @@ How the rules land in the browser extension:
 - `tier` is forced to `plugin` whatever you write. Rules that are not objects or have no string `id` are dropped.
 - Plugin rules rank below `local` and `official` rules and above `community` and `built-in` ones.
 
+### `pageScripts[]`
+
+Scripts the browser extension runs on web pages. At most 16 entries; requires the `pageScripts` permission (**Full** risk — the script can read and change the page and the user's logged-in session on every matching site). The guide is [Page scripts](/docs/en/plugins/page-scripts-guide/).
+
+```json
+{
+  "permissions": ["pageScripts"],
+  "contributes": {
+    "pageScripts": [{
+      "id": "bili-button",
+      "title": "Download button",
+      "matches": ["https://*.bilibili.com/*"],
+      "excludeMatches": ["https://www.bilibili.com/blackboard/*"],
+      "js": ["page/bili.js"],
+      "runAt": "document_idle",
+      "world": "isolated",
+      "allFrames": false
+    }]
+  }
+}
+```
+
+| Field | Required | Rules |
+|---|---|---|
+| `id` | yes | Matches `^[a-z0-9][a-z0-9_-]{0,31}$`; unique among the plugin's page scripts. |
+| `title` | yes | 1–40 characters. Shown in the consent dialog and the plugin details. |
+| `matches` | yes | 1–32 match patterns (below). |
+| `excludeMatches` | no | 0–32 match patterns, same rules; default `[]`. |
+| `js` | yes | 1–8 files; safe relative paths inside the package, extension `.js`, no duplicates. |
+| `runAt` | no | `document_start`, `document_end` or `document_idle` (default). |
+| `world` | no | `isolated` (default): runs in the extension's user-script world and gets the `fluxdown` bridge. `main`: runs in the page's own JavaScript world and has **no** bridge. |
+| `allFrames` | no | Boolean, default `false`. |
+
+A match pattern has the form `<scheme>://<host><path>`:
+
+- `scheme` is `http`, `https` or `*`.
+- `host` is a domain or `*.domain`. The domain contains only `a-z`, `0-9`, `.` and `-`, must contain a `.`, and must not start or end with `.` or `-`. An IPv4 literal is allowed (it still contains dots).
+- `path` must start with `/`.
+- Rejected: `<all_urls>`, a bare `*` host, ports and any other special form.
+
+File content rules, checked when the package is installed or loaded: each `js` file is at most 256 KiB of valid UTF-8, and one script's files joined together are at most 384 KiB. The files are joined in `js` order with `"\n;\n"` between them; the SHA-256 of the joined UTF-8 bytes identifies the version of the script.
+
 ## `permissions`
 
 Extra host capabilities a plugin opts into. Empty or omitted = the base sandbox (network via `flux.fetch`, `flux.storage`, logging, view and command contributions). Recognised values:
@@ -316,7 +359,9 @@ Extra host capabilities a plugin opts into. Empty or omitted = the base sandbox 
 | `tasks` | `flux.tasks.*` — operate on download tasks from `main`. |
 | `browserRules` | Contribute browser-extension sniff rules via `contributes.sniffRules`. |
 | `desktop` | Run desktop scripts (`contributes.views[].desktop`) with full trust in the desktop process. |
+| `pageScripts` | Run the plugin's scripts on the web pages listed in `contributes.pageScripts` (Full risk). |
 | `background` | Keep `main` running with the daemon (`main.background`). |
+| `intercept` | Declare `interceptors` to read and change a task's request, segments, quality and finished file while it runs. |
 
 Unknown values fail the whole manifest. Risk levels, consent and audit are explained in [Permissions, Consent & Audit](/docs/en/plugins/permissions/); the API behind each permission is in the [API reference](/docs/en/plugins/api-reference/).
 
@@ -328,6 +373,7 @@ Permissions that a declaration depends on:
 | `main.background: true` | `background` |
 | any `views[].desktop` | `desktop` |
 | `contributes.sniffRules` | `browserRules` |
+| `contributes.pageScripts` (non-empty) | `pageScripts` |
 
 (`tasks`, `ffmpeg` and `ytdlp` are checked when the API is called, not by the manifest.)
 
@@ -399,11 +445,11 @@ The manifest is validated when the plugin is installed and every time it is load
 
 ### Order of checks
 
-identity format → `name` non-empty → `version` format → `minAppVersion` format → `icon` path safety → at most one resolver → resolver `entry` path, non-empty `match.urls`, `timeoutMs ≠ 0` → at most one subscription → `providerId` format and not `rss`, `entry` path, `timeoutMs ≠ 0` → hooks `entry` path, non-empty valid `events`, non-empty `match.urls` if present → auth `entry` path, `auth` permission present, `timeoutMs ≠ 0` → `main` (path, `.js`, valid `events`, `background` permission) → `contributes` (view and command limits and ids, `settings` location at most once, `portable` only with `desktop`, `main` required for portable views and commands, desktop entry and size and hosts rules, `desktop` permission, `sniffRules` path / extension / `browserRules` permission) → `settings` (keys unique, per-field rules and widget × type matrix) → every `permissions` value known.
+identity format → `name` non-empty → `version` format → `minAppVersion` format → `icon` path safety → at most one resolver → resolver `entry` path, non-empty `match.urls`, `timeoutMs ≠ 0` → at most one subscription → `providerId` format and not `rss`, `entry` path, `timeoutMs ≠ 0` → hooks `entry` path, non-empty valid `events`, non-empty `match.urls` if present → auth `entry` path, `auth` permission present, `timeoutMs ≠ 0` → `main` (path, `.js`, valid `events`, `background` permission) → `contributes` (view and command limits and ids, `settings` location at most once, `portable` only with `desktop`, `main` required for portable views and commands, desktop entry and size and hosts rules, `desktop` permission, `sniffRules` path / extension / `browserRules` permission, then `pageScripts`: at most 16 → `pageScripts` permission → per script: `id` format and uniqueness, `title` length, `matches` count and patterns, `excludeMatches` count and patterns, `js` count, safe `.js` paths, no duplicates) → `settings` (keys unique, per-field rules and widget × type matrix) → every `permissions` value known.
 
 ### Files that must exist
 
-At install and load time the package must contain every declared entry script (`resolvers[0].entry`, `hooks.entry`, `auth.entry`, `subscriptions[0].entry`, `main.entry`), every `desktop.entry`, and the `sniffRules` file (which must also pass the content check above). A missing file is reported as `包内缺少文件 '<path>'` (“the package is missing file '<path>'”); an entry script that exists but cannot be read as UTF-8 text is reported as `读取入口文件 '<path>' 失败: …` (“failed to read entry file”). This applies to dev-mode plugins too: the plugin is listed as **Load failed** instead of failing later, on the first call.
+At install and load time the package must contain every declared entry script (`resolvers[0].entry`, `hooks.entry`, `auth.entry`, `subscriptions[0].entry`, `main.entry`), every `desktop.entry`, the `sniffRules` file (which must also pass the content check above) and every file listed in a page script's `js` (each at most 256 KiB of valid UTF-8, at most 384 KiB per script once joined). A missing file is reported as `包内缺少文件 '<path>'` (“the package is missing file '<path>'”); an entry script that exists but cannot be read as UTF-8 text is reported as `读取入口文件 '<path>' 失败: …` (“failed to read entry file”). This applies to dev-mode plugins too: the plugin is listed as **Load failed** instead of failing later, on the first call.
 
 ### Compile checks at install
 

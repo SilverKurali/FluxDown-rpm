@@ -22,8 +22,9 @@ pub use controller::{
 };
 pub use model::devices::{DeviceEntry, DeviceKind, DispatchTarget};
 pub use model::progress_window::{
-    COMPLETION_WINDOW_PREF, MAX_TRACKED_WINDOW_TASKS, PROGRESS_WINDOW_PREF, ProgressWindowEffect,
-    ProgressWindowPrefs, ProgressWindowTracker, UserStartIntent,
+    COMPLETION_WINDOW_PREF, MAX_TRACKED_WINDOW_TASKS, MainWindowState, PROGRESS_WINDOW_PREF,
+    ProgressWindowEffect, ProgressWindowPrefs, ProgressWindowTracker, StartOrigin, UserStartIntent,
+    WindowContext,
 };
 pub use model::shutdown::*;
 pub use pages::downloads::*;

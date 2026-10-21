@@ -568,10 +568,15 @@ CREATE INDEX IF NOT EXISTS idx_task_create_batches_created ON task_create_batche
 /// checkpoint 时同步；进程崩溃不丢已提交事务，仅整机掉电可能丢失最近
 /// 数秒的提交（数据库本身不会损坏）。下载进度/任务元数据可由续传重建，
 /// 换来批量导入与进度落库的 fsync 开销归零。
+/// cache_size=-16384（16MiB，负值单位为 KiB）：23 万任务级别的库里 UUID 主键
+/// 的 B 树随机访问，512KiB 页缓存几乎必然未命中并反复 pread；16MiB 足以容纳
+/// 常用索引的热页。内存取舍：该值是「每连接」上限且按需增长（空库不预占），
+/// 连接池上限 5 条，最坏占用 = 5 × 16MiB，对桌面/NAS/手机均可接受，
+/// 因此不按平台区分，避免出现两套行为。
 const SQLITE_PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
  PRAGMA synchronous=NORMAL;\
  PRAGMA busy_timeout=5000;\
- PRAGMA cache_size=-512;\
+ PRAGMA cache_size=-16384;\
  PRAGMA temp_store=MEMORY;\
  PRAGMA mmap_size=0;\
  PRAGMA wal_autocheckpoint=1000;";
@@ -837,37 +842,65 @@ pub struct FissionSpec {
 const TASK_ACTIVITY_MAX_ROWS: i64 = 50_000;
 const TASK_ACTIVITY_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+/// 容量清理的滞回比例分母：行数超过 `max_rows + max_rows / 10` 才触发，
+/// 触发后一次性清回 `max_rows`。避免到达上限后每条新增都付一次整表偏移扫描。
+const TASK_ACTIVITY_PRUNE_SLACK_DIVISOR: i64 = 10;
+
 async fn prune_task_activity(
     tx: &mut sqlx::Transaction<'_, Any>,
     cutoff_ms: i64,
     max_rows: i64,
 ) -> Result<(), DbError> {
-    let removed = sqlx::query(
-        "DELETE FROM task_activity WHERE timestamp_ms < $1 OR id <= COALESCE(\
-         (SELECT id FROM task_activity ORDER BY id DESC LIMIT 1 OFFSET $2), 0) RETURNING task_id, id",
+    let high_water = max_rows.saturating_add(max_rows / TASK_ACTIVITY_PRUNE_SLACK_DIVISOR);
+    // 容量阈值：0 表示不做容量清理（id 自增且 > 0，`id <= 0` 恒假）。
+    // 行数 <= id 跨度 + 1，跨度未达高水位时必然未超限，省掉偏移扫描。
+    // MAX 与 MIN 分成两个子查询：SQLite 只对单独的 min()/max() 走主键 O(log n)
+    // 优化，写在同一个 SELECT 里会退化为整表扫描（每次追加都在写锁内付一次）。
+    let (span, oldest_ms): (Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT (SELECT MAX(id) FROM task_activity) - (SELECT MIN(id) FROM task_activity), \
+         (SELECT MIN(timestamp_ms) FROM task_activity)",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    let mut capacity_threshold = 0_i64;
+    if span.is_some_and(|span| span >= high_water) {
+        let over: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM task_activity ORDER BY id DESC LIMIT 1 OFFSET $1")
+                .bind(high_water)
+                .fetch_optional(&mut **tx)
+                .await?;
+        if over.is_some() {
+            let keep_boundary: Option<i64> = sqlx::query_scalar(
+                "SELECT id FROM task_activity ORDER BY id DESC LIMIT 1 OFFSET $1",
+            )
+            .bind(max_rows)
+            .fetch_optional(&mut **tx)
+            .await?;
+            capacity_threshold = keep_boundary.unwrap_or(0);
+        }
+    }
+    // 既无过期行也未超容量：常见情形直接返回，不在写锁内跑带 OR 的聚合 / 删除扫描。
+    if capacity_threshold == 0 && oldest_ms.is_none_or(|oldest| oldest >= cutoff_ms) {
+        return Ok(());
+    }
+    // 先按 task_id 聚合记录被清理的最大 id，再删除；同一条件两处使用，保证一致。
+    sqlx::query(
+        "INSERT INTO task_activity_retention (task_id, pruned_through_id) \
+         SELECT task_id, MAX(id) FROM task_activity \
+         WHERE timestamp_ms < $1 OR id <= $2 GROUP BY task_id \
+         ON CONFLICT(task_id) DO UPDATE SET pruned_through_id = \
+         CASE WHEN excluded.pruned_through_id > task_activity_retention.pruned_through_id \
+              THEN excluded.pruned_through_id ELSE task_activity_retention.pruned_through_id END",
     )
     .bind(cutoff_ms)
-    .bind(max_rows)
-    .fetch_all(&mut **tx)
+    .bind(capacity_threshold)
+    .execute(&mut **tx)
     .await?;
-    let mut boundaries: HashMap<String, i64> = HashMap::new();
-    for row in removed {
-        let task_id: String = row.try_get("task_id")?;
-        let id: i64 = row.try_get("id")?;
-        boundaries
-            .entry(task_id)
-            .and_modify(|previous| *previous = (*previous).max(id))
-            .or_insert(id);
-    }
-    for (task_id, id) in boundaries {
-        sqlx::query(
-            "INSERT INTO task_activity_retention (task_id, pruned_through_id) VALUES ($1, $2) \
-             ON CONFLICT(task_id) DO UPDATE SET pruned_through_id = \
-             CASE WHEN excluded.pruned_through_id > task_activity_retention.pruned_through_id \
-                  THEN excluded.pruned_through_id ELSE task_activity_retention.pruned_through_id END",
-        )
-        .bind(task_id).bind(id).execute(&mut **tx).await?;
-    }
+    sqlx::query("DELETE FROM task_activity WHERE timestamp_ms < $1 OR id <= $2")
+        .bind(cutoff_ms)
+        .bind(capacity_threshold)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
@@ -994,32 +1027,65 @@ impl Db {
         &self,
         activity: &crate::task_activity::TaskActivity,
     ) -> Result<Option<crate::task_activity::TaskActivity>, DbError> {
+        Ok(self
+            .append_task_activities(std::slice::from_ref(activity))
+            .await?
+            .pop()
+            .flatten())
+    }
+
+    /// 批量持久化源端活动：一个事务内按入参顺序逐条插入（ID 随之递增）、只裁剪一次。
+    /// 返回与入参一一对应的结果：任务已删除（不产生孤儿行）的项为 `None`。
+    /// 整个批次要么全部提交要么全部回滚。
+    pub async fn append_task_activities(
+        &self,
+        activities: &[crate::task_activity::TaskActivity],
+    ) -> Result<Vec<Option<crate::task_activity::TaskActivity>>, DbError> {
+        self.append_task_activities_pruning(
+            activities,
+            crate::task_activity::timestamp_ms() - TASK_ACTIVITY_MAX_AGE_MS,
+            TASK_ACTIVITY_MAX_ROWS,
+        )
+        .await
+    }
+
+    /// [`Self::append_task_activities`] 的保留参数显式版本（测试用小容量覆盖裁剪边界）。
+    async fn append_task_activities_pruning(
+        &self,
+        activities: &[crate::task_activity::TaskActivity],
+        cutoff_ms: i64,
+        max_rows: i64,
+    ) -> Result<Vec<Option<crate::task_activity::TaskActivity>>, DbError> {
+        if activities.is_empty() {
+            return Ok(Vec::new());
+        }
         let _guard = self.activity_lock.lock().await;
         let mut tx = self.pool.begin().await?;
-        let id: Option<i64> = sqlx::query_scalar(
-            "INSERT INTO task_activity (task_id, timestamp_ms, kind, message, status) \
-             SELECT $1, $2, $3, $4, $5 WHERE EXISTS (SELECT 1 FROM tasks WHERE id = $1) RETURNING id",
-        )
-        .bind(&activity.task_id)
-        .bind(activity.timestamp_ms)
-        .bind(&activity.kind)
-        .bind(&activity.message)
-        .bind(activity.status)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if id.is_some() {
-            prune_task_activity(
-                &mut tx,
-                crate::task_activity::timestamp_ms() - TASK_ACTIVITY_MAX_AGE_MS,
-                TASK_ACTIVITY_MAX_ROWS,
+        let mut saved = Vec::with_capacity(activities.len());
+        let mut inserted_any = false;
+        for activity in activities {
+            let id: Option<i64> = sqlx::query_scalar(
+                "INSERT INTO task_activity (task_id, timestamp_ms, kind, message, status) \
+                 SELECT $1, $2, $3, $4, $5 WHERE EXISTS (SELECT 1 FROM tasks WHERE id = $1) RETURNING id",
             )
+            .bind(&activity.task_id)
+            .bind(activity.timestamp_ms)
+            .bind(&activity.kind)
+            .bind(&activity.message)
+            .bind(activity.status)
+            .fetch_optional(&mut *tx)
             .await?;
+            inserted_any |= id.is_some();
+            saved.push(id.map(|id| crate::task_activity::TaskActivity {
+                id,
+                ..activity.clone()
+            }));
+        }
+        if inserted_any {
+            prune_task_activity(&mut tx, cutoff_ms, max_rows).await?;
         }
         tx.commit().await?;
-        Ok(id.map(|id| crate::task_activity::TaskActivity {
-            id,
-            ..activity.clone()
-        }))
+        Ok(saved)
     }
 
     /// 按任务分页。最新页和 before 向前分页均先查 DESC 再升序返回；
@@ -5840,6 +5906,220 @@ mod tests {
         assert_eq!(other.entries[0].id, unrelated);
         assert!(!other.truncated);
         assert!(second > first);
+        close_test_db(&db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn activity_capacity_prune_has_hysteresis_and_aggregates_retention_per_task() {
+        let (db, dir) = open_test_db().await;
+        insert_task(&db, "a").await;
+        insert_task(&db, "b").await;
+        let now = crate::task_activity::timestamp_ms();
+        let cutoff = now - TASK_ACTIVITY_MAX_AGE_MS;
+        // 容量 20 → 高水位 22；a/b 交替写入，共 22 条正好停在高水位，不清理。
+        let first: Vec<_> = (0..22)
+            .map(|i| activity(if i % 2 == 0 { "a" } else { "b" }, "m", now))
+            .collect();
+        let saved = db
+            .append_task_activities_pruning(&first, cutoff, 20)
+            .await
+            .expect("append to high water");
+        let ids: Vec<i64> = saved
+            .iter()
+            .map(|s| s.as_ref().expect("saved").id)
+            .collect();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_activity")
+            .fetch_one(&db.pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 22, "未超过高水位不得清理");
+        let retention_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM task_activity_retention")
+                .fetch_one(&db.pool)
+                .await
+                .expect("retention count");
+        assert_eq!(retention_rows, 0);
+
+        // 预置 b 的水位高于即将清理的边界，验证 upsert 取较大值而非被覆盖。
+        let b_preset = ids[21] + 1_000;
+        sqlx::query(
+            "INSERT INTO task_activity_retention (task_id, pruned_through_id) VALUES ('b', $1)",
+        )
+        .bind(b_preset)
+        .execute(&db.pool)
+        .await
+        .expect("preset retention");
+
+        // 第 23 条越过高水位：一次清回 20 条，即删除最旧 3 条（ids[0..3]）。
+        db.append_task_activities_pruning(&[activity("a", "m", now)], cutoff, 20)
+            .await
+            .expect("cross high water");
+        let remaining: Vec<i64> = sqlx::query_scalar("SELECT id FROM task_activity ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("remaining");
+        assert_eq!(remaining.len(), 20);
+        assert_eq!(remaining[0], ids[3]);
+        // 被删：ids[0]=a, ids[1]=b, ids[2]=a → a 的边界是 ids[2]，b 的是 ids[1] 但预置更大。
+        let a_through: i64 = sqlx::query_scalar(
+            "SELECT pruned_through_id FROM task_activity_retention WHERE task_id = 'a'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("a retention");
+        assert_eq!(a_through, ids[2]);
+        let b_through: i64 = sqlx::query_scalar(
+            "SELECT pruned_through_id FROM task_activity_retention WHERE task_id = 'b'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("b retention");
+        assert_eq!(b_through, b_preset, "retention 不得回退");
+        close_test_db(&db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn activity_batch_is_one_ordered_transaction_with_one_prune_and_no_orphans() {
+        let (db, dir) = open_test_db().await;
+        insert_task(&db, "a").await;
+        insert_task(&db, "b").await;
+        let now = crate::task_activity::timestamp_ms();
+        let batch = [
+            activity("a", "a1", now),
+            activity("ghost", "orphan", now),
+            activity("b", "b1", now),
+            activity("a", "a2", now),
+            activity("a", "a3", now),
+        ];
+        // 容量 3：批内 4 条有效行，裁剪边界落在批内最早的一条（a1）上。
+        let saved = db
+            .append_task_activities_pruning(&batch, now - TASK_ACTIVITY_MAX_AGE_MS, 3)
+            .await
+            .expect("batch append");
+        assert_eq!(saved.len(), batch.len());
+        assert!(
+            saved[1].is_none(),
+            "deleted task must not get an orphan row"
+        );
+        let ids: Vec<i64> = [0, 2, 3, 4]
+            .iter()
+            .map(|&i| saved[i].as_ref().expect("task exists").id)
+            .collect();
+        assert!(
+            ids.windows(2).all(|w| w[0] < w[1]),
+            "ids follow batch order"
+        );
+        assert_eq!(saved[0].as_ref().map(|a| a.message.as_str()), Some("a1"));
+
+        let remaining: Vec<i64> = sqlx::query_scalar("SELECT id FROM task_activity ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("remaining rows");
+        assert_eq!(remaining, ids[1..].to_vec());
+        let pruned_through: i64 = sqlx::query_scalar(
+            "SELECT pruned_through_id FROM task_activity_retention WHERE task_id = 'a'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("retention row for a");
+        assert_eq!(pruned_through, ids[0]);
+        let b_retention: Option<i64> = sqlx::query_scalar(
+            "SELECT pruned_through_id FROM task_activity_retention WHERE task_id = 'b'",
+        )
+        .fetch_optional(&db.pool)
+        .await
+        .expect("retention row for b");
+        assert_eq!(b_retention, None);
+
+        assert!(
+            db.append_task_activities(&[])
+                .await
+                .expect("empty batch")
+                .is_empty()
+        );
+        close_test_db(&db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn activity_batch_rolls_back_entirely_when_the_store_fails() {
+        let (db, dir) = open_test_db().await;
+        insert_task(&db, "a").await;
+        let now = crate::task_activity::timestamp_ms();
+        sqlx::query("DROP TABLE task_activity_retention")
+            .execute(&db.pool)
+            .await
+            .expect("break retention bookkeeping");
+        // 容量 1 的裁剪必然删除行并写 retention 表 → 失败 → 批内已插入的行必须回滚。
+        let batch = [activity("a", "x", now), activity("a", "y", now)];
+        assert!(
+            db.append_task_activities_pruning(&batch, now - TASK_ACTIVITY_MAX_AGE_MS, 1)
+                .await
+                .is_err()
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_activity")
+            .fetch_one(&db.pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 0);
+        close_test_db(&db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn activity_journal_backlog_is_persisted_in_order_and_published_one_by_one() {
+        struct RecordingSink(std::sync::Mutex<Vec<crate::task_activity::TaskActivity>>);
+        impl crate::events::EventSink for RecordingSink {
+            fn emit(&self, event: crate::events::EngineEvent) {
+                if let crate::events::EngineEvent::TaskActivityAdded(activity) = event {
+                    self.0
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(activity);
+                }
+            }
+        }
+        let (db, dir) = open_test_db().await;
+        insert_task(&db, "a").await;
+        let sink = std::sync::Arc::new(RecordingSink(std::sync::Mutex::new(Vec::new())));
+        let journal = crate::task_activity::JournalSink::start(db.clone(), sink.clone());
+        // 积压远超单批上限：必须分批落库，且发布顺序 = 入队顺序。
+        let total: i32 = 700;
+        for index in 0..total {
+            crate::events::EventSink::emit(
+                journal.as_ref(),
+                crate::events::EngineEvent::SegmentSplit {
+                    task_id: "a".to_owned(),
+                    parent_index: index,
+                    parent_new_end: 0,
+                    child_index: index + 1,
+                    child_start: 0,
+                    child_end: 0,
+                    is_proactive: true,
+                    total_segments: 2,
+                },
+            );
+        }
+        journal.flush().await.expect("flush backlog");
+        let published = sink
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        assert_eq!(published.len(), total as usize);
+        assert!(published.windows(2).all(|w| w[0].id < w[1].id));
+        for (index, entry) in published.iter().enumerate() {
+            assert!(
+                entry
+                    .message
+                    .starts_with(&format!("segment {index} split ")),
+                "entry {index}: {}",
+                entry.message
+            );
+        }
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_activity")
+            .fetch_one(&db.pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, i64::from(total));
         close_test_db(&db, dir).await;
     }
 

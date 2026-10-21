@@ -28,7 +28,7 @@ import {
 } from '../model/viewPrefs'
 import type { ColumnKind, ResolvedColumn, ViewDensity } from '../model/viewPrefs'
 import { useDownloads } from '../state'
-import type { VisibleRow } from '../state'
+import type { DownloadsContextValue, VisibleRow } from '../state'
 import { useConflictTaskIds } from '../dialogs/fileConflict'
 import { FileCell, KindGlyph, ProgressCell, StatusCell } from './cells'
 import { formatEta } from './text'
@@ -37,6 +37,8 @@ import { usePluginTaskCommands } from '../../plugins/usePluginContributions'
 import { buildGroupMenu, buildTaskMenu } from './menus'
 import { SelectionHeaderBar } from '../selection'
 import { TaskEmpty } from './TaskEmpty'
+import { TaskLoading } from './TaskLoading'
+import { useRowAccessors } from './rowLayout'
 
 /** 固定左侧选择列宽（含左侧留白）。 */
 const SELECTION_COLUMN_WIDTH = 36
@@ -293,7 +295,7 @@ export function TaskTable() {
   const t = useT()
   const ctx = useDownloads()
   const conflictTaskIds = useConflictTaskIds()
-  const { rows, prefs, selected, visibleKeys, views, groupSummaries } = ctx
+  const { rows, prefs, selected, visibleCount, visibleSelected, groupSummaries } = ctx
   const scrollRef = useRef<HTMLDivElement>(null)
   // 拖拽调宽中的临时宽度（松手后写回偏好）。
   const [resizing, setResizing] = useState<{ kind: ColumnKind; width: number } | null>(null)
@@ -332,13 +334,16 @@ export function TaskTable() {
     [t],
   )
 
+  // 行数据随进度帧每帧换新，键序列与密度不变时回调保持引用稳定，虚拟化器不重算全部行位置。
+  const taskRowHeight = prefs.density === 'relaxed' ? 66 : prefs.density === 'comfortable' ? 44 : 30
+  const { getItemKey, estimateSize } = useRowAccessors(rows, GROUP_SLOT_HEIGHT, taskRowHeight)
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: (index) => (rows[index]?.type === 'group' ? GROUP_SLOT_HEIGHT : prefs.density === 'relaxed' ? 66 : prefs.density === 'comfortable' ? 44 : 30),
+    estimateSize,
     overscan: 10,
     scrollMargin: HEADER_HEIGHT,
-    getItemKey: (index) => rows[index]?.key ?? index,
+    getItemKey,
   })
 
   // 密度切换会改变所有任务行高，清掉屏外行的旧测量，避免滚动时保留旧间距。
@@ -377,8 +382,9 @@ export function TaskTable() {
     })
   }, [])
 
-  const allChecked = visibleKeys.length > 0 && visibleKeys.every((key) => selected.has(key))
-  const someChecked = !allChecked && visibleKeys.some((key) => selected.has(key))
+  const anySelected = selected.size > 0
+  const allChecked = anySelected && visibleCount > 0 && visibleSelected === visibleCount
+  const someChecked = anySelected && !allChecked && visibleSelected > 0
 
   const toggleSort = (kind: ColumnKind) => {
     const key = COLUMN_SORT_KEY[kind]
@@ -427,6 +433,7 @@ export function TaskTable() {
     })
   }
 
+  if (ctx.tasksLoading) return <TaskLoading />
   if (rows.length === 0) return <TaskEmpty />
 
   return (
@@ -453,7 +460,7 @@ export function TaskTable() {
               <Checkbox
                 checked={!ctx.multiSelect ? false : allChecked ? true : someChecked ? 'indeterminate' : false}
                 onCheckedChange={() => (ctx.multiSelect && allChecked ? ctx.clearSelection() : ctx.selectAll())}
-                aria-label={t('selectedCount', { n: visibleKeys.length })}
+                aria-label={t('selectedCount', { n: visibleCount })}
               />
             </div>
           </div>
@@ -526,11 +533,11 @@ export function TaskTable() {
                 {row.type === 'group' ? (
                   <GroupHeaderRow
                     row={row}
-                    progress={groupProgress(row.key, views)}
+                    progress={groupProgress(row.key, ctx.groupCounts)}
                     onToggle={() => ctx.toggleGroupCollapsed(row.key)}
                     entries={
                       row.key.startsWith('group:')
-                        ? buildGroupMenu(t, row.key.slice(6), groupSummaries.find((group) => group.id === row.key.slice(6)), views)
+                        ? buildGroupMenu(t, row.key.slice(6), groupSummaries.find((group) => group.id === row.key.slice(6)), ctx.groupCounts, ctx.allViews)
                         : []
                     }
                     title={row.label}
@@ -563,15 +570,8 @@ export function TaskTable() {
 }
 
 /** 任务组头的 `完成/总数`。 */
-function groupProgress(groupKey: string, views: readonly DownloadTaskView[]): string | null {
+function groupProgress(groupKey: string, groupCounts: DownloadsContextValue['groupCounts']): string | null {
   if (!groupKey.startsWith('group:') || groupKey === 'group:') return null
-  const groupId = groupKey.slice(6)
-  let completed = 0
-  let total = 0
-  for (const view of views) {
-    if (view.source !== 'local' || view.groupId !== groupId) continue
-    total += 1
-    if (view.state === 'completed') completed += 1
-  }
-  return `${completed}/${total}`
+  const counts = groupCounts(groupKey.slice(6))
+  return `${counts?.completed ?? 0}/${counts?.total ?? 0}`
 }

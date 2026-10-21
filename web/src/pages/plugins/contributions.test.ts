@@ -30,7 +30,7 @@ function plugin(over: Partial<PluginDto> & { identity: string }): PluginDto {
     resolverUrls: [],
     loadStatus: 'Loaded',
     loadError: '',
-    contributions: { views: [], commands: [], sniffRules: false },
+    contributions: { views: [], commands: [], sniffRules: false, pageScripts: [] },
     risk: 'standard',
     consentPending: [],
     consentPendingHosts: [],
@@ -51,6 +51,7 @@ const good = plugin({
       { id: 'send', title: 'Send', palette: false, taskMenu: true },
     ],
     sniffRules: false,
+    pageScripts: [],
   },
 })
 const disabled = plugin({ ...good, identity: 'b@x', enabled: false })
@@ -100,6 +101,7 @@ describe('plugin contributions', () => {
         views: [view('panel', 'activity', false), view('info', 'taskDetail', false), view('cfg', 'settings', false)],
         commands: [],
         sniffRules: false,
+        pageScripts: [],
       },
     })
     expect(deriveActivityEntries([desktopOnly])).toEqual([])

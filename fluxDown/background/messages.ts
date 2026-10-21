@@ -4,7 +4,7 @@
  * 消息分三族：`type` 族（任务面板 nmh-*、诊断）、`action` 族（C6 MessageMap）、
  * 以及兼容保留的 `appConfirmedUp`。
  *
- * Firefox：直接返回 Promise。Firefox MV2 中 "return true + 异步 sendResponse" 不可靠。
+ * Firefox：直接返回 Promise。
  * Chromium：Chrome 148 之前 onMessage 监听器不能返回 Promise，必须 "return true + sendResponse"。
  */
 import { browser } from "wxt/browser";
@@ -45,6 +45,13 @@ import type {
   SendChannel,
 } from "./protocol";
 import { getEngine, getRuleSyncStatus, syncRemotePacks } from "./rules-store";
+import {
+  approvePageScripts,
+  getPageScriptsStatus,
+  revokePageScripts,
+  viewPageScriptSource,
+} from "./page-scripts";
+import type { PageScriptsStatus } from "./page-scripts/model";
 import { compileWithDraft, engineSettled } from "./rules-store";
 import { getRuleHits } from "./rule-hits";
 import { isListed, toListItem } from "./rule-view";
@@ -92,6 +99,16 @@ const MAX_LINKS = 5000;
 function senderTabId(sender: Sender): number | undefined {
   const id = sender.tab?.id;
   return id !== undefined && id >= 0 ? id : undefined;
+}
+
+/** 消息来自本扩展自己的页面（选项页 / popup / 侧边栏），而不是网页里的内容脚本。 */
+function isExtensionPage(sender: Sender): boolean {
+  return sender.url?.startsWith(browser.runtime.getURL("/")) === true;
+}
+
+/** 非扩展页请求页面脚本管理接口时的空应答（不泄漏任何状态）。 */
+function refusedStatus(): PageScriptsStatus {
+  return { availability: "ok", blocked: null, outcome: null, lastSyncAt: null, plugins: [], attention: null, pendingCount: 0 };
 }
 
 /**
@@ -507,6 +524,27 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
       ),
       key,
     });
+  },
+
+  // 页面脚本管理：只接受扩展页（选项页 / popup），网页上下文的内容脚本消息一律拒绝。
+  async pageScriptsStatus(req, sender) {
+    if (!isExtensionPage(sender)) return refusedStatus();
+    return getPageScriptsStatus(req.refresh);
+  },
+
+  async pageScriptsApprove(req, sender) {
+    if (!isExtensionPage(sender)) return { ok: false, message: "forbidden", status: refusedStatus() };
+    return approvePageScripts(req.identity);
+  },
+
+  async pageScriptsRevoke(req, sender) {
+    if (!isExtensionPage(sender)) return { ok: false, message: "forbidden", status: refusedStatus() };
+    return revokePageScripts(req.identity);
+  },
+
+  async pageScriptsSource(req, sender) {
+    if (!isExtensionPage(sender)) return { ok: false, message: "forbidden" };
+    return viewPageScriptSource(req.identity, req.id);
   },
 };
 

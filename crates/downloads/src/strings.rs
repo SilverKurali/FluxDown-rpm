@@ -155,6 +155,9 @@ pub(crate) struct DownloadStrings {
     pub(crate) tab_failed: SharedString,
     pub(crate) empty_title: SharedString,
     pub(crate) empty_subtitle: SharedString,
+    /// 任务表分页载入期间的标题 / 说明模板（`{total}` = 服务端报告的任务总数）。
+    pub(crate) tasks_loading_title: SharedString,
+    tasks_loading_subtitle: SharedString,
 }
 
 impl DownloadStrings {
@@ -181,6 +184,8 @@ impl DownloadStrings {
             confirm: shared(translator.text("confirm")),
             empty_title: shared(translator.text("emptyTitle")),
             empty_subtitle: shared(translator.text("emptySubtitle")),
+            tasks_loading_title: shared(translator.text("tasksLoadingTitle")),
+            tasks_loading_subtitle: shared(translator.text("tasksLoadingSubtitle")),
             cancel: shared(translator.text("cancel")),
             import_progress: shared(translator.text("importProgress")),
             import_retrying: shared(translator.text("importRetrying")),
@@ -372,8 +377,12 @@ impl DownloadStrings {
 
     /// 单行状态（详情窗口状态行、进度窗口标题下）：排队中显示「排队 #n」，其余同
     /// [`Self::task_state_label`]。
-    pub(crate) fn task_status_text(&self, task: &crate::model::DownloadTaskView) -> SharedString {
-        self.queued_label(task)
+    pub(crate) fn task_status_text(
+        &self,
+        task: &crate::model::DownloadTaskView,
+        store: &crate::model::TaskStore,
+    ) -> SharedString {
+        self.queued_label(task, store)
             .map_or_else(|| self.task_state_label(task), SharedString::from)
     }
 
@@ -387,15 +396,18 @@ impl DownloadStrings {
         }
     }
 
-    /// 排队中（引擎待启动队列内、非准备中）的「排队 #n」；其余任务为 `None`。
-    pub(crate) fn queued_label(&self, task: &crate::model::DownloadTaskView) -> Option<String> {
-        (task.state == crate::model::TaskState::Pending
-            && !task.preparing
-            && task.queue_position > 0)
-            .then(|| {
-                self.subtitle_queued
-                    .replace("{pos}", &task.queue_position.to_string())
-            })
+    /// 排队中（引擎待启动队列内、非准备中）的「排队 #n」；其余任务为 `None`。序号是行排序键
+    /// 在 `store` 排队键集合中的名次，渲染时二分得到。
+    pub(crate) fn queued_label(
+        &self,
+        task: &crate::model::DownloadTaskView,
+        store: &crate::model::TaskStore,
+    ) -> Option<String> {
+        if task.state != crate::model::TaskState::Pending || task.preparing {
+            return None;
+        }
+        let rank = store.queue_rank(task);
+        (rank > 0).then(|| self.subtitle_queued.replace("{pos}", &rank.to_string()))
     }
 
     pub(crate) fn date_bucket_label(
@@ -446,6 +458,14 @@ impl DownloadStrings {
         } else {
             SharedString::from("—")
         }
+    }
+
+    /// 任务表载入态说明：`共 {total} 个任务，…`。
+    pub(crate) fn format_tasks_loading_subtitle(&self, total: usize) -> SharedString {
+        SharedString::from(
+            self.tasks_loading_subtitle
+                .replace("{total}", &group_digits(total)),
+        )
     }
 
     /// 导入进度：`正在添加 {done} / {total}`。
@@ -960,7 +980,7 @@ mod tests {
         let catalog = std::sync::Arc::new(fluxdown_ui_i18n::I18nCatalog::load_embedded()?);
         let translator = catalog.translator("en");
         let strings = DownloadStrings::from_translator(&translator);
-        let task = |status: i32, queue_position: u32| {
+        let task = |status: i32, queue_key: Option<i64>| {
             let dto = serde_json::from_value::<fluxdown_protocol::TaskDto>(serde_json::json!({
                 "taskId": "t",
                 "url": "https://www.youtube.com/watch?v=x",
@@ -977,21 +997,31 @@ mod tests {
             }))
             .expect("task");
             let mut view = crate::model::DownloadTaskView::local(&dto, None, false);
-            view.queue_position = queue_position;
+            view.queue_key = queue_key;
             view
         };
+        let store = crate::model::TaskStore::default();
+        store.replace_queue_keys(vec![30, 10, 20]);
         let preparing = translator.text("statusPreparing");
         let pending = translator.text("statusPending");
 
-        let resolving = task(5, 3);
+        let resolving = task(5, Some(30));
         assert_eq!(strings.task_state_label(&resolving).as_ref(), preparing);
-        assert_eq!(strings.task_status_text(&resolving).as_ref(), preparing);
+        assert_eq!(
+            strings.task_status_text(&resolving, &store).as_ref(),
+            preparing
+        );
         assert_eq!(strings.status_code_label(5).as_ref(), preparing);
 
-        assert_eq!(strings.task_status_text(&task(0, 0)).as_ref(), pending);
+        assert_eq!(
+            strings.task_status_text(&task(0, None), &store).as_ref(),
+            pending
+        );
         assert_eq!(strings.status_code_label(0).as_ref(), pending);
         assert_eq!(
-            strings.task_status_text(&task(0, 2)).as_ref(),
+            strings
+                .task_status_text(&task(0, Some(20)), &store)
+                .as_ref(),
             translator.text("subtitleQueued").replace("{pos}", "2")
         );
         Ok(())

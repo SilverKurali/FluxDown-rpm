@@ -506,6 +506,36 @@ impl PluginManager {
                 ))),
             };
         }
+        if file_check.is_ok()
+            && let Some(contributes) = manifest.contributes.as_ref()
+        {
+            for script in &contributes.page_scripts {
+                let mut contents: std::collections::HashMap<&str, Vec<u8>> =
+                    std::collections::HashMap::new();
+                for file in &script.js {
+                    match tokio::fs::read(dir.join(file)).await {
+                        Ok(bytes) => {
+                            contents.insert(file.as_str(), bytes);
+                        }
+                        Err(e) => {
+                            file_check = Err(PluginError::ManifestInvalid(format!(
+                                "pageScript '{}' 读取 '{file}' 失败: {e}",
+                                script.id
+                            )));
+                            break;
+                        }
+                    }
+                }
+                if file_check.is_ok() {
+                    file_check =
+                        super::manifest::concat_page_script(script, |p| contents.get(p).cloned())
+                            .map(|_| ());
+                }
+                if file_check.is_err() {
+                    break;
+                }
+            }
+        }
         if let Err(e) = file_check {
             log_info!("[plugin] 跳过 {}: {e}", manifest.identity);
             return Err(FailedPlugin {

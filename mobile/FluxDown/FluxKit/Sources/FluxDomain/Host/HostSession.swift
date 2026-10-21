@@ -153,10 +153,15 @@ public struct HostSnapshot: Sendable {
     public var info: HostInfo
     public var daemonConnected: Bool
     public var tasks: [DownloadTask]
+    /// 任务表尚未载入完成：此时 `tasks` 只是空占位（Rust 驱动在分页拉取期间先发这一帧，载入完成后再发完整快照），
+    /// 绝不能当作完整列表（计数 / 空态 / 批量范围 / 删除推断）。
+    public var tasksLoading: Bool
+    /// `tasksLoading` 期间服务端的任务总数（供进度文案）；载入完成后为 0。
+    public var taskTotal: UInt64
     public var runtime: [String: TaskRuntime]
     public var queues: [TaskQueue]
-    /// taskId → 排队序号（1 起）。
-    public var queuePositions: [String: Int32]
+    /// 排队任务的排序键，按键升序（名次 = 下标 + 1 即「排队 #n」）。
+    public var queueOrder: [QueueOrderEntry]
     public var groups: [DownloadGroup]
     public var stats: RuntimeStats
     /// 0 或 1 个优先任务。
@@ -177,9 +182,11 @@ public struct HostSnapshot: Sendable {
         info: HostInfo,
         daemonConnected: Bool = true,
         tasks: [DownloadTask] = [],
+        tasksLoading: Bool = false,
+        taskTotal: UInt64 = 0,
         runtime: [String: TaskRuntime] = [:],
         queues: [TaskQueue] = [],
-        queuePositions: [String: Int32] = [:],
+        queueOrder: [QueueOrderEntry] = [],
         groups: [DownloadGroup] = [],
         stats: RuntimeStats = RuntimeStats(),
         priorityTaskId: String? = nil,
@@ -195,9 +202,11 @@ public struct HostSnapshot: Sendable {
         self.info = info
         self.daemonConnected = daemonConnected
         self.tasks = tasks
+        self.tasksLoading = tasksLoading
+        self.taskTotal = taskTotal
         self.runtime = runtime
         self.queues = queues
-        self.queuePositions = queuePositions
+        self.queueOrder = queueOrder
         self.groups = groups
         self.stats = stats
         self.priorityTaskId = priorityTaskId
@@ -220,7 +229,10 @@ public enum HostEvent: Sendable {
     case taskProgress(TaskProgress)
     case taskRuntimeChanged(TaskRuntime)
     case queuesChanged([TaskQueue])
-    case queuePositionsChanged([String: Int32])
+    /// 队列顺序整表替换（首次 / 用户重排）：按键升序。
+    case queuePositionsChanged([QueueOrderEntry])
+    /// 队列顺序增量：先移除 `removed`，再按键插入 / 更新 `added`。
+    case queueOrderChanged(removed: [String], added: [QueueOrderEntry])
     case groupsChanged([DownloadGroup])
     case fileMissingChanged([String: Bool])
     case priorityTaskChanged(taskId: String?)

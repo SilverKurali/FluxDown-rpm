@@ -114,7 +114,7 @@ struct RecordingPort(Mutex<Vec<(String, Value)>>);
 impl PluginTaskPort for RecordingPort {
     async fn call(&self, method: &str, params: Value) -> Result<Value, PluginError> {
         self.0.lock().unwrap().push((method.to_string(), params));
-        Ok(json!({ "id": "t1" }))
+        Ok(json!({ "taskId": "t1" }))
     }
 }
 
@@ -153,10 +153,15 @@ struct Fixture {
 
 /// 安装并授权测试插件，装好任务端口。
 async fn fixture() -> Fixture {
-    fixture_with(MANIFEST, MAIN_JS, &["tasks"]).await
+    fixture_with(MANIFEST, MAIN_JS, &["tasks"], &[]).await
 }
 
-async fn fixture_with(manifest: &str, main_js: &str, permissions: &[&str]) -> Fixture {
+async fn fixture_with(
+    manifest: &str,
+    main_js: &str,
+    permissions: &[&str],
+    files: &[(&str, &str)],
+) -> Fixture {
     let work = std::env::temp_dir().join(format!("fluxdown-plugin-host-{}", uniq()));
     tokio::fs::create_dir_all(&work).await.expect("work dir");
     let src = work.join("plugin-src");
@@ -167,6 +172,13 @@ async fn fixture_with(manifest: &str, main_js: &str, permissions: &[&str]) -> Fi
     tokio::fs::write(src.join("main.js"), main_js)
         .await
         .expect("main.js");
+    for (name, content) in files {
+        let path = src.join(name);
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("file dir");
+        tokio::fs::write(path, content).await.expect("file");
+    }
 
     let sink = Arc::new(CaptureSink::default());
     let engine = make_engine(&work, sink.clone()).await;
@@ -375,7 +387,7 @@ flux.ui.view("v", { render: () => flux.ui.h("text", { text: "x" }) });
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_host_delivers_declared_events_timers_and_toasts() {
-    let fx = fixture_with(EVENTS_MANIFEST, EVENTS_JS, &[]).await;
+    let fx = fixture_with(EVENTS_MANIFEST, EVENTS_JS, &[], &[]).await;
     // 激活宿主（main 顶层注册了一个 30ms 定时器）。
     fx.pm
         .invoke(IDENTITY, "state", Value::Null)
@@ -416,4 +428,69 @@ async fn plugin_host_delivers_declared_events_timers_and_toasts() {
         .await
         .expect("state after event");
     assert_eq!(state["seen"], json!(["t1"]));
+}
+
+const PAGE_MANIFEST: &str = r#"{
+  "identity": "tester@host",
+  "name": "Page Test",
+  "version": "1.0.0",
+  "permissions": ["tasks", "pageScripts"],
+  "main": { "entry": "main.js" },
+  "contributes": {
+    "pageScripts": [
+      { "id": "p", "title": "P", "matches": ["https://*.example.com/*"], "js": ["page/p.js"] }
+    ]
+  }
+}"#;
+
+const PAGE_JS: &str = r#"
+flux.rpc.handle("grab", async (a) => {
+  const { taskId } = await flux.tasks.create({ request: { url: a.url } });
+  await flux.tasks.resume("old-1");
+  await flux.tasks.pause("old-2");
+  return taskId;
+}, { page: true });
+flux.rpc.handle("look", async () => (await flux.tasks.list()) && "seen", { page: true });
+"#;
+
+/// 页面脚本调用期间的 create / resume 归到这次调用；桌面调用开始的任务不会漏进下一次页面调用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_host_reports_tasks_started_by_page_calls_only() {
+    let fx = fixture_with(
+        PAGE_MANIFEST,
+        PAGE_JS,
+        &["tasks", "pageScripts"],
+        &[("page/p.js", "void 0;")],
+    )
+    .await;
+    let (value, started) = fx
+        .pm
+        .invoke_from_page(
+            IDENTITY,
+            "grab",
+            json!({ "url": "https://a.example.com/f.bin" }),
+            "https://a.example.com/",
+        )
+        .await
+        .expect("page grab");
+    assert_eq!(value, json!("t1"));
+    assert_eq!(started.created, vec!["t1".to_owned()]);
+    assert_eq!(started.resumed, vec!["old-1".to_owned()]);
+
+    // 桌面调用同一处理器：任务照建，但不算页面开始，也不残留到下一次页面调用。
+    fx.pm
+        .invoke(
+            IDENTITY,
+            "grab",
+            json!({ "url": "https://a.example.com/g.bin" }),
+        )
+        .await
+        .expect("desktop grab");
+    let (value, started) = fx
+        .pm
+        .invoke_from_page(IDENTITY, "look", Value::Null, "https://a.example.com/")
+        .await
+        .expect("page look");
+    assert_eq!(value, json!("seen"));
+    assert_eq!(started, fluxdown_engine::plugin::StartedTasks::default());
 }

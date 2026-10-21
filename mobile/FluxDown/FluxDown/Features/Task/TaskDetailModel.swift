@@ -83,7 +83,7 @@ nonisolated struct TaskDetailModel: Equatable {
 
     init?(state: HostState, taskId: String) {
         guard let task = state.task(taskId) else { return nil }
-        let position = Int(state.queuePositions[taskId] ?? 0)
+        let position = state.queueOrder.rank(of: taskId)
         let speed = state.speed(taskId)
         self.task = task
         visual = TaskDetailVisual(task: task, queuePosition: position)

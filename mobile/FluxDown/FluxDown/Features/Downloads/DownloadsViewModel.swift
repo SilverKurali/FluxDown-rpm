@@ -88,6 +88,8 @@ final class DownloadsModel {
     private(set) var list = DownloadsList.initial
     private(set) var facets = Facets.initial
     private(set) var chrome = DownloadsChrome()
+    /// 排队顺序：可见排队行按稳定键取名次（`QueueOrder.rank`），顺序变化不重建行模型。
+    private(set) var queueOrder = QueueOrder.empty
     private(set) var collapsed: Set<String>
     private(set) var selectionCaps = SelectionCaps()
 
@@ -169,11 +171,13 @@ final class DownloadsModel {
         )
         if result.list != list { list = result.list }
         if result.facets != facets { facets = result.facets }
+        if state.queueOrder != queueOrder { queueOrder = state.queueOrder }
 
         let nextChrome = Self.chrome(for: state)
         if nextChrome != chrome { chrome = nextChrome }
 
-        if !selection.isEmpty {
+        // 任务表分页载入中不能据空表裁剪选择（「已不存在」是删除推断，半份列表不成立）；载入完成再裁。
+        if !selection.isEmpty, !state.tasksLoading {
             let kept = selection.intersection(state.tasks.lazy.map(\.taskId))
             if kept != selection { selection = kept } else { updateCaps() }
         }

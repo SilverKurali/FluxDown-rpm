@@ -246,7 +246,12 @@ export type TaskDto = Record<string, unknown>;
 
 /** `flux.tasks` — only present when `permissions` contains `tasks` (`main` script only). */
 export interface FluxTasks {
-  list(): Promise<TaskDto[]>;
+  /**
+   * Without arguments resolves to every task, but rejects when the library holds more than 5000
+   * tasks. Pass `{ cursor, limit }` to page in ascending `taskId` order (`cursor` = the last
+   * `taskId` of the previous page; a page shorter than `limit` is the last one; `limit` ≤ 5000).
+   */
+  list(params?: { cursor?: string; limit?: number }): Promise<TaskDto[]>;
   get(id: string): Promise<TaskDto>;
   /** Rate-limited to 20 per minute. Resolves to the new (or, with URL dedup, existing) task id. */
   create(params: CreateTaskParams): Promise<{ taskId: string }>;

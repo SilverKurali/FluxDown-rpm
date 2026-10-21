@@ -707,6 +707,7 @@ mod tests {
         let (session, recorder, _link) = ready().await;
         for method in [
             "system.snapshot",
+            "system.taskPage",
             "system.shutdown",
             "rss.listSources",
             "daemon.",

@@ -18,7 +18,7 @@ pub(crate) mod view_prefs;
 
 pub(crate) use categories::CategoryIndex;
 use std::rc::Rc;
-pub(crate) use store::{RowId, TaskStore};
+pub(crate) use store::{RowChange, RowId, TaskStore};
 
 use fluxdown_protocol::TaskRuntimeDto;
 use fluxdown_ui_icon_pack::FileKind;
@@ -323,8 +323,10 @@ pub(crate) struct DownloadTaskView {
     pub(crate) preparing: bool,
     /// 队列内插入序（`TaskDto::queue_order`，每队列 MAX+1）；打破同一秒批量添加的平局。
     pub(crate) queue_order: i32,
-    /// 引擎待启动队列中的位置（1 起；0 = 不在队列中）。
-    pub(crate) queue_position: u32,
+    /// 引擎待启动队列里的排序键（`QueuePositionDto::order`；`None` = 不在队列中）。任务在队列
+    /// 期间不变，只在进出队列时变化；展示序号 = 键在有序键集合中的名次
+    /// （[`TaskStore::queue_rank`]），渲染可见行时二分得到，不存进行里。
+    pub(crate) queue_key: Option<i64>,
     pub(crate) metadata_pending: bool,
     pub(crate) url: String,
     pub(crate) origin_url: String,
@@ -462,7 +464,7 @@ impl DownloadTaskView {
             state: TaskState::from_status(status),
             preparing: status == 5,
             queue_order: 0,
-            queue_position: 0,
+            queue_key: None,
             metadata_pending,
             site: url_host(url).to_owned(),
             url: url.to_owned(),

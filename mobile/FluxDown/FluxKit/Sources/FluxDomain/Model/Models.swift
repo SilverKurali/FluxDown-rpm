@@ -19,6 +19,8 @@ public enum TaskStatus: Int32, Sendable, Hashable, CaseIterable {
 
     /// 活跃 = 下载中或准备中（与 `event.rs` 的 `matches!(status, 1 | 5)` 一致）。
     public var isActive: Bool { self == .downloading || self == .preparing }
+    /// 运行时（分段图 / 传输读数）仍有可见用途：完成任务不保留（与 `event.rs` 的 `runtime_retained` 一致）。
+    public var retainsRuntime: Bool { self != .completed }
 }
 
 /// `TaskDto.seedingStatus`（0–8）。

@@ -215,7 +215,8 @@ object DownloadNotifier {
     private fun process(container: AppContainer, context: Context, tracker: NotificationTracker, state: HostState, hostId: String) {
         val delta = tracker.ingest(
             hostId = hostId,
-            isLive = state.connection == Connection.Live,
+            // 任务表载入中视同未就绪：丢弃基线，等完整表到达再静默播种（否则历史完成项会被当作新事件）。
+            isLive = state.connection == Connection.Live && !state.tasksLoading,
             tasks = state.tasks,
             selections = state.selections,
             now = System.currentTimeMillis() / 1000,

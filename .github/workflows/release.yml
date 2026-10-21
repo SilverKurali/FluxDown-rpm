@@ -610,7 +610,7 @@ jobs:
         if: needs.changes.outputs.prerelease == 'true' || needs.changes.outputs.rehearsal != 'false'
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
-          cd fluxDown/.output/firefox-mv2
+          cd fluxDown/.output/firefox-mv3
           zip -r "../../../build/extension/FluxDown-${VERSION}-firefox-unsigned.zip" .
 
       - name: Install web-ext
@@ -620,7 +620,7 @@ jobs:
       # 演练代替 AMO 签名的本地校验：lint 出 error 即失败（AMO 提交时的同类校验会拒收）。
       - name: Lint Firefox extension (rehearsal)
         if: needs.changes.outputs.prerelease != 'true' && needs.changes.outputs.rehearsal != 'false'
-        run: web-ext lint --source-dir fluxDown/.output/firefox-mv2
+        run: web-ext lint --source-dir fluxDown/.output/firefox-mv3
 
       # ── Firefox 双版本策略（仅稳定版）：AMO 市场用 X.Y.Z（与 tag 一致），GitHub Release XPI 用 X.Y.Z.1
       #    两个版本号不同，彻底避免同版本号重复提交冲突。
@@ -633,7 +633,7 @@ jobs:
         continue-on-error: true
         run: |
           web-ext sign \
-            --source-dir fluxDown/.output/firefox-mv2 \
+            --source-dir fluxDown/.output/firefox-mv3 \
             --channel=listed \
             --api-key=${{ secrets.AMO_JWT_ISSUER }} \
             --api-secret=${{ secrets.AMO_JWT_SECRET }} \
@@ -648,11 +648,11 @@ jobs:
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
           mkdir -p build/extension
-          python3 -c "import json;f='fluxDown/.output/firefox-mv2/manifest.json';m=json.load(open(f));m['version']='$VERSION.1';open(f,'w').write(json.dumps(m,indent=2))"
+          python3 -c "import json;f='fluxDown/.output/firefox-mv3/manifest.json';m=json.load(open(f));m['version']='$VERSION.1';open(f,'w').write(json.dumps(m,indent=2))"
           echo "Manifest version set to $VERSION.1 for unlisted signing"
 
           web-ext sign \
-            --source-dir fluxDown/.output/firefox-mv2 \
+            --source-dir fluxDown/.output/firefox-mv3 \
             --channel=unlisted \
             --api-key=${{ secrets.AMO_JWT_ISSUER }} \
             --api-secret=${{ secrets.AMO_JWT_SECRET }} \

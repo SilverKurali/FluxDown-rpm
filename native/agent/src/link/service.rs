@@ -1681,6 +1681,7 @@ mod tests {
         let frame = |event: AgentEvent| EventFrame {
             epoch: "e".to_owned(),
             sequence: 1,
+            previous: None,
             event: ServiceEvent::Agent(event),
         };
         assert!(affects_link_identity(&frame(AgentEvent::SessionChanged(

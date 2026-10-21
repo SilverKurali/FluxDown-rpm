@@ -11,6 +11,7 @@ import {
   useAgentSnapshot,
   useDaemon,
   usePref,
+  useTaskTableStatus,
   useTasks,
 } from '../../lib/rpc'
 import type {
@@ -27,26 +28,32 @@ import type {
 import { CategoryIndex, categoriesFromPreference } from './model/categories'
 import { RescanThrottle } from '../../lib/rescanThrottle'
 import { currentDeviceId, visibleRemoteTasks } from './model/devices'
-import { filterMatches, LOCAL_DEVICE, SELECTION_ALL } from './model/filters'
+import { SELECTION_ALL } from './model/filters'
 import type { SidebarSelection } from './model/filters'
 import { remoteCan } from './model/batchPlan'
 import { isDownloadable } from './model/actions'
+import type { SidebarCounts } from './model/counts'
 import { useLiveSpeeds } from './model/liveSpeeds'
-import { isDynamicSortKey } from './model/rowOrder'
-import { buildLocalView, buildRemoteView, isLocalKey, sourceSite, STATE_RANK } from './model/task'
+import type { TaskRow } from './model/rowEngine'
+import { buildRemoteView, isLocalKey, sourceSite, STATE_RANK } from './model/task'
 import type { DownloadTaskView, RowKey } from './model/task'
-import { useStableRowOrder } from './model/useStableRowOrder'
+import { useRowEngine } from './model/useRowEngine'
 import { queueLabelById } from './dialogs/utils'
 import { useDaemonReady } from './statusbar/widget'
-import { compareViews, dateBucketOf, DATE_BUCKET_ORDER, matchesQuery, parseViewPrefs, VIEW_PREFS_KEY } from './model/viewPrefs'
+import { dateBucketOf, DATE_BUCKET_ORDER, parseViewPrefs, VIEW_PREFS_KEY } from './model/viewPrefs'
 import type { ViewPrefs } from './model/viewPrefs'
 
 // ── 类型 ──
 
-/** 表格可见行：任务行或分组头。 */
+/** 表格可见行：任务行（引擎持有的稳定行对象，`view` 随内容原位更新）或分组头。 */
 export type VisibleRow =
-  | { type: 'task'; key: RowKey; view: DownloadTaskView }
+  | TaskRow
   | { type: 'group'; key: string; label: string; count: number; collapsed: boolean }
+
+/** 按键读取当前视图（背后是行引擎的持久索引，不随进度帧重建）。 */
+export interface ViewLookup {
+  get: (key: RowKey) => DownloadTaskView | undefined
+}
 
 export interface GroupSummary {
   id: string
@@ -83,13 +90,29 @@ export interface ClickModifiers {
 export interface DownloadsContextValue {
   /** daemon 连接就绪（false = 只读快照）。 */
   connected: boolean
-  views: readonly DownloadTaskView[]
-  byKey: ReadonlyMap<RowKey, DownloadTaskView>
+  /**
+   * 任务表仍在分页载入（`daemon.taskTotal` / `queueTotal` 存在）：本地任务不完整，不得当作完整列表
+   * （计数、空态、批量操作范围、「任务已消失」推断都要跳过）；此时 `selectedViews` 恒为空。
+   */
+  tasksLoading: boolean
+  /** 服务端任务总数（载入期间取快照头里的 `taskTotal`）。 */
+  taskTotal: number
+  /** 已载入的任务行数。 */
+  loadedTasks: number
+  /** 全部视图（本地 + 远程）：O(N) 现取，只给菜单动作用，渲染路径不要碰。 */
+  allViews: () => readonly DownloadTaskView[]
+  byKey: ViewLookup
+  /** 侧栏计数（随任务增删改增量维护；载入期间不完整）。 */
+  counts: SidebarCounts
+  /** 任一行内容变化时递增（行对象原位更新，靠它让消费者重新读取）。 */
+  contentVersion: number
   categories: CategoryIndex
   queues: readonly QueueDto[]
   queueName: (queueId: string) => string
   groups: readonly GroupDto[]
   groupSummaries: readonly GroupSummary[]
+  /** 本地任务组的完成 / 失败 / 总数（含不在 `groups` 里的组 id）；没有成员返回 undefined。 */
+  groupCounts: (groupId: string) => { total: number; completed: number; failed: number } | undefined
   cloudDevices: readonly CloudDevice[]
   linkedDevices: readonly LinkDeviceInfo[]
 
@@ -104,8 +127,10 @@ export interface DownloadsContextValue {
 
   /** 当前筛选 + 搜索 + 分组 + 排序后的可见行。 */
   rows: readonly VisibleRow[]
-  /** 可见任务键（表格顺序，不含折叠分组内的任务）。 */
-  visibleKeys: readonly RowKey[]
+  /** 可见任务数（不含折叠分组内的任务）。 */
+  visibleCount: number
+  /** 选中集里仍可见的任务数（表头全选框三态用）。 */
+  visibleSelected: number
   selected: ReadonlySet<RowKey>
   selectedViews: readonly DownloadTaskView[]
   summary: SelectionSummary
@@ -155,6 +180,7 @@ const EMPTY_GROUPS: readonly GroupDto[] = []
 const EMPTY_CLOUD: readonly CloudDevice[] = []
 const EMPTY_LINKED: readonly LinkDeviceInfo[] = []
 const EMPTY_SELECTED: ReadonlySet<RowKey> = new Set()
+const EMPTY_VIEWS: readonly DownloadTaskView[] = []
 const PREFS_DEBOUNCE_MS = 300
 
 const selectRuntime = (daemon: { taskRuntime: Record<string, TaskRuntimeDto> }) => daemon.taskRuntime
@@ -228,16 +254,11 @@ function useViewPrefsState(): { prefs: ViewPrefs; updatePrefs: DownloadsContextV
   return { prefs, updatePrefs }
 }
 
-// ── 任务行投影（复用未变化的行对象，行组件才能 memo） ──
-
-interface CachedView {
-  task: object
-  speed: number | null
-  boosted: boolean
-  queuePosition: number
-  runtime: TaskRuntimeDto | undefined
-  connected: boolean
-  view: DownloadTaskView
+/** 可见任务键（表格顺序，不含分组头）；O(N)，只给点击 / 全选这类一次性动作用。 */
+function taskKeys(rows: readonly VisibleRow[]): RowKey[] {
+  const keys: RowKey[] = []
+  for (const row of rows) if (row.type === 'task') keys.push(row.key)
+  return keys
 }
 
 // ── Provider ──
@@ -245,6 +266,8 @@ interface CachedView {
 export function DownloadsProvider({ children }: { children: ReactNode }) {
   const t = useT()
   const tasks = useTasks()
+  const tableStatus = useTaskTableStatus()
+  const tasksLoading = tableStatus.loading
   const runtimes = useDaemon(selectRuntime, EMPTY_RUNTIME)
   const priority = useDaemon(selectPriority, EMPTY_PRIORITY as string[])
   const queuePositions = useDaemon(selectQueuePositions, EMPTY_QUEUE_POSITIONS as QueuePositionDto[])
@@ -303,137 +326,89 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
 
   const categories = useMemo(() => new CategoryIndex(categoriesFromPreference(categoriesPref)), [categoriesPref])
 
-  // 本地行：复用缓存
-  const cache = useRef(new Map<string, CachedView>())
   const boostedId = priority[0] ?? null
-  const positionById = useMemo(
-    () => new Map(queuePositions.map((entry) => [entry.taskId, entry.position])),
-    [queuePositions],
-  )
-  const localViews = useMemo(() => {
-    const previous = cache.current
-    const next = new Map<string, CachedView>()
-    const views = tasks.map((task) => {
-      const speed = live.download[task.taskId] ?? null
-      const boosted = boostedId === task.taskId
-      const queuePosition = positionById.get(task.taskId) ?? 0
-      const runtime = runtimes[task.taskId]
-      const hit = previous.get(task.taskId)
-      if (
-        hit &&
-        hit.task === task &&
-        hit.speed === speed &&
-        hit.boosted === boosted &&
-        hit.queuePosition === queuePosition &&
-        hit.runtime === runtime &&
-        hit.connected === connected
-      ) {
-        next.set(task.taskId, hit)
-        return hit.view
-      }
-      const view = buildLocalView(task, speed, boosted, queuePosition, runtime, connected)
-      next.set(task.taskId, { task, speed, boosted, queuePosition, runtime, connected, view })
-      return view
-    })
-    cache.current = next
-    return views
-  }, [tasks, live, boostedId, positionById, runtimes, connected])
-
   const currentId = useMemo(() => currentDeviceId(session, cloudDevices), [session, cloudDevices])
   const remoteViews = useMemo(
     () => visibleRemoteTasks(remoteTasks, currentId).map(buildRemoteView),
     [remoteTasks, currentId],
   )
-  const views = useMemo(() => [...localViews, ...remoteViews], [localViews, remoteViews])
-  const byKey = useMemo(() => new Map(views.map((view) => [view.key, view])), [views])
+  const normalizedQuery = useMemo(() => query.trim().toLowerCase(), [query])
+
+  // 行引擎：任务行投影 / 筛选 / 搜索 / 排序 / 行顺序稳定 / 侧栏计数 / 任务组汇总都按输入差分增量维护，
+  // 一帧进度只触及变化的行（见 model/rowEngine.ts）。
+  const { engine, snapshot } = useRowEngine({
+    tasks,
+    speeds: live.download,
+    boostedId,
+    queuePositions,
+    runtimes,
+    connected,
+    remote: remoteViews,
+    selection: sidebarSelection,
+    query: normalizedQuery,
+    categories,
+    sortKey: prefs.sort_key,
+    sortDir: prefs.sort_dir,
+  })
+  const byKey = useMemo<ViewLookup>(() => ({ get: (key) => engine.viewOf(key) }), [engine])
+  const allViews = useCallback(() => engine.views(), [engine])
+  const groupCounts = useCallback<DownloadsContextValue['groupCounts']>(
+    (groupId) => {
+      const tally = engine.groupTally(groupId)
+      return tally === undefined ? undefined : { total: tally.total, completed: tally.completed, failed: tally.failed }
+    },
+    [engine],
+  )
 
   const queueName = useCallback((queueId: string) => queueLabelById(t, queues, queueId), [t, queues])
   const groupNames = useMemo(() => new Map(groups.map((group) => [group.groupId, group.name])), [groups])
 
   const groupSummaries = useMemo<GroupSummary[]>(() => {
-    const summaries = new Map<string, GroupSummary & { downloaded: number; totalBytes: number }>()
+    const summaries = new Map<string, GroupSummary>()
     for (const group of groups) {
+      const tally = engine.groupTally(group.groupId)
+      const total = tally?.total ?? 0
+      const completed = tally?.completed ?? 0
+      const totalBytes = tally?.totalBytes ?? 0
       summaries.set(group.groupId, {
         id: group.groupId,
         name: group.name,
         originUrl: group.sourceUrl,
         saveDir: group.saveDir,
-        total: 0,
-        completed: 0,
-        failed: 0,
-        downloading: 0,
-        progress: 0,
-        downloaded: 0,
-        totalBytes: 0,
+        total,
+        completed,
+        failed: tally?.failed ?? 0,
+        downloading: tally?.downloading ?? 0,
+        progress: totalBytes > 0 ? Math.min(1, (tally?.downloaded ?? 0) / totalBytes) : total > 0 ? completed / total : 0,
       })
     }
-    for (const view of localViews) {
-      if (view.groupId === '') continue
-      const summary = summaries.get(view.groupId)
-      if (!summary) continue
-      summary.total += 1
-      if (view.state === 'completed') summary.completed += 1
-      else if (view.state === 'failed') summary.failed += 1
-      else if (view.state === 'downloading') summary.downloading += 1
-      summary.downloaded += view.downloadedBytes
-      summary.totalBytes += view.sizeBytes
-    }
-    return [...summaries.values()].map(({ downloaded, totalBytes, ...summary }) => ({
-      ...summary,
-      progress:
-        totalBytes > 0
-          ? Math.min(1, downloaded / totalBytes)
-          : summary.total > 0
-            ? summary.completed / summary.total
-            : 0,
-    }))
-  }, [groups, localViews])
+    return [...summaries.values()]
+    // 汇总随 `tallyVersion` 变化（任务组成员增删 / 状态 / 字节数变化），不随无关进度帧重算。
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 汇总读引擎里的持久索引，随 tallyVersion 失效
+  }, [groups, engine, snapshot.tallyVersion])
 
-  const normalizedQuery = useMemo(() => query.trim().toLowerCase(), [query])
-
-  // 筛选 + 搜索
-  const matching = useMemo(() => {
-    const matchesSelection = (view: DownloadTaskView): boolean => {
-      switch (sidebarSelection.kind) {
-        case 'download':
-          return filterMatches(sidebarSelection.filter, view, categories)
-        case 'queue':
-          return view.source === 'local' && view.queueId === sidebarSelection.queueId
-        case 'device': {
-          const device = sidebarSelection.deviceId
-          if (device === LOCAL_DEVICE) return view.source === 'local'
-          return view.source === 'remote' && view.toDevice === device
-        }
-      }
-    }
-    return views.filter((view) => matchesSelection(view) && matchesQuery(view, normalizedQuery))
-  }, [views, sidebarSelection, categories, normalizedQuery])
-  const matchingKeys = useMemo(() => new Set(matching.map((view) => view.key)), [matching])
-
-  // 排序 + 行顺序稳定（保持期内仅内容变化不改变已有行的相对顺序，见 model/rowOrder.ts）
-  const sorted = useMemo(() => matching.slice().sort((a, b) => compareViews(prefs, a, b)), [matching, prefs])
-  const ordered = useStableRowOrder(
-    sorted,
-    views,
-    [sidebarSelection, normalizedQuery, categories, prefs.sort_key, prefs.sort_dir],
-    isDynamicSortKey(prefs.sort_key),
-  )
-
-  // 分组
-  const { rows, visibleKeys } = useMemo(() => {
-    const taskRow = (view: DownloadTaskView): VisibleRow => ({ type: 'task', key: view.key, view })
+  // 分组：不分组时直接用引擎的行（数组只在顺序 / 成员变化时换新）；分组时按桶重排（O(N)，
+  // 只在布局或分组归属字段变化时重算，进度帧不触发）。
+  const grouped = useMemo(() => {
     if (prefs.group_by === 'none') {
-      return { rows: ordered.map(taskRow), visibleKeys: ordered.map((view) => view.key) }
+      return { rows: snapshot.rows as readonly VisibleRow[], taskCount: snapshot.rows.length }
     }
 
     interface Bucket {
       key: string
       label: string
       order: number
-      views: DownloadTaskView[]
+      rows: TaskRow[]
     }
     const buckets: Bucket[] = []
-    const bucketOf = (view: DownloadTaskView): Omit<Bucket, 'views'> => {
+    const bucketByKey = new Map<string, Bucket>()
+    const queueIndex = new Map<string, number>()
+    if (prefs.group_by === 'queue') {
+      queues.forEach((queue, index) => {
+        if (!queueIndex.has(queue.queueId)) queueIndex.set(queue.queueId, index)
+      })
+    }
+    const bucketOf = (view: DownloadTaskView): Omit<Bucket, 'rows'> => {
       switch (prefs.group_by) {
         case 'status':
           return { key: `status:${view.state}`, label: stateLabel(t, view.state), order: STATE_RANK[view.state] }
@@ -443,7 +418,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
         }
         case 'type': {
           const id = categories.categoryOf(view)
-          const index = categories.rules.findIndex((rule) => rule.dto.id === id)
+          const index = categories.indexOf(id)
           const rule = categories.rules[index]
           return {
             key: `type:${id}`,
@@ -455,7 +430,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
           if (view.source === 'remote') {
             return { key: 'queue:remote', label: t('remoteTasksGroup'), order: Number.MAX_SAFE_INTEGER }
           }
-          const index = queues.findIndex((queue) => queue.queueId === view.queueId)
+          const index = queueIndex.get(view.queueId) ?? -1
           return {
             key: `queue:${view.queueId}`,
             label: queueLabelById(t, queues, view.queueId),
@@ -477,39 +452,60 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
           return { key: '', label: '', order: 0 }
       }
     }
-    for (const view of ordered) {
-      const info = bucketOf(view)
-      const existing = buckets.find((bucket) => bucket.key === info.key)
-      if (existing) existing.views.push(view)
-      else buckets.push({ ...info, views: [view] })
+    for (const row of snapshot.rows) {
+      const info = bucketOf(row.view)
+      let bucket = bucketByKey.get(info.key)
+      if (bucket === undefined) {
+        bucket = { ...info, rows: [] }
+        bucketByKey.set(info.key, bucket)
+        buckets.push(bucket)
+      }
+      bucket.rows.push(row)
     }
     buckets.sort((a, b) => a.order - b.order || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))
     const collapsedSet = new Set(prefs.collapsed_groups)
     const out: VisibleRow[] = []
-    const keys: RowKey[] = []
+    let taskCount = 0
     for (const bucket of buckets) {
       const collapsed = collapsedSet.has(bucket.key)
-      out.push({ type: 'group', key: bucket.key, label: bucket.label, count: bucket.views.length, collapsed })
+      out.push({ type: 'group', key: bucket.key, label: bucket.label, count: bucket.rows.length, collapsed })
       if (!collapsed) {
-        for (const view of bucket.views) {
-          out.push(taskRow(view))
-          keys.push(view.key)
-        }
+        for (const row of bucket.rows) out.push(row)
+        taskCount += bucket.rows.length
       }
     }
-    return { rows: out, visibleKeys: keys }
-  }, [ordered, prefs, queues, groupNames, categories, t])
+    return { rows: out, taskCount }
+    // 行对象原位更新：内容变化不重排，只有布局 / 分组归属变化（版本号）才重算。
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `snapshot.rows` 随 layoutVersion 换身份，groupingVersion 覆盖分组归属字段
+  }, [snapshot.rows, snapshot.groupingVersion, prefs.group_by, prefs.collapsed_groups, queues, groupNames, categories, t])
+  const { rows, taskCount: visibleCount } = grouped
+
+  // 选中集里仍可见的任务数：不分组时可见集 = 命中集；分组时折叠分组内的任务不可见。
+  const visibleSelected = useMemo(() => {
+    if (selected.size === 0) return 0
+    let count = 0
+    if (prefs.group_by === 'none') {
+      for (const key of selected) if (engine.isMatched(key)) count += 1
+    } else {
+      const visible = new Set(taskKeys(rows))
+      for (const key of selected) if (visible.has(key)) count += 1
+    }
+    return count
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 命中集随 matchVersion 变化
+  }, [selected, engine, rows, snapshot.matchVersion, prefs.group_by])
 
   // 选中集只保留当前筛选 + 搜索下仍在视图内的任务（折叠分组内的仍属于当前视图）。
+  // 任务表载入期间本地任务不完整，「不在视图内」不代表任务被删：跳过，载入完成后再收敛。
   useEffect(() => {
+    if (tasksLoading) return
     setSelected((current) => {
       if (current.size === 0) return current
-      const kept = [...current].filter((key) => matchingKeys.has(key))
+      const kept = [...current].filter((key) => engine.isMatched(key))
       if (kept.length === current.size) return current
       if (anchor.current !== null && !kept.includes(anchor.current)) anchor.current = null
       return kept.length === 0 ? EMPTY_SELECTED : new Set(kept)
     })
-  }, [matchingKeys])
+  }, [engine, snapshot.matchVersion, tasksLoading])
 
   const setSidebarSelection = useCallback((selection: SidebarSelection) => {
     setSidebarSelectionState((current) => (JSON.stringify(current) === JSON.stringify(selection) ? current : selection))
@@ -528,11 +524,12 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   const clickSelect = useCallback(
     (key: RowKey, modifiers: ClickModifiers) => {
       if (modifiers.shift && anchor.current !== null) {
-        const from = visibleKeys.indexOf(anchor.current)
-        const to = visibleKeys.indexOf(key)
+        const keys = taskKeys(rows)
+        const from = keys.indexOf(anchor.current)
+        const to = keys.indexOf(key)
         if (from >= 0 && to >= 0) {
           const [start, end] = from <= to ? [from, to] : [to, from]
-          setSelected(new Set(visibleKeys.slice(start, end + 1)))
+          setSelected(new Set(keys.slice(start, end + 1)))
           anchor.current = key
           return
         }
@@ -548,7 +545,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
       setMultiSelectMode(modifiers.secondary)
       anchor.current = key
     },
-    [visibleKeys],
+    [rows],
   )
 
   const toggleSelected = useCallback((key: RowKey) => {
@@ -570,10 +567,11 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const selectAll = useCallback(() => {
-    setSelected(new Set(visibleKeys))
+    if (tasksLoading) return
+    setSelected(new Set(taskKeys(rows)))
     setMultiSelectMode(true)
     anchor.current = null
-  }, [visibleKeys])
+  }, [rows, tasksLoading])
 
   const clearSelection = useCallback(() => {
     setSelected(EMPTY_SELECTED)
@@ -611,8 +609,13 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   )
 
   const selectedViews = useMemo(
-    () => [...selected].map((key) => byKey.get(key)).filter((view): view is DownloadTaskView => view !== undefined),
-    [selected, byKey],
+    () =>
+      tasksLoading
+        ? EMPTY_VIEWS
+        : [...selected].map((key) => byKey.get(key)).filter((view): view is DownloadTaskView => view !== undefined),
+    // 行内容原位更新：靠 contentVersion 让选中视图随进度刷新。
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- contentVersion 是视图内容的失效信号
+    [selected, byKey, snapshot.contentVersion, tasksLoading],
   )
 
   const summary = useMemo<SelectionSummary>(() => {
@@ -664,13 +667,19 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   const value = useMemo<DownloadsContextValue>(
     () => ({
       connected,
-      views,
+      tasksLoading,
+      taskTotal: tableStatus.total,
+      loadedTasks: tableStatus.loaded,
+      allViews,
       byKey,
+      counts: snapshot.counts,
+      contentVersion: snapshot.contentVersion,
       categories,
       queues,
       queueName,
       groups,
       groupSummaries,
+      groupCounts,
       cloudDevices,
       linkedDevices,
       sidebarSelection,
@@ -680,7 +689,8 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
       prefs,
       updatePrefs,
       rows,
-      visibleKeys,
+      visibleCount,
+      visibleSelected,
       selected,
       selectedViews,
       summary,
@@ -702,13 +712,19 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
     }),
     [
       connected,
-      views,
+      tasksLoading,
+      tableStatus.total,
+      tableStatus.loaded,
+      allViews,
       byKey,
+      snapshot.counts,
+      snapshot.contentVersion,
       categories,
       queues,
       queueName,
       groups,
       groupSummaries,
+      groupCounts,
       cloudDevices,
       linkedDevices,
       sidebarSelection,
@@ -718,7 +734,8 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
       prefs,
       updatePrefs,
       rows,
-      visibleKeys,
+      visibleCount,
+      visibleSelected,
       selected,
       selectedViews,
       summary,

@@ -17,7 +17,7 @@ use std::{
 use chrono::{Local, TimeZone as _};
 use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, DaemonEvent, ServiceEvent, TaskDto, TaskRuntimeDto,
-    TaskSpeedHistoryDto, TaskSpeedHistoryQuery,
+    TaskSpeedHistoryDto, TaskSpeedHistoryQuery, WsServerMsg,
 };
 use fluxdown_ui_components::{
     ControlExt as _, FluxIcon, IconControlExt as _, form, form_field, form_row, segmented_tabs,
@@ -412,6 +412,11 @@ impl TaskDetailView {
     }
 
     fn refresh_from_store(&mut self, cx: &mut Context<Self>) {
+        // 任务表分页载入期间行集合只是占位：行不在不代表任务已被删除。
+        if self.store.loading().is_some() {
+            cx.notify();
+            return;
+        }
         if self
             .store
             .get(&RowKey::Local(self.task_id.clone()))
@@ -511,13 +516,33 @@ impl TaskDetailView {
                 _ => {}
             }
         }
+        let concerns_task = self.event_concerns_task(event);
         if let Some(controller) = &mut self.controller {
+            // 控制器照常应用；与本任务无关的单任务事件不再克隆 DTO / 重绘。
             let changed = controller.apply_event(event);
-            if changed {
+            if changed && concerns_task {
                 self.dto = controller.task_dto(&self.task_id).cloned();
                 self.refresh_from_store(cx);
             }
         }
+    }
+
+    /// 单任务的高频事件（任务变更 / 进度 / 运行态 / 元数据）只有涉及本任务才需要刷新；
+    /// 其余事件一律视为相关。
+    fn event_concerns_task(&self, event: &ServiceEvent) -> bool {
+        let ServiceEvent::Agent(AgentEvent::Daemon(event)) = event else {
+            return true;
+        };
+        let task_id = match event {
+            DaemonEvent::TaskChanged(task) => &task.task_id,
+            DaemonEvent::TaskRuntimeChanged(runtime) => &runtime.task_id,
+            DaemonEvent::Engine(
+                WsServerMsg::TaskProgress { task_id, .. }
+                | WsServerMsg::TaskMetaProbed { task_id, .. },
+            ) => task_id,
+            _ => return true,
+        };
+        *task_id == self.task_id
     }
 
     pub fn mark_stale(&mut self, cx: &mut Context<Self>) {
@@ -1227,7 +1252,7 @@ impl TaskDetailView {
                         self.t(cx, "infoStatus"),
                         div()
                             .text_color(task_status_color(&row, cx))
-                            .child(self.strings.task_status_text(&row)),
+                            .child(self.strings.task_status_text(&row, &self.store)),
                         cx,
                     ))
                     .when(row.size_bytes > 0, |this| {

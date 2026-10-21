@@ -172,6 +172,8 @@ export function permissionKeys(permission: string): { name: string; desc: string
       return { name: 'pluginPermBackgroundName', desc: 'pluginPermBackgroundDesc' }
     case 'intercept':
       return { name: 'pluginPermInterceptName', desc: 'pluginPermInterceptDesc' }
+    case 'pageScripts':
+      return { name: 'pluginPermPageScriptsName', desc: 'pluginPermPageScriptsDesc' }
     default:
       return null
   }
@@ -189,9 +191,9 @@ const ELEVATED_PERMISSIONS: readonly string[] = [
   'intercept',
 ]
 
-/** 风险等级：含 `desktop` → full；含任一提权权限 → elevated；否则 standard。 */
+/** 风险等级：含 `desktop` / `pageScripts` → full；含任一提权权限 → elevated；否则 standard。 */
 export function riskOf(permissions: readonly string[]): PluginRisk {
-  if (permissions.includes('desktop')) return 'full'
+  if (permissions.includes('desktop') || permissions.includes('pageScripts')) return 'full'
   if (permissions.some((permission) => ELEVATED_PERMISSIONS.includes(permission))) return 'elevated'
   return 'standard'
 }

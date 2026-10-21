@@ -158,6 +158,22 @@ impl From<&proto::QueueDto> for QueueDto {
     }
 }
 
+/// 排队任务的引擎排序键：任务留在队列期间不变，队首出队不改其余任务的键。
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct QueueOrderDto {
+    pub task_id: String,
+    pub order: i64,
+}
+
+impl From<&proto::QueueOrderEntryDto> for QueueOrderDto {
+    fn from(entry: &proto::QueueOrderEntryDto) -> Self {
+        Self {
+            task_id: entry.task_id.clone(),
+            order: entry.order,
+        }
+    }
+}
+
 /// `GroupDto`；组进度由客户端汇总成员任务。
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct GroupDto {
@@ -639,11 +655,16 @@ impl CategoryDto {
 pub struct HostSnapshotDto {
     pub info: HostInfoDto,
     pub daemon_connected: bool,
+    /// 任务表是否仍在分页载入：`true` 期间 `tasks` / `runtime` / `queue_order` 为空，
+    /// 只代表「尚未载入」，**不得**当成空列表（计数、空态、批量操作范围）。
+    pub tasks_loading: bool,
+    /// 主机上的任务总数：载入期间取主机报告的 `taskTotal`，载入完毕等于 `tasks.len()`。
+    pub task_total: u64,
     pub tasks: Vec<TaskDto>,
     pub runtime: Vec<TaskRuntimeDto>,
     pub queues: Vec<QueueDto>,
-    /// taskId → 排队序号（1 起）。
-    pub queue_positions: HashMap<String, i32>,
+    /// 排队任务的排序键，按 `order` 升序（名次 = 下标 + 1 即「排队 #n」）。
+    pub queue_order: Vec<QueueOrderDto>,
     pub groups: Vec<GroupDto>,
     pub stats: RuntimeStatsDto,
     /// 0 或 1 个优先任务。
@@ -668,17 +689,33 @@ impl HostSnapshotDto {
         sections: HashMap<String, String>,
     ) -> Self {
         let daemon = &snapshot.daemon;
+        let loading = daemon.tables_loading();
         Self {
             info: info.clone(),
             daemon_connected: snapshot.daemon_connected,
-            tasks: daemon.tasks.iter().map(TaskDto::from).collect(),
-            runtime: daemon
-                .task_runtime
-                .values()
-                .map(TaskRuntimeDto::from)
-                .collect(),
+            tasks_loading: loading,
+            task_total: u64::try_from(daemon.task_count()).unwrap_or(u64::MAX),
+            // 载入期间投影里的表是半份（或已清空）：一律不下发，等载入完成后的完整快照。
+            tasks: if loading {
+                Vec::new()
+            } else {
+                daemon.tasks.iter().map(TaskDto::from).collect()
+            },
+            runtime: if loading {
+                Vec::new()
+            } else {
+                daemon
+                    .task_runtime
+                    .values()
+                    .map(TaskRuntimeDto::from)
+                    .collect()
+            },
             queues: daemon.queues.iter().map(QueueDto::from).collect(),
-            queue_positions: positions_map(&daemon.queue_positions),
+            queue_order: if loading {
+                Vec::new()
+            } else {
+                queue_order_dtos(&daemon.queue_positions)
+            },
             groups: daemon.groups.iter().map(GroupDto::from).collect(),
             stats: (&daemon.runtime_stats).into(),
             priority_task_id: daemon.priority.first().cloned(),
@@ -706,10 +743,14 @@ impl HostSnapshotDto {
     }
 }
 
-pub(crate) fn positions_map(positions: &[proto::QueuePositionDto]) -> HashMap<String, i32> {
+/// 全量位置表 → 排序键表：协议保证按 `order` 升序，名次（`position`）不下发，由客户端按键序计算。
+pub(crate) fn queue_order_dtos(positions: &[proto::QueuePositionDto]) -> Vec<QueueOrderDto> {
     positions
         .iter()
-        .map(|entry| (entry.task_id.clone(), entry.position))
+        .map(|entry| QueueOrderDto {
+            task_id: entry.task_id.clone(),
+            order: entry.order,
+        })
         .collect()
 }
 
@@ -753,8 +794,14 @@ pub enum HostEventDto {
     QueuesChanged {
         queues: Vec<QueueDto>,
     },
+    /// 队列顺序整表替换（首次 / 用户重排）：按 `order` 升序，名次 = 下标 + 1。
     QueuePositionsChanged {
-        positions: HashMap<String, i32>,
+        order: Vec<QueueOrderDto>,
+    },
+    /// 队列顺序增量：先移除 `removed`，再按 `order` 插入 / 更新 `added`；名次由客户端按键序计算。
+    QueueOrderChanged {
+        removed: Vec<String>,
+        added: Vec<QueueOrderDto>,
     },
     GroupsChanged {
         groups: Vec<GroupDto>,

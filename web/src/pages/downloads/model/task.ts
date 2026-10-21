@@ -77,10 +77,12 @@ export interface DownloadTaskView {
   preparing: boolean
   /** 队列内插入序（每队列 MAX+1，用来打破同一秒批量添加的平局）；远程任务为 0。 */
   queueOrder: number
-  /** 引擎队列位置（1-based；0 = 未知 / 不在队列）。 */
-  queuePosition: number
+  /** 引擎队列排序键（升序即启动顺序，任务在队列期间不变）；null = 不在队列。排序用它，序号按键的名次求得。 */
+  queueKey: number | null
   /** 大小写折叠后的名称，自然序比较用（建行时预计算，比较器内不分配）。 */
   nameFold: string
+  /** 搜索用的小写「名称 / url / 站点」拼接；'' = 尚未计算（首次搜索时惰性填入，之后每次搜索只做一次 `includes`）。 */
+  searchFold: string
   /** 远程任务目标设备 id（本地任务为空）。 */
   toDevice: string
   /** 远程任务的云端状态（云端命令是否可用的门控依据）；本地任务为 null。 */
@@ -174,7 +176,7 @@ export function buildLocalView(
   task: TaskDto,
   speed: number | null,
   boosted: boolean,
-  queuePosition: number,
+  queueKey: number | null,
   runtime: TaskRuntimeDto | undefined,
   runtimeConnected: boolean,
 ): DownloadTaskView {
@@ -212,8 +214,9 @@ export function buildLocalView(
     boosted,
     preparing: task.status === 5,
     queueOrder: task.queueOrder,
-    queuePosition,
+    queueKey,
     nameFold: task.fileName.toLowerCase(),
+    searchFold: '',
     toDevice: '',
     remoteStatus: null,
     dto: task,
@@ -255,8 +258,9 @@ export function buildRemoteView(task: RemoteTaskDto): DownloadTaskView {
     boosted: false,
     preparing: false,
     queueOrder: 0,
-    queuePosition: 0,
+    queueKey: null,
     nameFold: task.fileName.toLowerCase(),
+    searchFold: '',
     toDevice: task.toDevice,
     remoteStatus: task.status,
     dto: undefined,

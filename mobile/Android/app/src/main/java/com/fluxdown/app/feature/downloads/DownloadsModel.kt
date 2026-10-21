@@ -8,6 +8,7 @@ import com.fluxdown.core.model.Task
 import com.fluxdown.core.model.TaskStatus
 import com.fluxdown.core.protocol.RemoteTaskDto
 import com.fluxdown.core.protocol.RemoteTaskStatus
+import com.fluxdown.core.store.TaskTable
 import com.fluxdown.fluxui.data.FlowSegmentUi
 import com.fluxdown.fluxui.data.FlowStripState
 
@@ -85,7 +86,8 @@ data class TaskItem(
     val task: Task,
     val speedDown: Long,
     val speedUp: Long,
-    val queuePosition: Int,
+    /** 引擎排序键（任务在队列期间不变）；null = 不在排队。名次不进模型：渲染可见行时按 `QueueOrder` 取。 */
+    val queueOrder: Long?,
     val boosted: Boolean,
     override val category: Category?,
     val queue: Queue?,
@@ -255,13 +257,17 @@ data class RemoteRowEntry(
     override val contentType: Int get() = ContentType.RowRemote
 }
 
-/** 派生出的列表：条目 + 可见任务 id（全选范围）+ 总任务数（区分「无任务」与「筛选后为空」）。 */
+/**
+ * 派生出的列表：条目 + 可见任务 id（全选范围）+ 总任务数（区分「无任务」与「筛选后为空」）。
+ * [loading] 非空 = 主机的任务表正在分页载入：[entries] 为空不代表“没有任务”，页面只能显示加载态。
+ */
 @Immutable
 data class DownloadsList(
     val entries: List<ListEntry>,
     val visibleIds: List<String>,
     val taskTotal: Int,
     val loaded: Boolean,
+    val loading: TaskTable.Loading? = null,
 ) {
     companion object {
         val Initial = DownloadsList(emptyList(), emptyList(), 0, loaded = false)

@@ -582,6 +582,17 @@ pub trait PluginTaskPort: Send + Sync {
     ) -> Result<serde_json::Value, PluginError>;
 }
 
+/// 一次页面脚本调用（[`HostCall::Invoke`] 且 `page_url` 为 `Some`）执行期间，插件经
+/// `flux.tasks.create` / `flux.tasks.resume` 成功开始的任务。宿主据此把用户在浏览器里的
+/// 操作登记为「用户开始」（进度 / 完成窗口）；其余调用来源（视图、命令、事件、定时器）恒为空。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartedTasks {
+    /// `create` 返回的新任务 ID，按调用顺序。
+    pub created: Vec<String>,
+    /// `resume` 成功的已有任务 ID，按调用顺序。
+    pub resumed: Vec<String>,
+}
+
 /// 投递给常驻宿主的一次调用。
 #[derive(Debug, Clone)]
 pub enum HostCall {
@@ -607,9 +618,12 @@ pub enum HostCall {
         id: String,
         task_ids: Vec<String>,
     },
+    /// `page_url` 为 `Some` 表示来自浏览器页面脚本（只命中 `{ page: true }` 处理器，
+    /// ctx 为 `{ caller: "page", pageUrl }`）；`None` 表示桌面视图（ctx 为 `{ caller: "desktop" }`）。
     Invoke {
         name: String,
         args: serde_json::Value,
+        page_url: Option<String>,
     },
     Event(PluginEvent),
     Timer {
@@ -626,8 +640,11 @@ pub enum HostCall {
 pub enum HostReply {
     /// 视图树（未规范化的原始 JSON）。
     Tree(serde_json::Value),
-    /// 命令 / RPC 的返回值。
-    Value(serde_json::Value),
+    /// 命令 / RPC 的返回值；`started` 只有页面脚本调用可能非空。
+    Value {
+        value: serde_json::Value,
+        started: StartedTasks,
+    },
     None,
 }
 

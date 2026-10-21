@@ -256,10 +256,11 @@ export function buildGroupMenu(
   t: Translate,
   groupId: string,
   summary: GroupSummary | undefined,
-  allViews: readonly DownloadTaskView[],
+  groupCounts: (groupId: string) => { failed: number } | undefined,
+  allViews: () => readonly DownloadTaskView[],
 ): MenuEntry[] {
   if (groupId === '') return []
-  const hasFailed = allViews.some((view) => view.source === 'local' && view.groupId === groupId && view.state === 'failed')
+  const hasFailed = (groupCounts(groupId)?.failed ?? 0) > 0
   const name = summary?.name ?? groupId
   const entries: MenuEntry[] = [
     { type: 'item', key: 'pause-all', label: t('groupPauseAll'), icon: Pause, onSelect: () => void pauseGroup(groupId) },
@@ -271,7 +272,7 @@ export function buildGroupMenu(
       key: 'retry-failed',
       label: t('groupRetryFailed'),
       icon: RotateCw,
-      onSelect: () => void retryFailedInGroup(allViews, groupId),
+      onSelect: () => void retryFailedInGroup(allViews(), groupId),
     })
   }
   if (summary && summary.originUrl !== '') {

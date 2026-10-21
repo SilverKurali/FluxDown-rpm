@@ -167,7 +167,7 @@ pub fn installed_version_yanked<'a>(
 /// 权限集合对应的风险等级（与引擎 `PluginManifest::risk` 同规则，夹具共享）。
 pub fn risk_of(permissions: &[String]) -> &'static str {
     let has = |name: &str| permissions.iter().any(|p| p == name);
-    if has("desktop") {
+    if has("desktop") || has("pageScripts") {
         "full"
     } else if [
         "ffmpeg",

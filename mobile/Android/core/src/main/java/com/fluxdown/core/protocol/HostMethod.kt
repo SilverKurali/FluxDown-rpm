@@ -11,6 +11,8 @@ object HostMethod {
     const val systemHello = "system.hello"
     const val systemPing = "system.ping"
     const val systemSnapshot = "system.snapshot"
+    /** 任务表 / 队列位置表分页（协议 v17）：`{section:"tasks"|"queue", cursor?, limit?}`。分页载入由 Rust 会话完成，Kotlin 不直接调用。 */
+    const val systemTaskPage = "system.taskPage"
     /** 让服务优雅退出：daemon 关停引擎后退出；agent 先关停 daemon 再退出（完全退出）。允许作为连接首帧（握手前）调用。 */
     const val systemShutdown = "system.shutdown"
     const val daemonTaskList = "daemon.task.list"
@@ -83,6 +85,8 @@ object HostMethod {
     const val daemonLinkProbe = "daemon.link.probe"
     const val daemonPluginList = "daemon.plugin.list"
     const val daemonPluginSniffRules = "daemon.plugin.sniffRules"
+    const val daemonPluginPageScripts = "daemon.plugin.pageScripts"
+    const val daemonPluginPageScriptSource = "daemon.plugin.pageScriptSource"
     const val daemonPluginAuth = "daemon.plugin.auth"
     const val daemonPluginSetEnabled = "daemon.plugin.setEnabled"
     const val daemonPluginUpdateSettings = "daemon.plugin.updateSettings"
@@ -107,6 +111,7 @@ object HostMethod {
     const val daemonPluginViewKeepalive = "daemon.plugin.view.keepalive"
     const val daemonPluginCommand = "daemon.plugin.command"
     const val daemonPluginInvoke = "daemon.plugin.invoke"
+    const val daemonPluginPageInvoke = "daemon.plugin.pageInvoke"
     const val daemonComponentGet = "daemon.component.get"
     const val daemonComponentListVersions = "daemon.component.listVersions"
     const val daemonComponentInstall = "daemon.component.install"

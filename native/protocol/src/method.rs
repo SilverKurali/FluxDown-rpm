@@ -3,6 +3,10 @@
 pub const SYSTEM_HELLO: &str = "system.hello";
 pub const SYSTEM_PING: &str = "system.ping";
 pub const SYSTEM_SNAPSHOT: &str = "system.snapshot";
+/// 分页拉取 `system.snapshot` / 重载事件宣告「待载入」的任务表与队列位置表
+/// （[`crate::TablePageParams`] → [`crate::TablePage`]）。与 `system.snapshot` 同权限、同服务：
+/// 页应答自带服务端当时的 `(epoch, sequence)`，客户端按 [`crate::TableSync`] 载入并回放。
+pub const SYSTEM_TASK_PAGE: &str = "system.taskPage";
 /// 让服务优雅退出：daemon 关停引擎后退出；agent 先关停 daemon 再退出（完全退出）。
 ///
 /// 允许作为连接首帧（握手前）调用：协议版本不兼容的新旧进程替换只能靠它完成。
@@ -88,6 +92,10 @@ pub const DAEMON_LINK_PROBE: &str = "daemon.link.probe";
 
 pub const DAEMON_PLUGIN_LIST: &str = "daemon.plugin.list";
 pub const DAEMON_PLUGIN_SNIFF_RULES: &str = "daemon.plugin.sniffRules";
+/// 插件页面脚本索引（`PluginPageScriptsDto`）：浏览器扩展据此注册 / 更新 / 注销用户脚本。
+pub const DAEMON_PLUGIN_PAGE_SCRIPTS: &str = "daemon.plugin.pageScripts";
+/// 读取单个页面脚本源码（`PluginPageScriptSourceParams` → `PluginPageScriptSourceDto`）。
+pub const DAEMON_PLUGIN_PAGE_SCRIPT_SOURCE: &str = "daemon.plugin.pageScriptSource";
 pub const DAEMON_PLUGIN_AUTH: &str = "daemon.plugin.auth";
 pub const DAEMON_PLUGIN_SET_ENABLED: &str = "daemon.plugin.setEnabled";
 pub const DAEMON_PLUGIN_UPDATE_SETTINGS: &str = "daemon.plugin.updateSettings";
@@ -125,6 +133,9 @@ pub const DAEMON_PLUGIN_VIEW_KEEPALIVE: &str = "daemon.plugin.view.keepalive";
 pub const DAEMON_PLUGIN_COMMAND: &str = "daemon.plugin.command";
 /// 调用插件 `flux.rpc.handle` 注册的处理器（`{identity, name, args}`）。慢方法。
 pub const DAEMON_PLUGIN_INVOKE: &str = "daemon.plugin.invoke";
+/// 页面脚本调用插件处理器（`PluginPageInvokeParams` → `PluginPageInvokeResultDto`）：只命中以
+/// `{ page: true }` 注册的处理器，且插件须已授权 `pageScripts`。慢方法。
+pub const DAEMON_PLUGIN_PAGE_INVOKE: &str = "daemon.plugin.pageInvoke";
 pub const DAEMON_COMPONENT_GET: &str = "daemon.component.get";
 pub const DAEMON_COMPONENT_LIST_VERSIONS: &str = "daemon.component.listVersions";
 pub const DAEMON_COMPONENT_INSTALL: &str = "daemon.component.install";
@@ -335,6 +346,7 @@ pub const ALL_METHODS: &[&str] = &[
     SYSTEM_HELLO,
     SYSTEM_PING,
     SYSTEM_SNAPSHOT,
+    SYSTEM_TASK_PAGE,
     SYSTEM_SHUTDOWN,
     DAEMON_TASK_LIST,
     DAEMON_TASK_GET,
@@ -397,6 +409,8 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_LINK_PROBE,
     DAEMON_PLUGIN_LIST,
     DAEMON_PLUGIN_SNIFF_RULES,
+    DAEMON_PLUGIN_PAGE_SCRIPTS,
+    DAEMON_PLUGIN_PAGE_SCRIPT_SOURCE,
     DAEMON_PLUGIN_AUTH,
     DAEMON_PLUGIN_SET_ENABLED,
     DAEMON_PLUGIN_UPDATE_SETTINGS,
@@ -420,6 +434,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_PLUGIN_VIEW_KEEPALIVE,
     DAEMON_PLUGIN_COMMAND,
     DAEMON_PLUGIN_INVOKE,
+    DAEMON_PLUGIN_PAGE_INVOKE,
     DAEMON_COMPONENT_GET,
     DAEMON_COMPONENT_LIST_VERSIONS,
     DAEMON_COMPONENT_INSTALL,
@@ -559,6 +574,7 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_PLUGIN_VIEW_OPEN,
     DAEMON_PLUGIN_COMMAND,
     DAEMON_PLUGIN_INVOKE,
+    DAEMON_PLUGIN_PAGE_INVOKE,
     DAEMON_GROUP_RESOLVE_PREVIEW,
     DAEMON_RSS_VALIDATE,
     DAEMON_LINK_PROBE,

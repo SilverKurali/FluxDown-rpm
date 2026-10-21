@@ -3,7 +3,7 @@ title: 调试与排错
 description: 插件日志在哪、怎么搜；每种改动之后该做什么；以及你会遇到的报错信息、原因与解决办法对照表。
 section: plugins
 order: 9
-sourceHash: "09147b657889"
+sourceHash: "fc58e8245fc0"
 ---
 
 这一页写给「出问题了」的时刻：去哪里看、插件的各种状态是什么意思、某个改动需要什么操作，以及最有用的——**报错信息**与它们的原因。
@@ -136,10 +136,12 @@ resolver、拦截器、订阅 provider 或 `main` 调用中，**连续** 3 次�
 | `resolver timeoutMs 不可为 0` | `timeoutMs` 为 `0`（`auth` 与 `subscription` 同样会检查）。 | 用正整数，实际生效最多 30000。 |
 | `hooks.events 不可为空` | `hooks` 没有事件。 | 至少列出一个事件。 |
 | `未知事件 '…'，合法：[…]` | 不是 `onStart`、`onError`、`onDone`、`onMetaProbed`、`onCancel` 之一。 | 改正名称（`main.events` 同样适用，其信息为 `main.events 未知事件 '…'，合法：[…]`）。 |
-| `未知权限 '…'，合法：[…]` | 权限名不存在。 | 使用 `ffmpeg`、`ytdlp`、`auth`、`tasks`、`browserRules`、`desktop`、`background`、`intercept` 之一。 |
+| `未知权限 '…'，合法：[…]` | 权限名不存在。 | 使用 `ffmpeg`、`ytdlp`、`auth`、`tasks`、`browserRules`、`desktop`、`background`、`intercept`、`pageScripts` 之一。 |
 | `声明 auth.entry 时 permissions 必须包含 auth` | 声明了 `auth` 却没有 `auth` 权限。 | 把 `"auth"` 加进 `permissions`。 |
 | `声明 sniffRules 时 permissions 必须包含 browserRules` | 有嗅探规则却没有对应权限。 | 加上 `"browserRules"`。 |
 | `main.background 为 true 时 permissions 必须包含 background` | `main.background` 为 `true` 却没有 `background` 权限。 | 加上 `"background"`。 |
+| `声明 pageScripts 时 permissions 必须包含 pageScripts` | 有 `contributes.pageScripts` 却没有对应权限。 | 把 `"pageScripts"` 加进 `permissions`。 |
+| `pageScript '<id>' …`（id、title、matches、js 相关错误） | 某条页面脚本违反了 [Manifest 参考](/docs/zh/plugins/manifest/#pagescripts)中的规则。 | 修正消息里指出的字段。 |
 | `view '<id>' 有可移植实现，必须声明 main` | 没有 `desktop`（或带 `portable: true`）的视图需要 `main` 脚本。 | 声明 `main`。 |
 | `声明 commands 时必须声明 main` | 命令需要 `main`。 | 声明 `main`。 |
 | `view id '…' 非法：…` / `command id '…' 非法：须匹配 ^[a-z][a-z0-9-]{0,31}$` | id 不是以小写字母开头、由 `a-z0-9-` 组成、至多 32 个字符。 | 改名。 |

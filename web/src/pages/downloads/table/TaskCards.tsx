@@ -20,6 +20,8 @@ import { usePluginTaskCommands } from '../../plugins/usePluginContributions'
 import { buildGroupMenu, buildTaskMenu } from './menus'
 import { SegmentProgress } from './SegmentProgress'
 import { TaskEmpty } from './TaskEmpty'
+import { TaskLoading } from './TaskLoading'
+import { useRowAccessors } from './rowLayout'
 
 interface CardProps {
   t: Translate
@@ -113,14 +115,16 @@ export function TaskCards() {
   const ctx = useDownloads()
   const conflictTaskIds = useConflictTaskIds()
   const pluginCommands = usePluginTaskCommands()
-  const { rows, selected, selectedViews, queues, views, groupSummaries } = ctx
+  const { rows, selected, selectedViews, queues, groupSummaries } = ctx
   const scrollRef = useRef<HTMLDivElement>(null)
+  // 行数据随进度帧每帧换新，键序列不变时回调保持引用稳定，虚拟化器不重算全部行位置。
+  const { getItemKey, estimateSize } = useRowAccessors(rows, 36, 84)
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: (index) => (rows[index]?.type === 'group' ? 36 : 84),
+    estimateSize,
     overscan: 8,
-    getItemKey: (index) => rows[index]?.key ?? index,
+    getItemKey,
   })
 
   const onTap = useCallback(
@@ -143,6 +147,7 @@ export function TaskCards() {
     [t, selected, selectedViews, queues, ctx.queueName, ctx.showDetail, pluginCommands],
   )
 
+  if (ctx.tasksLoading) return <TaskLoading />
   if (rows.length === 0) return <TaskEmpty />
 
   return (
@@ -160,7 +165,7 @@ export function TaskCards() {
           if (!row) return null
           const menu =
             row.type === 'group' && row.key.startsWith('group:')
-              ? buildGroupMenu(t, row.key.slice(6), groupSummaries.find((group) => group.id === row.key.slice(6)), views)
+              ? buildGroupMenu(t, row.key.slice(6), groupSummaries.find((group) => group.id === row.key.slice(6)), ctx.groupCounts, ctx.allViews)
               : []
           return (
             <div
