@@ -2,8 +2,13 @@
 
 mod local;
 mod restart;
+mod session_auth;
 
 pub use local::{LocalConnection, LocalEventError};
+pub(crate) use session_auth::RpcCredential;
+use session_auth::{
+    CLOSE_CODE_CREDENTIAL_REVOKED, CLOSE_REASON_CREDENTIAL_REVOKED, SessionContext, wait_changed,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -79,6 +84,8 @@ pub struct GatewayService {
     /// 嵌入宿主：`exportLogs` 的目标路径由同进程 App 给出（应用沙盒内），server 模式下仍放行。
     local_log_export: bool,
     link: Option<Arc<LinkService>>,
+    /// 访问密钥被改时递增：以旧密钥认证的 `/rpc` 会话据此重新校验，失效即断开。
+    access_key_epoch: tokio::sync::watch::Sender<u64>,
     gateway_patch_lock: tokio::sync::Mutex<()>,
     listener_control: restart::GatewayControl,
 }
@@ -144,6 +151,7 @@ impl GatewayService {
             server_mode: false,
             local_log_export: false,
             link: None,
+            access_key_epoch: tokio::sync::watch::Sender::new(0),
             gateway_patch_lock: tokio::sync::Mutex::new(()),
             listener_control: restart::GatewayControl::new(),
         }
@@ -175,10 +183,10 @@ impl GatewayService {
         self
     }
 
-    /// 构造 RPC 响应，并把「本机来源」判定透传给 [`Self::dispatch_with`]。
-    async fn call_with(&self, allow_local_platform: bool, request: RpcRequest) -> RpcResponse {
+    /// 构造 RPC 响应，并把连接级上下文（「本机来源」判定、会话凭据）透传给 [`Self::dispatch_with`]。
+    async fn call_with(&self, session: &SessionContext, request: RpcRequest) -> RpcResponse {
         let id = request.id.clone();
-        match self.dispatch_with(request, allow_local_platform).await {
+        match self.dispatch_with(request, session).await {
             Ok(value) => RpcResponse::success(id, value),
             Err(data) => {
                 RpcResponse::failure(id, RpcErrorObject::application("agent RPC failed", data))
@@ -200,30 +208,39 @@ impl GatewayService {
         .await
     }
 
+    /// agent 内部调用方（托盘、剪贴板监听、NMH）的入口：桌面宿主里它们就是本机，可用桌面集成；
+    /// server 模式沿用「默认不放行」。
     async fn dispatch(&self, request: RpcRequest) -> Result<serde_json::Value, RpcErrorData> {
-        self.dispatch_with(request, false).await
+        self.dispatch_with(request, &SessionContext::local(!self.server_mode))
+            .await
     }
 
-    /// 与 [`Self::dispatch`] 相同，但可放行连接级的「本机来源」桌面集成调用。
+    /// 与 [`Self::dispatch`] 相同，但带连接级上下文。
     ///
-    /// `allow_local_platform` 是建连时对整条连接的一次判定：桌面宿主恒为 `true`；server
-    /// 模式由 `ServerHandle::local_platform_permitted` 决定——TCP 对端、整条转发链与所有
+    /// `session.allow_local_platform` 是建连时对整条连接的一次判定：桌面宿主的 `agent.token` 与进程内
+    /// 连接为 `true`；server 模式由 `ServerHandle::local_platform_permitted` 决定——TCP 对端、整条转发链与所有
     /// `Host` / `Origin` / `X-Forwarded-Host` / `Forwarded` authority 都是字面本机，或运维显式
     /// 设置 `FLUXDOWN_ALLOW_LOCAL_PLATFORM`。即使为 `true`，server 模式也只放行
     /// [`local_platform_method_allowed`] 中的打开 / 定位任务产物，其余 `agent.platform.*` 仍
-    /// 返回 `Unsupported`。
+    /// 返回 `Unsupported`。设备控制凭据会话（局域网配对的手机）恒为 `false`：桌面模式下同样拒绝
+    /// 全部 `agent.platform.*`，远程设备不能触发主机本地的平台能力。
     async fn dispatch_with(
         &self,
         request: RpcRequest,
-        allow_local_platform: bool,
+        session: &SessionContext,
     ) -> Result<serde_json::Value, RpcErrorData> {
         // 桌面专属集成（打开 / 定位文件、开机自启、文件与协议关联）在 headless 宿主不存在；
-        // 唯一例外是本机来源连接的「打开 / 定位任务产物」。
-        if self.server_mode
-            && request.method.starts_with("agent.platform.")
-            && !(allow_local_platform && local_platform_method_allowed(&request.method))
-        {
-            return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
+        // 唯一例外是本机来源连接的「打开 / 定位任务产物」。桌面宿主只拒绝非本机来源的连接
+        // （设备控制凭据会话）。
+        if request.method.starts_with("agent.platform.") {
+            let permitted = if self.server_mode {
+                session.allow_local_platform && local_platform_method_allowed(&request.method)
+            } else {
+                session.allow_local_platform
+            };
+            if !permitted {
+                return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
+            }
         }
         if self.server_mode && server_mode_denies(&request, self.local_log_export) {
             return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
@@ -270,7 +287,8 @@ impl GatewayService {
                     .map_err(|error| internal_error("gateway status", error))
             }
             method::AGENT_GATEWAY_PATCH => {
-                self.gateway_patch(params_or_empty(request.params)).await
+                self.gateway_patch(params_or_empty(request.params), session)
+                    .await
             }
             method::AGENT_GATEWAY_REVEAL_TOKEN => {
                 let token = self.state.lock().await.gateway_user_token.clone();
@@ -421,6 +439,12 @@ impl GatewayService {
             ),
             method::AGENT_ORDER_GET => self.order_get(params_or_empty(request.params)).await,
             method::AGENT_ORDER_LIST => cloud_value(self.cloud.orders().await),
+            method::AGENT_PLUGIN_FAVORITE_LIST => cloud_value(self.cloud.plugin_favorites().await),
+            method::AGENT_PLUGIN_FAVORITE_SET => {
+                let request =
+                    parse_params::<fluxdown_protocol::PluginFavoriteSetRequest>(request.params)?;
+                cloud_value(self.cloud.set_plugin_favorite(request).await)
+            }
             method::AGENT_REFERRAL_SUMMARY => {
                 cloud_value(self.cloud.referral("/summary", Method::GET, None).await)
             }
@@ -567,6 +591,7 @@ impl GatewayService {
             | method::AGENT_LINK_REMOVE
             | method::AGENT_LINK_RENAME
             | method::AGENT_LINK_REFRESH
+            | method::AGENT_LINK_CONTROL_CREDENTIAL
             | method::AGENT_LINK_DISPATCH => match &self.link {
                 Some(link) => link.rpc(&request.method, request.params).await,
                 // 互联服务未装配（如精简测试网关）：明确报不支持，不做假成功。
@@ -720,6 +745,7 @@ impl GatewayService {
     async fn gateway_patch(
         &self,
         params: serde_json::Value,
+        session: &SessionContext,
     ) -> Result<serde_json::Value, RpcErrorData> {
         let patch = parse_params::<fluxdown_protocol::GatewayPatchParams>(Some(params))?;
         let _transaction = self.gateway_patch_lock.lock().await;
@@ -885,7 +911,14 @@ impl GatewayService {
             gateway.mcp_enabled,
             gateway.cors_enabled,
         );
-        self.api_token.set(user_token);
+        let access_key_changed = *self.api_token.get() != *user_token;
+        self.api_token.set(user_token.as_str());
+        if access_key_changed {
+            // 先把发起修改的会话记住的值改成新值，再通知其它会话重新校验：发起者不被自己踢掉，
+            // 用旧密钥认证的其它会话随即断开。
+            session.auth.rebind_access_key(&user_token);
+            self.access_key_epoch.send_modify(|epoch| *epoch += 1);
+        }
         self.events
             .publish(fluxdown_protocol::AgentEvent::GatewayChanged(
                 gateway.clone(),
@@ -1757,31 +1790,56 @@ async fn rpc_upgrade(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    // 「本机来源」在建连时一次判定，整条连接沿用：桌面宿主本就在本机；server 模式见
-    // `ServerHandle::local_platform_permitted`（字面本机来源或显式 env 放行）。
-    let (upgrade, allow_local_platform) = match state.server.as_deref() {
+    // 凭据种类与「本机来源」都在建连时一次判定，整条连接沿用：桌面宿主的 `agent.token` 本就在
+    // 本机；server 模式见 `ServerHandle::local_platform_permitted`（字面本机来源或显式 env 放行）。
+    // 设备控制凭据（局域网配对的远程设备）两种模式下都不是本机来源。
+    let (upgrade, session) = match state.server.as_deref() {
         Some(server) => {
-            if let Err(status) = server.authorize_rpc_from(peer.ip(), &headers, &state.bearer) {
-                return status.into_response();
-            }
+            let credential = match server
+                .authorize_rpc_from(peer.ip(), &headers, &state.bearer)
+                .await
+            {
+                Ok(credential) => credential,
+                Err(status) => return status.into_response(),
+            };
+            let allow_local_platform = !matches!(credential, RpcCredential::Device { .. })
+                && server.local_platform_permitted(peer.ip(), &headers);
             // 浏览器经子协议携带密钥：必须回显 `fluxdown.rpc.v1`，否则浏览器会断开握手。
             (
                 upgrade.protocols([crate::server_mode::RPC_SUBPROTOCOL]),
-                server.local_platform_permitted(peer.ip(), &headers),
+                SessionContext::new(allow_local_platform, credential),
             )
         }
         None => {
-            if !authorized(&headers, &state.bearer) {
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            (upgrade, true)
+            let session = if authorized(&headers, &state.bearer) {
+                SessionContext::new(true, RpcCredential::Agent)
+            } else {
+                match authorize_device(&state.service, &headers).await {
+                    Some(credential) => SessionContext::new(false, credential),
+                    None => return StatusCode::UNAUTHORIZED.into_response(),
+                }
+            };
+            (upgrade, session)
         }
     };
     upgrade
-        .on_upgrade(move |socket| {
-            run_socket(socket, state.service, state.cancel, allow_local_platform)
-        })
+        .on_upgrade(move |socket| run_socket(socket, state.service, state.cancel, session))
         .into_response()
+}
+
+/// 桌面模式：`Authorization: Bearer` 携带设备控制凭据，且互联服务校验通过（名册里该设备被授权
+/// 控制本机、未被撤销、HMAC 一致）才接受。
+async fn authorize_device(service: &GatewayService, headers: &HeaderMap) -> Option<RpcCredential> {
+    let token = crate::server_mode::bearer_token(headers)?;
+    let fingerprint = service
+        .link
+        .as_ref()?
+        .verify_control_credential(token)
+        .await?;
+    Some(RpcCredential::Device {
+        token: token.to_owned(),
+        fingerprint,
+    })
 }
 
 /// 连接循环只读套接字、受理请求，并把应答 / 控制帧放进有序出站通道；套接字写端由
@@ -1791,7 +1849,7 @@ async fn run_socket(
     socket: WebSocket,
     service: Arc<GatewayService>,
     cancel: CancellationToken,
-    allow_local_platform: bool,
+    session: SessionContext,
 ) {
     let mut ready = false;
     let mut ui_client = false;
@@ -1804,6 +1862,24 @@ async fn run_socket(
     // 与 daemon 命令。
     let mut lanes: Option<RequestLanes> = None;
     let mut responses: Option<tokio::sync::mpsc::Receiver<RpcResponse>> = None;
+    // 撤销订阅：访问密钥被改 / 名册里设备记录变化之后重新校验本会话的凭据。
+    let mut key_changes = matches!(session.auth.credential(), RpcCredential::AccessKey(_))
+        .then(|| service.access_key_epoch.subscribe());
+    let mut roster_changes = match (session.auth.credential(), &service.link) {
+        (RpcCredential::Device { .. }, Some(link)) => Some(link.subscribe_roster()),
+        _ => None,
+    };
+    // 订阅之后补一次校验：覆盖「升级时通过校验、订阅前凭据已被撤销」的窗口。
+    if !service.session_still_valid(&session.auth).await {
+        send_close(
+            &out,
+            CLOSE_CODE_CREDENTIAL_REVOKED,
+            CLOSE_REASON_CREDENTIAL_REVOKED,
+        )
+        .await;
+        finish_writer(out, writer).await;
+        return;
+    }
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -1841,11 +1917,11 @@ async fn run_socket(
                             ready = true;
                             ui_client = declares_selection_ui(&hello);
                             if ui_client { service.ui_connected().await; }
-                            let (receiver, session_lanes, response_rx) = service.open_session(allow_local_platform);
+                            let (receiver, session_lanes, response_rx) = service.open_session(&session);
                             events.attach(receiver, MAX_PENDING_FRAMES);
                             lanes = Some(session_lanes);
                             responses = Some(response_rx);
-                            let result = match serde_json::to_value(service.session_hello(allow_local_platform)) {
+                            let result = match serde_json::to_value(service.session_hello(session.allow_local_platform)) {
                                 Ok(result) => result,
                                 Err(_) => break,
                             };
@@ -1861,7 +1937,7 @@ async fn run_socket(
                 // CaptureTasksStarted 是不进快照的瞬时事件。官方 UI 已订阅后，先成功应答
                 // 首个快照，再补投冷启动意图；提前在 hello 时发布会被快照的 sequence 吞掉。
                 if ui_client && !ui_snapshot_ready && request.method == method::SYSTEM_SNAPSHOT {
-                    let response = service.call_with(allow_local_platform, request).await;
+                    let response = service.call_with(&session, request).await;
                     let succeeded = matches!(&response, RpcResponse::Success(_));
                     if send_json(&out, &response).await.is_err() { break; }
                     if succeeded {
@@ -1881,6 +1957,18 @@ async fn run_socket(
                 if let Some(response) = response
                     && send_json(&out, &response).await.is_err()
                 {
+                    break;
+                }
+            }
+            () = wait_changed(&mut key_changes), if key_changes.is_some() => {
+                if !service.session_still_valid(&session.auth).await {
+                    send_close(&out, CLOSE_CODE_CREDENTIAL_REVOKED, CLOSE_REASON_CREDENTIAL_REVOKED).await;
+                    break;
+                }
+            }
+            () = wait_changed(&mut roster_changes), if roster_changes.is_some() => {
+                if !service.session_still_valid(&session.auth).await {
+                    send_close(&out, CLOSE_CODE_CREDENTIAL_REVOKED, CLOSE_REASON_CREDENTIAL_REVOKED).await;
                     break;
                 }
             }
@@ -1950,7 +2038,7 @@ impl GatewayService {
     /// 握手通过后的连接装配：事件订阅、请求通道与响应队列（WebSocket 与进程内连接共用）。
     fn open_session(
         self: &Arc<Self>,
-        allow_local_platform: bool,
+        session: &SessionContext,
     ) -> (
         tokio::sync::broadcast::Receiver<EventFrame>,
         RequestLanes,
@@ -1958,8 +2046,24 @@ impl GatewayService {
     ) {
         let events = self.events.subscribe();
         let (response_tx, response_rx) = tokio::sync::mpsc::channel(RESPONSE_QUEUE);
-        let lanes = RequestLanes::spawn(self, response_tx, allow_local_platform);
+        let lanes = RequestLanes::spawn(self, response_tx, session);
         (events, lanes, response_rx)
+    }
+
+    /// 会话凭据是否仍然有效：`agent.token` / 进程内连接恒有效；访问密钥会话要求所呈密钥仍等于当前
+    /// 访问密钥；设备凭据会话要求互联服务按名册重新校验后仍指向同一台设备。
+    async fn session_still_valid(&self, auth: &session_auth::SessionAuth) -> bool {
+        match auth.credential() {
+            RpcCredential::Agent => true,
+            RpcCredential::AccessKey(key) => crate::server_mode::key_matches(&self.api_token, &key),
+            RpcCredential::Device { token, fingerprint } => match &self.link {
+                Some(link) => {
+                    link.verify_control_credential(&token).await.as_deref()
+                        == Some(fingerprint.as_str())
+                }
+                None => false,
+            },
+        }
     }
 
     /// 本连接的 `system.hello` 应答：在服务级能力之外，只有可在主机上打开 / 定位任务产物的
@@ -2059,13 +2163,14 @@ fn lane_for(method_name: &str) -> Lane {
     if method_name == fluxdown_protocol::method::AGENT_PLATFORM_FILE_ICON {
         return Lane::Icon;
     }
-    const CLOUD_PREFIXES: [&str; 9] = [
+    const CLOUD_PREFIXES: [&str; 10] = [
         "agent.auth.",
         "agent.profile.",
         "agent.device.",
         "agent.plan.",
         "agent.order.",
         "agent.referral.",
+        "agent.pluginFavorite.",
         "agent.remote.",
         "agent.sync.",
         "agent.update.",
@@ -2104,16 +2209,17 @@ impl RequestLanes {
     fn spawn(
         service: &Arc<GatewayService>,
         responses: tokio::sync::mpsc::Sender<RpcResponse>,
-        allow_local_platform: bool,
+        session: &SessionContext,
     ) -> Self {
         let mut tasks = tokio::task::JoinSet::new();
         let mut start = || {
             let (sender, mut receiver) = tokio::sync::mpsc::channel::<RpcRequest>(LANE_QUEUE);
             let service = Arc::clone(service);
             let responses = responses.clone();
+            let session = session.clone();
             tasks.spawn(async move {
                 while let Some(request) = receiver.recv().await {
-                    let response = service.call_with(allow_local_platform, request).await;
+                    let response = service.call_with(&session, request).await;
                     if responses.send(response).await.is_err() {
                         break;
                     }
@@ -2129,6 +2235,7 @@ impl RequestLanes {
         let repair = start();
         let (daemon_slow, mut receiver) = tokio::sync::mpsc::channel::<RpcRequest>(LANE_QUEUE);
         let service = Arc::clone(service);
+        let session = session.clone();
         tasks.spawn(async move {
             let mut calls = tokio::task::JoinSet::new();
             loop {
@@ -2143,8 +2250,9 @@ impl RequestLanes {
                         let Some(request) = request else { break; };
                         let service = Arc::clone(&service);
                         let responses = responses.clone();
+                        let session = session.clone();
                         calls.spawn(async move {
-                            let response = service.call_with(allow_local_platform, request).await;
+                            let response = service.call_with(&session, request).await;
                             if responses.send(response).await.is_err() {
                                 tracing::trace!("gateway connection closed before concurrent response");
                             }
@@ -2686,7 +2794,7 @@ mod tests {
             )
             .with_server_mode(server_mode);
             if attach_link {
-                gateway = gateway.with_link(link);
+                gateway = gateway.with_link(link.clone());
             }
             let service = Arc::new(gateway);
             let cancel = tokio_util::sync::CancellationToken::new();
@@ -2705,6 +2813,7 @@ mod tests {
                         webroot: None,
                         demo: false,
                         allow_local_platform,
+                        link: attach_link.then(|| link.clone()),
                     })
                     .expect("server handle"),
                 ))
@@ -2740,7 +2849,7 @@ mod tests {
         async fn call(&self, method_name: &str, params: serde_json::Value) -> RpcResponse {
             self.service
                 .call_with(
-                    false,
+                    &super::SessionContext::local(!self.service.server_mode),
                     RpcRequest::new(RequestId::Integer(1), method_name, Some(params)),
                 )
                 .await
@@ -3854,7 +3963,7 @@ mod tests {
             let response = tokio::time::timeout(
                 Duration::from_secs(2),
                 service.call_with(
-                    false,
+                    &super::SessionContext::local(!service.server_mode),
                     RpcRequest::new(
                         RequestId::Integer(i64::try_from(index).unwrap_or(i64::MAX)),
                         method_name,
@@ -4074,9 +4183,19 @@ mod tests {
     #[test]
     fn slow_network_methods_do_not_share_the_local_lane() {
         assert!(matches!(lane_for("agent.link.pairFinish"), Lane::Slow));
+        assert!(matches!(
+            lane_for(fluxdown_protocol::method::AGENT_LINK_CONTROL_CREDENTIAL),
+            Lane::Slow
+        ));
         assert!(matches!(lane_for("agent.diagnostics.run"), Lane::Slow));
         assert!(matches!(lane_for("system.ping"), Lane::Local));
         assert!(matches!(lane_for("agent.remote.reconnect"), Lane::Local));
+        for name in [
+            fluxdown_protocol::method::AGENT_PLUGIN_FAVORITE_LIST,
+            fluxdown_protocol::method::AGENT_PLUGIN_FAVORITE_SET,
+        ] {
+            assert!(matches!(lane_for(name), Lane::Cloud), "{name}");
+        }
     }
 
     #[tokio::test]
@@ -4119,7 +4238,11 @@ mod tests {
         });
         let service = Arc::new(harness.service);
         let (responses, mut receiver) = tokio::sync::mpsc::channel(4);
-        let lanes = super::RequestLanes::spawn(&service, responses, false);
+        let lanes = super::RequestLanes::spawn(
+            &service,
+            responses,
+            &super::SessionContext::local(!service.server_mode),
+        );
         assert!(
             lanes
                 .submit(RpcRequest::new(
@@ -4237,7 +4360,11 @@ mod tests {
 
         for local in [true, false] {
             let (responses, mut receiver) = tokio::sync::mpsc::channel(8);
-            let lanes = super::RequestLanes::spawn(&harness.service, responses, local);
+            let lanes = super::RequestLanes::spawn(
+                &harness.service,
+                responses,
+                &super::SessionContext::local(local),
+            );
             let requests = [
                 fluxdown_protocol::method::AGENT_PLATFORM_OPEN_TASK,
                 fluxdown_protocol::method::AGENT_PLATFORM_REVEAL_TASK,
@@ -4452,5 +4579,532 @@ mod tests {
         );
         socket.close(None).await.expect("close socket");
         harness.finish().await;
+    }
+
+    // ── 局域网配对即授权：设备控制凭据端到端 ────────────────────────────────
+
+    /// 手机：独立状态目录与身份、只出站的互联服务（与嵌入式移动宿主的装配一致）。
+    struct Phone {
+        link: Arc<crate::link::LinkService>,
+        state: Arc<tokio::sync::Mutex<crate::state::AgentState>>,
+        store: Arc<crate::state::StateStore>,
+        dir: std::path::PathBuf,
+    }
+
+    impl Drop for Phone {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_dir_all(&self.dir) {
+                tracing::warn!(path = %self.dir.display(), %error, "phone test cleanup failed");
+            }
+        }
+    }
+
+    impl Phone {
+        async fn start(label: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "fluxdown_agent_phone_{label}_{}_{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let store = Arc::new(
+                crate::state::StateStore::open(dir.clone())
+                    .await
+                    .expect("open phone store"),
+            );
+            let state = Arc::new(tokio::sync::Mutex::new(crate::state::AgentState {
+                device_name: label.to_owned(),
+                ..crate::state::AgentState::default()
+            }));
+            let events = crate::event_hub::AgentEventHub::new(AgentSnapshot::default());
+            let daemon = Arc::new(crate::daemon_client::DaemonClient::disconnected());
+            let link = crate::link::LinkService::new(crate::link::LinkServiceParts {
+                events,
+                state: state.clone(),
+                store: store.clone(),
+                tasks: Arc::new(crate::link::DaemonTaskCreator::new(daemon)),
+                bound: "127.0.0.1:0".parse().expect("phone bound address"),
+                server_mode: false,
+                network: crate::link::LinkNetworkOptions {
+                    mdns: false,
+                    advertise: Vec::new(),
+                },
+            });
+            link.start().await.expect("start phone link");
+            Self {
+                link,
+                state,
+                store,
+                dir,
+            }
+        }
+
+        fn fingerprint(&self) -> String {
+            self.link
+                .api_ping_info()
+                .expect("phone link ready")
+                .fingerprint
+        }
+
+        /// 手机名册里主机的链路密钥（手工拼凭据用）。
+        async fn link_secret_of(&self, host_fp: &str) -> Vec<u8> {
+            use fluxdown_link::LinkStorage;
+            crate::link::AgentLinkStorage::new(self.state.clone(), self.store.clone())
+                .get(host_fp)
+                .await
+                .expect("read phone roster")
+                .expect("host in the phone roster")
+                .link_secret
+        }
+    }
+
+    async fn start_host_link(host: &TestGateway) -> Arc<crate::link::LinkService> {
+        let link = host.service.link.clone().expect("host link attached");
+        link.start().await.expect("start host link");
+        link
+    }
+
+    fn fingerprint_of(link: &crate::link::LinkService) -> String {
+        link.api_ping_info().expect("link ready").fingerprint
+    }
+
+    async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
+        for _ in 0..250 {
+            if let Some(value) = probe() {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// 主机展示配对码 → 手机 `pairBegin` → 主机批准 → 手机 `pairFinish`。
+    async fn pair_phone(
+        host: &TestGateway,
+        host_link: &Arc<crate::link::LinkService>,
+        phone: &Phone,
+        request_control: bool,
+    ) {
+        let code = host_link.pairing_code().await.expect("pairing code");
+        let address = host.address().await.to_string();
+        let begin = phone
+            .link
+            .pair_begin(&address, &code.code, request_control)
+            .await
+            .expect("pairBegin");
+        let request = wait_until("incoming pairing request", || {
+            host.service
+                .events
+                .inspect(|snapshot| snapshot.link_pairing_requests.first().cloned())
+        })
+        .await;
+        assert_eq!(request.requests_control, request_control);
+        let finisher = {
+            let link = phone.link.clone();
+            let token = begin.token.clone();
+            tokio::spawn(async move { link.pair_finish(&token, true).await })
+        };
+        host_link
+            .approve(&request.session_id, true)
+            .expect("host approves");
+        finisher
+            .await
+            .expect("pairFinish task")
+            .expect("pairFinish")
+            .expect("paired");
+        let phone_fp = phone.fingerprint();
+        wait_until("host roster entry", || {
+            host.service.events.inspect(|snapshot| {
+                snapshot
+                    .linked_devices
+                    .iter()
+                    .any(|device| device.fingerprint == phone_fp)
+                    .then_some(())
+            })
+        })
+        .await;
+    }
+
+    async fn connect_rpc(
+        address: std::net::SocketAddr,
+        bearer: &str,
+    ) -> Result<TestSocket, tokio_tungstenite::tungstenite::Error> {
+        let mut request = format!("ws://{address}/rpc")
+            .into_client_request()
+            .expect("RPC URL");
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {bearer}")).expect("bearer header"),
+        );
+        tokio_tungstenite::connect_async(request)
+            .await
+            .map(|(socket, _)| socket)
+    }
+
+    fn rejected_with(error: &tokio_tungstenite::tungstenite::Error, status: u16) -> bool {
+        matches!(
+            error,
+            tokio_tungstenite::tungstenite::Error::Http(response)
+                if response.status().as_u16() == status
+        )
+    }
+
+    /// `system.hello` 并返回应答里的能力表。
+    async fn rpc_hello(socket: &mut TestSocket, id: i64) -> Vec<String> {
+        let response = socket_request(
+            socket,
+            id,
+            fluxdown_protocol::method::SYSTEM_HELLO,
+            serde_json::json!({
+                "clientName": "device-credential-test",
+                "clientVersion": fluxdown_protocol::APP_VERSION,
+                "minProtocolVersion": fluxdown_protocol::MIN_PROTOCOL_VERSION,
+                "maxProtocolVersion": fluxdown_protocol::PROTOCOL_VERSION,
+                "requestedRole": "agent",
+                "capabilities": []
+            }),
+        )
+        .await;
+        let RpcResponse::Success(hello) = response else {
+            panic!("hello failed: {response:?}");
+        };
+        hello.result["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .filter_map(|capability| capability.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    async fn assert_rpc_alive(socket: &mut TestSocket, id: i64) {
+        let response = socket_request(
+            socket,
+            id,
+            fluxdown_protocol::method::SYSTEM_PING,
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(matches!(response, RpcResponse::Success(_)), "{response:?}");
+    }
+
+    /// 服务端以「凭据已撤销」关闭连接：关闭码 1008、原因 `credential-revoked`。
+    async fn expect_revoked_close(socket: &mut TestSocket) {
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(frame))) => {
+                        return frame;
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => return None,
+                }
+            }
+        })
+        .await
+        .expect("the session must be closed after the revocation");
+        let frame = closed.expect("a close frame with the revocation reason");
+        assert_eq!(u16::from(frame.code), 1008);
+        assert_eq!(&*frame.reason, "credential-revoked");
+    }
+
+    async fn web_status(address: std::net::SocketAddr, bearer: Option<&str>) -> u16 {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("HTTP client");
+        let mut request = client.get(format!("http://{address}/api/web/logs/export"));
+        if let Some(bearer) = bearer {
+            request = request.bearer_auth(bearer);
+        }
+        request
+            .send()
+            .await
+            .expect("web route response")
+            .status()
+            .as_u16()
+    }
+
+    #[tokio::test]
+    async fn lan_pairing_grants_a_device_session_that_ends_when_the_host_unpairs() {
+        let host = TestGateway::new_server_mode("pair_control_e2e", true, false).await;
+        let host_link = start_host_link(&host).await;
+        host.patch_gateway(serde_json::json!({ "userToken": "flux2026abc" }))
+            .await;
+        let phone = Phone::start("phone").await;
+        let address = host.address().await;
+
+        pair_phone(&host, &host_link, &phone, true).await;
+        let credential = phone
+            .link
+            .control_credential(&fingerprint_of(&host_link))
+            .await
+            .expect("controlCredential")
+            .token;
+
+        // 设备凭据建 /rpc 会话并拿到快照；设备会话不是本机来源，不下发打开文件的能力。
+        let mut device = connect_rpc(address, &credential)
+            .await
+            .expect("the device credential opens /rpc");
+        let capabilities = rpc_hello(&mut device, 1).await;
+        assert!(
+            !capabilities.iter().any(|capability| capability
+                == fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES)
+        );
+        let snapshot = socket_request(
+            &mut device,
+            2,
+            fluxdown_protocol::method::SYSTEM_SNAPSHOT,
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(matches!(snapshot, RpcResponse::Success(_)), "{snapshot:?}");
+        // 同一凭据也能用于 `/api/web/*` 文件面（与 /rpc 同一校验）；没有凭据仍是 401。
+        assert_ne!(web_status(address, Some(&credential)).await, 401);
+        assert_eq!(web_status(address, None).await, 401);
+        // 对照：访问密钥会话不受名册变化影响。
+        let mut keyed = connect_rpc(address, "flux2026abc")
+            .await
+            .expect("the access key opens /rpc");
+        rpc_hello(&mut keyed, 1).await;
+
+        // 主机侧解除配对：已建立的设备会话被断开，重连与文件面都是 401。
+        host_link
+            .remove(&phone.fingerprint())
+            .await
+            .expect("unpair on the host");
+        expect_revoked_close(&mut device).await;
+        let error = connect_rpc(address, &credential)
+            .await
+            .expect_err("a revoked device must not reconnect");
+        assert!(rejected_with(&error, 401), "{error:?}");
+        assert_eq!(web_status(address, Some(&credential)).await, 401);
+        assert_rpc_alive(&mut keyed, 2).await;
+
+        host.finish().await;
+    }
+
+    #[tokio::test]
+    async fn repairing_without_control_cuts_the_old_device_session() {
+        let host = TestGateway::new_server_mode("pair_control_repair", true, false).await;
+        let host_link = start_host_link(&host).await;
+        let phone = Phone::start("phone").await;
+        let address = host.address().await;
+
+        pair_phone(&host, &host_link, &phone, true).await;
+        let credential = phone
+            .link
+            .control_credential(&fingerprint_of(&host_link))
+            .await
+            .expect("controlCredential")
+            .token;
+        let mut device = connect_rpc(address, &credential)
+            .await
+            .expect("device session");
+        rpc_hello(&mut device, 1).await;
+
+        // 同一手机重新配对且这次没有请求控制：授权随新记录消失（link_secret 也变了）。
+        pair_phone(&host, &host_link, &phone, false).await;
+        expect_revoked_close(&mut device).await;
+        let error = connect_rpc(address, &credential)
+            .await
+            .expect_err("the old credential is dead");
+        assert!(rejected_with(&error, 401), "{error:?}");
+        assert!(matches!(
+            phone
+                .link
+                .control_credential(&fingerprint_of(&host_link))
+                .await,
+            Err(crate::link::LinkOpError::Link(
+                fluxdown_link::LinkError::NotPaired
+            ))
+        ));
+
+        host.finish().await;
+    }
+
+    #[tokio::test]
+    async fn plain_pairing_yields_no_usable_rpc_credential() {
+        let host = TestGateway::new_server_mode("pair_plain", true, false).await;
+        let host_link = start_host_link(&host).await;
+        let phone = Phone::start("phone").await;
+        let address = host.address().await;
+        let host_fp = fingerprint_of(&host_link);
+
+        pair_phone(&host, &host_link, &phone, false).await;
+        // 手机没有可签发的凭据；就算它用共享的链路密钥手工拼一个，主机也不认（未授权控制）。
+        assert!(matches!(
+            phone.link.control_credential(&host_fp).await,
+            Err(crate::link::LinkOpError::Link(
+                fluxdown_link::LinkError::NotPaired
+            ))
+        ));
+        let hand_made = fluxdown_link::crypto::control_credential(
+            &phone.link_secret_of(&host_fp).await,
+            &phone.fingerprint(),
+            &host_fp,
+        )
+        .expect("hand-made credential");
+        let error = connect_rpc(address, &hand_made)
+            .await
+            .expect_err("an ungranted device must be rejected");
+        assert!(rejected_with(&error, 401), "{error:?}");
+        assert_eq!(web_status(address, Some(&hand_made)).await, 401);
+        // 格式错误 / 凭空编造的凭据同样是 401。
+        for forged in ["fdl1.nope.nope", "not-a-credential"] {
+            let error = connect_rpc(address, forged).await.expect_err("forged");
+            assert!(rejected_with(&error, 401), "{forged}: {error:?}");
+        }
+
+        host.finish().await;
+    }
+
+    #[tokio::test]
+    async fn desktop_host_accepts_device_credentials_but_denies_platform_methods() {
+        let host = TestGateway::new("pair_control_desktop").await;
+        let host_link = start_host_link(&host).await;
+        let phone = Phone::start("phone").await;
+        let address = host.address().await;
+
+        pair_phone(&host, &host_link, &phone, true).await;
+        let credential = phone
+            .link
+            .control_credential(&fingerprint_of(&host_link))
+            .await
+            .expect("controlCredential")
+            .token;
+
+        let mut device = connect_rpc(address, &credential)
+            .await
+            .expect("desktop mode accepts the device credential");
+        let capabilities = rpc_hello(&mut device, 1).await;
+        assert!(
+            !capabilities.iter().any(|capability| capability
+                == fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES)
+        );
+        let denied = socket_request(
+            &mut device,
+            2,
+            fluxdown_protocol::method::AGENT_PLATFORM_OPEN_TASK,
+            serde_json::json!({}),
+        )
+        .await;
+        let RpcResponse::Failure(denied) = denied else {
+            panic!("platform methods must be denied for device sessions");
+        };
+        assert_eq!(
+            denied.error.data.map(|data| data.code),
+            Some(ApplicationErrorCode::Unsupported)
+        );
+        // 本机 `agent.token` 会话照常进入参数校验。
+        let mut local = connect_rpc(address, "test-official-bearer")
+            .await
+            .expect("agent token session");
+        rpc_hello(&mut local, 1).await;
+        let accepted = socket_request(
+            &mut local,
+            2,
+            fluxdown_protocol::method::AGENT_PLATFORM_OPEN_TASK,
+            serde_json::json!({}),
+        )
+        .await;
+        let RpcResponse::Failure(accepted) = accepted else {
+            panic!("an empty openTask call must fail validation");
+        };
+        assert_eq!(
+            accepted.error.data.map(|data| data.code),
+            Some(ApplicationErrorCode::InvalidArgument)
+        );
+
+        // 解除配对：设备会话断开且不能重连；`agent.token` 会话不受影响。
+        host_link
+            .remove(&phone.fingerprint())
+            .await
+            .expect("unpair on the host");
+        expect_revoked_close(&mut device).await;
+        let error = connect_rpc(address, &credential)
+            .await
+            .expect_err("revoked");
+        assert!(rejected_with(&error, 401), "{error:?}");
+        assert_rpc_alive(&mut local, 3).await;
+
+        host.finish().await;
+    }
+
+    #[tokio::test]
+    async fn changing_the_access_key_disconnects_old_key_sessions_except_the_changer() {
+        let host = TestGateway::new_server_mode("access_key_revocation", true, false).await;
+        host.patch_gateway(serde_json::json!({ "userToken": "flux2026abc" }))
+            .await;
+        let address = host.address().await;
+
+        let mut other = connect_rpc(address, "flux2026abc")
+            .await
+            .expect("other tab");
+        rpc_hello(&mut other, 1).await;
+        let mut changer = connect_rpc(address, "flux2026abc")
+            .await
+            .expect("changer tab");
+        rpc_hello(&mut changer, 1).await;
+        let mut service = connect_rpc(address, "test-official-bearer")
+            .await
+            .expect("agent token session");
+        rpc_hello(&mut service, 1).await;
+
+        // 改密钥：用旧密钥认证的其它会话断开，发起者（Web 设置页）和 agent.token 会话不受影响。
+        let patched = socket_request(
+            &mut changer,
+            2,
+            fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+            serde_json::json!({ "userToken": "rotated2026key" }),
+        )
+        .await;
+        assert!(matches!(patched, RpcResponse::Success(_)), "{patched:?}");
+        expect_revoked_close(&mut other).await;
+        assert_rpc_alive(&mut changer, 3).await;
+        assert_rpc_alive(&mut service, 2).await;
+        let error = connect_rpc(address, "flux2026abc")
+            .await
+            .expect_err("old key");
+        assert!(rejected_with(&error, 401), "{error:?}");
+        let mut rotated = connect_rpc(address, "rotated2026key")
+            .await
+            .expect("new key");
+        rpc_hello(&mut rotated, 1).await;
+
+        // 重新生成：发起者记住的值再次跟随，其它新密钥会话断开。
+        let regenerated = socket_request(
+            &mut changer,
+            4,
+            fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+            serde_json::json!({ "regenerateUserToken": true }),
+        )
+        .await;
+        assert!(
+            matches!(regenerated, RpcResponse::Success(_)),
+            "{regenerated:?}"
+        );
+        expect_revoked_close(&mut rotated).await;
+        assert_rpc_alive(&mut changer, 5).await;
+        let new_key = host.user_token().await;
+        assert_ne!(new_key, "rotated2026key");
+        let mut fresh = connect_rpc(address, &new_key)
+            .await
+            .expect("regenerated key");
+        rpc_hello(&mut fresh, 1).await;
+
+        // 设置同一个密钥不是改动：任何会话都不被踢。
+        let unchanged = socket_request(
+            &mut changer,
+            6,
+            fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+            serde_json::json!({ "userToken": new_key }),
+        )
+        .await;
+        assert!(
+            matches!(unchanged, RpcResponse::Success(_)),
+            "{unchanged:?}"
+        );
+        assert_rpc_alive(&mut fresh, 2).await;
+
+        host.finish().await;
     }
 }

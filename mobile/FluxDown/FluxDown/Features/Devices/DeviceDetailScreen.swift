@@ -237,6 +237,9 @@ private struct LinkDeviceDetail: View {
                 } else if sameAccount {
                     StatusBadge(text: L("linkedDeviceSameAccountTag"), tone: .neutral)
                 }
+                if info.grantsControl, !revoked {
+                    StatusBadge(text: L("linkControlGrantedTag"), tone: .warning)
+                }
             }
 
             Section {

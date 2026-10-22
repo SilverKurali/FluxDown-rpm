@@ -44,6 +44,8 @@ export interface PluginViewDeclDto {
   /** 是否有可移植实现：无 `desktop` 的视图恒为 true；带 `desktop` 的仅在 manifest 显式 `portable: true` 时为 true。 */
   portable: boolean;
   desktop?: PluginDesktopEntryDto;
+  /** 视图图标 SVG 文本（daemon 加载期读入并校验）；只当单色蒙版按主题着色。未声明时缺省，用默认图标。 */
+  iconSvg?: string;
 }
 
 /** 命令贡献声明。 */

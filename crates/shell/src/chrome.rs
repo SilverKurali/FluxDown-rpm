@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use fluxdown_ui_components::{
     ButtonVariant, FluxIcon, SlidingHighlight, activity_button, button, color_transition,
-    nav_icon_color,
+    nav_icon_color, tooltip_view,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -18,7 +18,6 @@ use gpui::{
 use gpui_component::{
     Icon, h_flex,
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
-    tooltip::Tooltip,
     v_flex,
 };
 use serde_json::Value;
@@ -392,7 +391,7 @@ impl ShellView {
         let route_id = route.id.clone();
         rail_tile()
             .id(route.tooltip_id.clone())
-            .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
+            .tooltip(move |window, cx| tooltip_view(tooltip_label.clone(), window, cx))
             .child(
                 activity_button(
                     route.button_id.clone(),
@@ -434,7 +433,7 @@ impl ShellView {
             .flex_none()
             .rounded(radius)
             .when(selected, |this| this.bg(selected_bg))
-            .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
+            .tooltip(move |window, cx| tooltip_view(tooltip_label.clone(), window, cx))
             .child(
                 activity_button(
                     route.button_id.clone(),
@@ -487,7 +486,7 @@ impl ShellView {
         let icon_color = active_theme(cx).tokens().colors.muted_foreground;
         frame
             .id(tooltip_id)
-            .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
+            .tooltip(move |window, cx| tooltip_view(tooltip_label.clone(), window, cx))
             .child(
                 activity_button(
                     action.button_id,

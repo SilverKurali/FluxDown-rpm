@@ -96,7 +96,7 @@ flowchart TD
 
 |级别|判定（满足任一）|处置|
 |---|---|---|
-|**拒绝**（方向）|违反产品决策/红线：恢复已退役的 Flutter/hub 工程、改动冻结的 `native/server`、新增遥测点或采集下载信息、下载页侧栏独立「分类」分区、与既有功能重复、不该进本项目的范围；架构方向错（绕过 `fluxdown_engine`/protocol 边界、在 UI 里实现引擎逻辑）；可疑/恶意代码|`gh pr comment <N> --body-file -` 说明原因与可接受的替代方向，再 `gh pr close <N>`|
+|**拒绝**（方向）|违反产品决策/红线：恢复已退役的 Flutter/hub 工程或已移除的旧 headless 宿主 `native/server`、新增遥测点或采集下载信息、下载页侧栏独立「分类」分区、与既有功能重复、不该进本项目的范围；架构方向错（绕过 `fluxdown_engine`/protocol 边界、在 UI 里实现引擎逻辑）；可疑/恶意代码|`gh pr comment <N> --body-file -` 说明原因与可接受的替代方向，再 `gh pr close <N>`|
 |**退回**（实现）|核心逻辑错误、需重写主体、有多种修法需作者取舍、需作者补信息（复现、平台实测）、安全问题要重设计、夹带无关改动需拆分、修复量超直修阈值|`gh pr review <N> --request-changes --body-file -`，不代修，结束 review|
 |**直修**|PR 方向与主体实现确认正确，问题属机械性或局部：fmt/clippy、与 main 的冲突、缺几条测试、i18n 漏 zh/en、镜像契约漏同步、openapi 未重生成、局部边界 bug、`{e:#}`、`unwrap→?`、漏 `no_console_window`、调试残留、文档坐标|自己修，推回 PR 分支，合并|
 |**建议**（nit）|风格偏好、可选优化，不影响正确性|写进评论，不阻塞合并、不代改|
@@ -118,7 +118,7 @@ flowchart TD
 
 |改动路径|命令（cwd = worktree）|
 |---|---|
-|任何 Rust|`cargo fmt --check && cargo clippy --workspace --exclude fluxdown_server --all-targets -- -D warnings`|
+|任何 Rust|`cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings`|
 |`native/engine`|`cargo nextest run -p fluxdown_engine <filter>`；插件相关加 `--features plugins,components`|
 |`native/{api,protocol,daemon,engine_protocol,link,logfile,cli}`|`cargo nextest run -p <crate>`；API 改动跑 `gen_openapi` 后确认无漂移|
 |`native/agent` / `native/mobile` / `crates/*`|`cargo nextest run -p <crate>`|

@@ -83,6 +83,7 @@ function PairedRow({ device, disabled, sameAccount }: { device: LinkDeviceInfo; 
           <Badge>{t('deviceLocalTag')}</Badge>
           {device.revoked ? <Badge>{t('linkedDeviceRevokedTag')}</Badge> : null}
           {sameAccount && !device.revoked ? <Badge>{t('linkedDeviceSameAccountTag')}</Badge> : null}
+          {device.grantsControl && !device.revoked ? <Badge>{t('linkControlGrantedTag')}</Badge> : null}
           {device.revoked ? null : (
             <span className="text-xs text-muted-foreground">{t(disabled ? 'devicePresenceUnknown' : device.online ? 'deviceOnline' : 'deviceOffline')}</span>
           )}

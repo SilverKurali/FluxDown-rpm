@@ -215,7 +215,7 @@ hooks 在下载生命周期事件发生时运行你的代码。
   "contributes": {
     "views": [{ "id": "dashboard", "title": "看板", "location": "activity",
                 "desktop": { "entry": "ui/dashboard.js", "networkHosts": ["api.example.com"] },
-                "portable": true }],
+                "portable": true, "icon": "icons/dashboard.svg" }],
     "commands": [{ "id": "refresh", "title": "刷新", "palette": true, "taskMenu": false }],
     "sniffRules": "rules.json",
     "pageScripts": [{ "id": "hello", "title": "你好", "matches": ["https://*.example.com/*"], "js": ["page/hello.js"] }]
@@ -236,6 +236,7 @@ hooks 在下载生命周期事件发生时运行你的代码。
 | `location` | 是 | `activity`、`settings`、`taskDetail` 或 `window`；`settings` 至多一个视图使用。 |
 | `desktop` | 否 | 桌面原生实现，见下。**没有** `desktop` 的视图是可移植视图，要求声明 `main`。 |
 | `portable` | 否 | 布尔值，默认 `false`。仅允许与 `desktop` 同时声明。`true` 表示 `main` 也通过 `flux.ui.view` 实现了该视图，让不能运行桌面脚本的客户端也能显示；要求声明 `main`。 |
+| `icon` | 否 | `.svg` 文件的包内相对路径（任何 `location` 都允许，目前仅活动栏 `activity` 使用）。至多 16 KiB（16384 字节），合法 UTF-8，且是 SVG 文档（以 `<svg` 或 `<?xml` 开头并包含 `<svg`）。宿主把它当作**单色蒙版**按主题色着色，只使用 alpha 通道，因此建议 24×24 的 `viewBox`，并使用 `stroke="currentColor"` 或 `fill="currentColor"`（lucide 风格）；彩色会被压成单色。不声明则使用默认图标。 |
 
 视图在哪里显示，取决于它的声明方式：
 
@@ -446,11 +447,11 @@ manifest 在安装时和每次加载时都会校验。校验失败的插件不�
 
 ### 检查顺序
 
-identity 格式 → `name` 非空 → `version` 格式 → `minAppVersion` 格式 → `icon` 路径安全 → resolver 至多一个 → resolver 的 `entry` 路径、`match.urls` 非空、`timeoutMs ≠ 0` → subscription 至多一个 → `providerId` 格式且不是 `rss`、`entry` 路径、`timeoutMs ≠ 0` → hooks 的 `entry` 路径、`events` 非空且合法、`match.urls`（如有）非空 → auth 的 `entry` 路径、含 `auth` 权限、`timeoutMs ≠ 0` → `main`（路径、`.js`、`events` 合法、`background` 权限）→ `contributes`（视图与命令的数量上限和 id、`settings` 位置至多一个、`portable` 只能与 `desktop` 同时声明、可移植视图与命令要求 `main`、desktop 的入口 / 尺寸 / 主机规则、`desktop` 权限、`sniffRules` 的路径 / 扩展名 / `browserRules` 权限，然后是 `pageScripts`：至多 16 条 → `pageScripts` 权限 → 逐条脚本：`id` 格式与唯一性、`title` 长度、`matches` 数量与模式、`excludeMatches` 数量与模式、`js` 数量、安全的 `.js` 路径、不重复）→ `settings`（key 唯一、逐字段规则与 widget × type 矩阵）→ `permissions` 全为已知值。
+identity 格式 → `name` 非空 → `version` 格式 → `minAppVersion` 格式 → `icon` 路径安全 → resolver 至多一个 → resolver 的 `entry` 路径、`match.urls` 非空、`timeoutMs ≠ 0` → subscription 至多一个 → `providerId` 格式且不是 `rss`、`entry` 路径、`timeoutMs ≠ 0` → hooks 的 `entry` 路径、`events` 非空且合法、`match.urls`（如有）非空 → auth 的 `entry` 路径、含 `auth` 权限、`timeoutMs ≠ 0` → `main`（路径、`.js`、`events` 合法、`background` 权限）→ `contributes`（视图与命令的数量上限和 id、`settings` 位置至多一个、`portable` 只能与 `desktop` 同时声明、可移植视图与命令要求 `main`、desktop 的入口 / 尺寸 / 主机规则、`desktop` 权限、视图 `icon` 的路径 / `.svg` 扩展名、`sniffRules` 的路径 / 扩展名 / `browserRules` 权限，然后是 `pageScripts`：至多 16 条 → `pageScripts` 权限 → 逐条脚本：`id` 格式与唯一性、`title` 长度、`matches` 数量与模式、`excludeMatches` 数量与模式、`js` 数量、安全的 `.js` 路径、不重复）→ `settings`（key 唯一、逐字段规则与 widget × type 矩阵）→ `permissions` 全为已知值。
 
 ### 必须存在的文件
 
-安装与加载时，包内必须有每个已声明的入口脚本（`resolvers[0].entry`、`hooks.entry`、`auth.entry`、`subscriptions[0].entry`、`main.entry`）、每个 `desktop.entry`、`sniffRules` 指向的文件（后者还要通过上文的内容检查），以及页面脚本 `js` 列出的每个文件（每个不超过 256 KiB 且为合法 UTF-8，同一条脚本拼接后不超过 384 KiB）。缺失时的错误是「包内缺少文件 '<路径>'」；入口脚本存在但无法按 UTF-8 文本读取时，错误是「读取入口文件 '<路径>' 失败: …」。开发模式插件同样适用：插件会被列为**加载失败**，而不是等到第一次调用时才出错。
+安装与加载时，包内必须有每个已声明的入口脚本（`resolvers[0].entry`、`hooks.entry`、`auth.entry`、`subscriptions[0].entry`、`main.entry`）、每个 `desktop.entry`、每个视图 `icon`（还要通过上文的图标内容检查）、`sniffRules` 指向的文件（后者还要通过上文的内容检查），以及页面脚本 `js` 列出的每个文件（每个不超过 256 KiB 且为合法 UTF-8，同一条脚本拼接后不超过 384 KiB）。缺失时的错误是「包内缺少文件 '<路径>'」；入口脚本存在但无法按 UTF-8 文本读取时，错误是「读取入口文件 '<路径>' 失败: …」。开发模式插件同样适用：插件会被列为**加载失败**，而不是等到第一次调用时才出错。
 
 ### 安装时的编译检查
 

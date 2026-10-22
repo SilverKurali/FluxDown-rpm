@@ -214,7 +214,7 @@ Validation runs after `auth`, in this order: `entry` path → `stages` non-empty
   "contributes": {
     "views": [{ "id": "dashboard", "title": "Dashboard", "location": "activity",
                 "desktop": { "entry": "ui/dashboard.js", "networkHosts": ["api.example.com"] },
-                "portable": true }],
+                "portable": true, "icon": "icons/dashboard.svg" }],
     "commands": [{ "id": "refresh", "title": "Refresh", "palette": true, "taskMenu": false }],
     "sniffRules": "rules.json",
     "pageScripts": [{ "id": "hello", "title": "Hello", "matches": ["https://*.example.com/*"], "js": ["page/hello.js"] }]
@@ -235,6 +235,7 @@ At most 16.
 | `location` | yes | `activity`, `settings`, `taskDetail` or `window`. At most one view may use `settings`. |
 | `desktop` | no | Native desktop implementation, see below. A view **without** `desktop` is portable and requires `main`. |
 | `portable` | no | Boolean, default `false`. Only allowed together with `desktop`. `true` means `main` also implements this view (via `flux.ui.view`) so clients that cannot run desktop scripts can show it; requires `main`. |
+| `icon` | no | Package-relative path of a `.svg` file (any `location`; currently only used by the `activity` bar). At most 16 KiB (16384 bytes), valid UTF-8, an SVG document (starts with `<svg` or `<?xml` and contains `<svg`). The host treats it as a **monochrome mask** tinted with the theme color and only uses its alpha channel, so a 24×24 `viewBox` with `stroke="currentColor"` or `fill="currentColor"` (lucide style) works best; colors are flattened to one tone. Omit it to get the default icon. |
 
 Where a view is shown depends on its declaration:
 
@@ -445,11 +446,11 @@ The manifest is validated when the plugin is installed and every time it is load
 
 ### Order of checks
 
-identity format → `name` non-empty → `version` format → `minAppVersion` format → `icon` path safety → at most one resolver → resolver `entry` path, non-empty `match.urls`, `timeoutMs ≠ 0` → at most one subscription → `providerId` format and not `rss`, `entry` path, `timeoutMs ≠ 0` → hooks `entry` path, non-empty valid `events`, non-empty `match.urls` if present → auth `entry` path, `auth` permission present, `timeoutMs ≠ 0` → `main` (path, `.js`, valid `events`, `background` permission) → `contributes` (view and command limits and ids, `settings` location at most once, `portable` only with `desktop`, `main` required for portable views and commands, desktop entry and size and hosts rules, `desktop` permission, `sniffRules` path / extension / `browserRules` permission, then `pageScripts`: at most 16 → `pageScripts` permission → per script: `id` format and uniqueness, `title` length, `matches` count and patterns, `excludeMatches` count and patterns, `js` count, safe `.js` paths, no duplicates) → `settings` (keys unique, per-field rules and widget × type matrix) → every `permissions` value known.
+identity format → `name` non-empty → `version` format → `minAppVersion` format → `icon` path safety → at most one resolver → resolver `entry` path, non-empty `match.urls`, `timeoutMs ≠ 0` → at most one subscription → `providerId` format and not `rss`, `entry` path, `timeoutMs ≠ 0` → hooks `entry` path, non-empty valid `events`, non-empty `match.urls` if present → auth `entry` path, `auth` permission present, `timeoutMs ≠ 0` → `main` (path, `.js`, valid `events`, `background` permission) → `contributes` (view and command limits and ids, `settings` location at most once, `portable` only with `desktop`, `main` required for portable views and commands, desktop entry and size and hosts rules, `desktop` permission, view `icon` path / `.svg` extension, `sniffRules` path / extension / `browserRules` permission, then `pageScripts`: at most 16 → `pageScripts` permission → per script: `id` format and uniqueness, `title` length, `matches` count and patterns, `excludeMatches` count and patterns, `js` count, safe `.js` paths, no duplicates) → `settings` (keys unique, per-field rules and widget × type matrix) → every `permissions` value known.
 
 ### Files that must exist
 
-At install and load time the package must contain every declared entry script (`resolvers[0].entry`, `hooks.entry`, `auth.entry`, `subscriptions[0].entry`, `main.entry`), every `desktop.entry`, the `sniffRules` file (which must also pass the content check above) and every file listed in a page script's `js` (each at most 256 KiB of valid UTF-8, at most 384 KiB per script once joined). A missing file is reported as `包内缺少文件 '<path>'` (“the package is missing file '<path>'”); an entry script that exists but cannot be read as UTF-8 text is reported as `读取入口文件 '<path>' 失败: …` (“failed to read entry file”). This applies to dev-mode plugins too: the plugin is listed as **Load failed** instead of failing later, on the first call.
+At install and load time the package must contain every declared entry script (`resolvers[0].entry`, `hooks.entry`, `auth.entry`, `subscriptions[0].entry`, `main.entry`), every `desktop.entry`, every view `icon` (which must also pass the icon content check above), the `sniffRules` file (which must also pass the content check above) and every file listed in a page script's `js` (each at most 256 KiB of valid UTF-8, at most 384 KiB per script once joined). A missing file is reported as `包内缺少文件 '<path>'` (“the package is missing file '<path>'”); an entry script that exists but cannot be read as UTF-8 text is reported as `读取入口文件 '<path>' 失败: …` (“failed to read entry file”). This applies to dev-mode plugins too: the plugin is listed as **Load failed** instead of failing later, on the first call.
 
 ### Compile checks at install
 

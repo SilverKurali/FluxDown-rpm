@@ -113,7 +113,7 @@ docker compose -f docker/docker-compose.yml up -d
 - 无人值守部署可通过部署环境或密钥管理器提供 `FLUXDOWN_TOKEN`，不要将真实密钥写进提交的文件。它仅在尚未设置密钥时初始化生效。
 - 持久化 `/data`（数据库、日志、访问密钥）与 `/root/Downloads`（下载文件）。自带 Compose 配置使用命名数据卷，下载目录映射到宿主机的 `docker/downloads/`。
 - 若下载盘需要休眠，建议把 `/data` 放在 SSD 或缓存池。
-- 原生部署须将 `fluxdown-agent` 与 `fluxdownd` 放在同一目录。旧 `native/server` crate 已冻结，不是当前部署入口。
+- 原生部署须将 `fluxdown-agent` 与 `fluxdownd` 放在同一目录。
 
 ## CLI 与 HTTP API
 
@@ -298,7 +298,7 @@ cargo test -p fluxdown_mobile        # 原生移动端共享核心
 
 ```shell
 cargo fmt --check
-cargo clippy --workspace --exclude fluxdown_server --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 完整流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。

@@ -6,7 +6,7 @@ import { SidebarCounts } from './counts'
 import { FILTER_ALL, LOCAL_DEVICE, STATUS_FILTERS, sameSelection, selectionMatches } from './filters'
 import type { SidebarSelection } from './filters'
 import { RowEngine } from './rowEngine'
-import type { HoldClock, RowEngineInput, RowSnapshot } from './rowEngine'
+import type { GroupTally, HoldClock, RowEngineInput, RowSnapshot } from './rowEngine'
 import { DYNAMIC_HOLD_MS, POINTER_HOLD_MS, isDynamicSortKey } from './rowOrder'
 import { resolveRowOrder } from './rowOrder.reference'
 import type { OrderState } from './rowOrder.reference'
@@ -160,6 +160,9 @@ function remoteTask(id: string, status: RemoteTaskDto['status'], toDevice: strin
   } as unknown as RemoteTaskDto
 }
 
+/** 测试里不涉及「任务组名命中搜索」。 */
+const NO_GROUP_MATCHES: ReadonlySet<string> = new Set()
+
 interface Scenario {
   tasks: TaskDto[]
   speeds: Record<string, number>
@@ -179,6 +182,7 @@ function inputOf(scenario: Scenario): RowEngineInput {
   return {
     tasks: scenario.tasks,
     speeds: scenario.speeds,
+    uploads: {},
     boostedId: scenario.boostedId,
     queuePositions: scenario.queue,
     runtimes: scenario.runtimes,
@@ -186,6 +190,7 @@ function inputOf(scenario: Scenario): RowEngineInput {
     remote: scenario.remote,
     selection: scenario.selection,
     query: scenario.query,
+    groupMatches: NO_GROUP_MATCHES,
     categories: scenario.categories,
     sortKey: scenario.sortKey,
     sortDir: scenario.sortDir,
@@ -235,14 +240,20 @@ function expectSame(engine: RowEngine, snapshot: RowSnapshot, scenario: Scenario
   for (const queueId of ['main', 'later']) expect(snapshot.counts.queue(queueId)).toBe(expected.queue(queueId))
   for (const device of [LOCAL_DEVICE, 'phone', 'tablet']) expect(snapshot.counts.device(device)).toBe(expected.device(device))
 
-  const groups = new Map<string, { total: number; completed: number; failed: number; downloading: number; downloaded: number; totalBytes: number }>()
+  const groups = new Map<string, GroupTally>()
   for (const view of reference.views) {
     if (view.source !== 'local' || view.groupId === '') continue
-    const tally = groups.get(view.groupId) ?? { total: 0, completed: 0, failed: 0, downloading: 0, downloaded: 0, totalBytes: 0 }
+    const tally = groups.get(view.groupId) ?? { total: 0, completed: 0, failed: 0, downloading: 0, pending: 0, paused: 0, downloaded: 0, totalBytes: 0, speed: 0 }
     tally.total += 1
     if (view.state === 'completed') tally.completed += 1
     else if (view.state === 'failed') tally.failed += 1
-    else if (view.state === 'downloading') tally.downloading += 1
+    else if (view.state === 'downloading') {
+      tally.downloading += 1
+      tally.speed += view.speed ?? 0
+    } else if (view.state === 'pending') {
+      if (view.preparing) tally.downloading += 1
+      else tally.pending += 1
+    } else if (view.state === 'paused') tally.paused += 1
     tally.downloaded += view.downloadedBytes
     tally.totalBytes += view.sizeBytes
     groups.set(view.groupId, tally)
@@ -428,6 +439,7 @@ describe('RowEngine 基本语义', () => {
   const base = (tasks: TaskDto[], patch: Partial<RowEngineInput> = {}): RowEngineInput => ({
     tasks,
     speeds: {},
+    uploads: {},
     boostedId: null,
     queuePositions: [],
     runtimes: {},
@@ -435,6 +447,7 @@ describe('RowEngine 基本语义', () => {
     remote: [],
     selection: SELECTIONS[0] as SidebarSelection,
     query: '',
+    groupMatches: NO_GROUP_MATCHES,
     categories,
     sortKey: 'created',
     sortDir: 'asc',

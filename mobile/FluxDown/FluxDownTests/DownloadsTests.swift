@@ -130,6 +130,24 @@ struct DownloadsFilterTests {
         #expect(facets.count(.paused) == 1)
     }
 
+    @Test func seedingFolderHoldsSeedingAndQueuedAndStaysInsideCompleted() {
+        let state = makeState([
+            makeTask("s", .completed, seeding: .seeding),
+            makeTask("q", .completed, seeding: .queuedForSlot),
+            makeTask("u", .completed, seeding: .userStopped),
+            makeTask("c", .completed),
+            makeTask("d", .downloading, seeding: .seeding),
+        ])
+        let facets = derive(state).facets
+        #expect(facets.count(.seeding) == 2)
+        #expect(facets.count(.completed) == 4)
+        var filter = DownloadsFilter()
+        filter.folder = .seeding
+        #expect(Set(ids(derive(state, filter: filter))) == ["s", "q"])
+        #expect(StatusFolder.allCases.firstIndex(of: .seeding) == StatusFolder.allCases.firstIndex(of: .completed).map { $0 + 1 })
+        #expect(!StatusFolder.seeding.accepts(.pending as RemoteTaskStatus))
+    }
+
     @Test func categoryPillsCountOnlyCurrentFolder() {
         let state = makeState(tasks)
         var filter = DownloadsFilter()
@@ -1037,6 +1055,15 @@ struct DownloadsRowTextTests {
         let line = echo.status(seeding, fields: allFields)
         #expect(line.tone == .success)
         #expect(line.text == "statusSeeding · ↑ \(try #require(Format.speed(640 * 1024)).description)")
+    }
+
+    @Test func queuedSeedingShowsQueuedLabelAndStoppedSeedKeepsCompleted() throws {
+        let queued = try item(makeTask("q", .completed, seeding: .queuedForSlot))
+        #expect(queued.visual == .seeding)
+        #expect(echo.status(queued, fields: allFields) == StatusLine(text: "seedingStatusQueued", tone: .success))
+        let stopped = try item(makeTask("s", .completed, seeding: .userStopped))
+        #expect(stopped.visual == .completed)
+        #expect(echo.status(stopped, fields: allFields) == StatusLine(text: "statusCompleted", tone: .secondary))
     }
 
     @Test func pendingFileConflictMarksOnlyItsTaskAndOverridesTheStatusLine() throws {

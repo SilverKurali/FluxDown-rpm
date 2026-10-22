@@ -573,6 +573,10 @@ pub struct LinkDeviceDto {
     pub cloud_device_id: Option<String>,
     /// 对端已解除与本机的配对：不可下发，只能删除或重新配对。
     pub revoked: bool,
+    /// 该设备被本机授权可经 `/rpc` 完全控制本机（本机用户批准了它的控制请求）。
+    pub grants_control: bool,
+    /// 本机可经 `/rpc` 控制该设备（本机以控制请求配对了它）。
+    pub controllable: bool,
     /// 配对时间（Unix 秒）。
     pub paired_at: i64,
     /// 最近一次确认在线的时间（Unix 秒，0 = 未知）。
@@ -592,6 +596,8 @@ impl From<&proto::LinkDeviceInfo> for LinkDeviceDto {
             app_version: device.app_version.clone(),
             cloud_device_id: device.cloud_device_id.clone(),
             revoked: device.revoked,
+            grants_control: device.grants_control,
+            controllable: device.controllable,
             paired_at: device.paired_at,
             last_seen_at: device.last_seen_at,
         }

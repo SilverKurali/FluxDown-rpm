@@ -13,6 +13,7 @@ use fluxdown_protocol::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use super::session_auth::SessionContext;
 use super::{GatewayService, RequestLanes, declares_selection_ui};
 use crate::event_pump::{EventPump, EventReader, MAX_PENDING_FRAMES, PumpEnd};
 
@@ -63,7 +64,7 @@ impl GatewayService {
         if ui_client {
             self.ui_connected().await;
         }
-        let (receiver, lanes, responses) = self.open_session(true);
+        let (receiver, lanes, responses) = self.open_session(&SessionContext::local(true));
         let mut pump = EventPump::new();
         pump.attach(receiver, MAX_PENDING_FRAMES);
         let waiters = Arc::new(Waiters::default());

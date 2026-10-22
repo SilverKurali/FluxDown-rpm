@@ -259,12 +259,15 @@ internal class NewDownloadState(
     companion object {
         private const val USER_AGENT = "User-Agent"
 
-        /** [external] 非空 = 外部唤起：链接与请求上下文按 [addExternal] 规则预填。 */
+        /**
+         * [external] 非空 = 外部唤起：链接与请求上下文按 [addExternal] 规则预填；保存目录先取命中分类配置的目录
+         * （同 agent 捕获确认弹层与免打扰路径），否则用主机默认目录。
+         */
         fun create(prefill: String, state: HostState, external: ExternalDownload? = null): NewDownloadState {
             val cfg = state.config
             return NewDownloadState(
                 prefill = prefill.trim(),
-                defaultSaveDir = cfg["default_save_dir"].orEmpty().trim(),
+                defaultSaveDir = external?.categorySaveDir(state) ?: cfg["default_save_dir"].orEmpty().trim(),
                 defaultQueueId = state.defaultQueueId(),
                 defaultSegments = cfg["default_segments"]?.toIntOrNull() ?: 0,
             ).also { form -> external?.let(form::addExternal) }

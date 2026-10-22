@@ -285,7 +285,13 @@ final class DownloadsModel {
             switch task.status {
             case .paused, .failed: caps.resumeIds.append(task.taskId)
             case .downloading, .pending, .preparing: caps.pauseIds.append(task.taskId)
-            case .completed, .unknown: break
+            case .completed:
+                if task.isSeeding {
+                    caps.pauseIds.append(task.taskId)
+                } else if task.canResumeSeeding {
+                    caps.resumeIds.append(task.taskId)
+                }
+            case .unknown: break
             }
             if task.status != .completed, task.status != .unknown { caps.moveIds.append(task.taskId) }
         }

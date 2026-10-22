@@ -26,8 +26,15 @@ const custom = (
   ...patch,
 })
 
-const view = (n: number, name: string, state: TaskState, source: 'local' | 'remote', queueId: string, toDevice: string) =>
-  ({ key: `${source}:${n}`, name, state, source, queueId, toDevice }) as unknown as DownloadTaskView
+const view = (
+  n: number,
+  name: string,
+  state: TaskState,
+  source: 'local' | 'remote',
+  queueId: string,
+  toDevice: string,
+  seedingStatus = 0,
+) => ({ key: `${source}:${n}`, name, state, source, queueId, toDevice, seedingStatus, fileMissing: false }) as unknown as DownloadTaskView
 
 describe('SidebarCounts', () => {
   // 重复 id、扩展名重叠、正则、other：一次扫描必须与逐项 filterMatches 计数相同。
@@ -52,6 +59,7 @@ describe('SidebarCounts', () => {
           n % 5 === 0 ? 'remote' : 'local',
           n % 3 === 0 ? 'main' : 'later',
           `dev${n % 4}`,
+          (n * 3) % 9,
         ),
       )
     }

@@ -14,9 +14,10 @@ use fluxdown_protocol::{
 };
 
 use crate::model::{
-    CategoryIndex, DownloadTaskView, TaskState, TaskStore,
+    CategoryIndex, DownloadTaskView, TaskStore,
     devices::{DeviceEntry, local_device_id, other_devices},
     file_conflict::FileConflictSet,
+    group_tree::{GroupAggregate, GroupMeta},
 };
 
 /// 本机偏好：新建下载对话框上次使用的保存目录（设备本地，不进云同步）。
@@ -328,18 +329,12 @@ pub(crate) enum ResumeTargets {
     None,
 }
 
-/// 任务组聚合（由任务行 + `snapshot.daemon.groups` 计算）。
+/// 任务组聚合（由任务行 + `snapshot.daemon.groups` 计算，覆盖组内全部本地成员）。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct GroupSummary {
     pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) origin_url: String,
-    pub(crate) save_dir: String,
-    pub(crate) total: usize,
-    pub(crate) completed: usize,
-    pub(crate) failed: usize,
-    pub(crate) downloading: usize,
-    pub(crate) progress: f32,
+    pub(crate) meta: GroupMeta,
+    pub(crate) aggregate: GroupAggregate,
 }
 
 pub struct DownloadsController {
@@ -347,7 +342,8 @@ pub struct DownloadsController {
     local: Vec<TaskDto>,
     remote: Vec<RemoteTaskDto>,
     store: Rc<TaskStore>,
-    live_speeds: HashMap<String, i64>,
+    /// 任务实时速度 `(下载, 上传)`（字节/秒）。
+    live_speeds: HashMap<String, (i64, i64)>,
     task_runtime: BTreeMap<String, Rc<TaskRuntimeDto>>,
     boosted: Option<String>,
     /// 引擎待启动队列排序键（task_id → `QueuePositionDto::order`）。行里存键，智能排序的排队档
@@ -560,6 +556,20 @@ impl DownloadsController {
         &self.group_summaries
     }
 
+    /// 单个任务组的聚合（不走缓存，只扫一遍本地任务；停靠面板渲染用）。
+    pub(crate) fn group_summary(&self, group_id: &str) -> Option<GroupSummary> {
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.group_id == group_id)?;
+        let local = self.store.local();
+        Some(GroupSummary {
+            id: group.group_id.clone(),
+            meta: GroupMeta::from_dto(group),
+            aggregate: GroupAggregate::of(local.iter().filter(|task| task.group_id == group_id)),
+        })
+    }
+
     /// 本机的云设备 id（未登录 / 名册未就绪为 `None`）。
     #[must_use]
     pub(crate) fn local_device_id(&self) -> Option<String> {
@@ -605,18 +615,22 @@ impl DownloadsController {
     }
 
     /// 状态栏「全部暂停」是否有作用对象：与 daemon `PauseAll` 同判定（等待 / 下载中 /
-    /// 准备中，即 status 0 / 1 / 5 的本地任务）。
+    /// 准备中，即 status 0 / 1 / 5 的本地任务），另含做种中（status 3 且 seeding_status 1 / 8）的任务。
     #[must_use]
     pub(crate) fn has_pausable_tasks(&self) -> bool {
         self.store.pausable_count() > 0
     }
 
     /// 状态栏「全部开始」的作用对象：与引擎 `eligible_resume_task_ids` 同判定——
-    /// 已暂停（status 2）且所在队列运行中；队列不在快照里（孤儿）视作运行中。
+    /// 已暂停（status 2）且所在队列运行中；队列不在快照里（孤儿）视作运行中；
+    /// 另含用户停止做种（status 3、seeding_status 4）且产物仍在的任务（不受队列约束）。
     /// 停止队列内的暂停任务由「启动队列」恢复，不计入，但单独报告以便界面说明原因。
     /// 按存储里增量维护的「各队列暂停数」判定，不随任务数扫描。
     #[must_use]
     pub(crate) fn resume_targets(&self) -> ResumeTargets {
+        if self.store.resumable_seed_count() > 0 {
+            return ResumeTargets::Some;
+        }
         let mut held = false;
         for queue_id in self.store.paused_by_queue().keys() {
             let running = self
@@ -891,6 +905,7 @@ impl DownloadsController {
                 speed,
                 error_message,
                 uploaded_bytes,
+                upload_speed,
                 seeding_status,
                 ..
             }) => {
@@ -899,8 +914,15 @@ impl DownloadsController {
                     self.remove_tasks(std::slice::from_ref(task_id));
                     return true;
                 }
-                self.live_speeds
-                    .insert(task_id.clone(), if *status == 1 { *speed } else { 0 });
+                let upload = if matches!(*status, 1 | 3) {
+                    *upload_speed
+                } else {
+                    0
+                };
+                self.live_speeds.insert(
+                    task_id.clone(),
+                    (if *status == 1 { *speed } else { 0 }, upload),
+                );
                 let Some(ix) = self.store.find_local(task_id) else {
                     return false;
                 };
@@ -1021,13 +1043,14 @@ impl DownloadsController {
     }
 
     fn view_of(&self, task: &TaskDto) -> DownloadTaskView {
+        let live = self.live_speeds.get(&task.task_id).copied();
         let mut view = DownloadTaskView::local(
             task,
-            self.live_speeds.get(&task.task_id).copied(),
+            live.map(|(download, _)| download),
             self.boosted.as_deref() == Some(task.task_id.as_str()),
         );
+        view.upload_speed_bytes_per_second = live.map_or(0, |(_, upload)| upload.max(0) as u64);
         view.runtime = self.task_runtime.get(&task.task_id).cloned();
-        view.queue_key = self.queue_keys.get(&task.task_id).copied();
         view.runtime_connected = !self.stale;
         view.conflict_pending = self.conflicts.contains_task(&task.task_id);
         view
@@ -1209,46 +1232,26 @@ fn queue_key_map(positions: &[fluxdown_protocol::QueuePositionDto]) -> HashMap<S
 }
 
 fn compute_group_summaries(groups: &[GroupDto], rows: &[DownloadTaskView]) -> Vec<GroupSummary> {
-    let mut summaries: Vec<GroupSummary> = groups
+    let index: HashMap<&str, usize> = groups
         .iter()
-        .map(|group| GroupSummary {
-            id: group.group_id.clone(),
-            name: group.name.clone(),
-            origin_url: group.source_url.clone(),
-            save_dir: group.save_dir.clone(),
-            ..GroupSummary::default()
-        })
+        .enumerate()
+        .map(|(ix, group)| (group.group_id.as_str(), ix))
         .collect();
-    let mut totals: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut members: Vec<Vec<&DownloadTaskView>> = vec![Vec::new(); groups.len()];
     for row in rows.iter().filter(|row| !row.group_id.is_empty()) {
-        let Some(summary) = summaries
-            .iter_mut()
-            .find(|summary| summary.id == row.group_id)
-        else {
-            continue;
-        };
-        summary.total += 1;
-        match row.state {
-            TaskState::Completed => summary.completed += 1,
-            TaskState::Failed => summary.failed += 1,
-            TaskState::Downloading => summary.downloading += 1,
-            TaskState::Pending | TaskState::Paused => {}
+        if let Some(&ix) = index.get(row.group_id.as_str()) {
+            members[ix].push(row);
         }
-        let entry = totals.entry(row.group_id.clone()).or_default();
-        entry.0 += row.downloaded_bytes;
-        entry.1 += row.size_bytes;
     }
-    for summary in &mut summaries {
-        let (downloaded, total) = totals.get(&summary.id).copied().unwrap_or((0, 0));
-        summary.progress = if total > 0 {
-            (downloaded as f64 / total as f64).clamp(0.0, 1.0) as f32
-        } else if summary.total > 0 {
-            summary.completed as f32 / summary.total as f32
-        } else {
-            0.0
-        };
-    }
-    summaries
+    groups
+        .iter()
+        .zip(members)
+        .map(|(group, members)| GroupSummary {
+            id: group.group_id.clone(),
+            meta: GroupMeta::from_dto(group),
+            aggregate: GroupAggregate::of(members),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1294,7 +1297,7 @@ mod tests {
                 ..Default::default()
             },
         ));
-        controller.live_speeds.insert("a".to_owned(), 100);
+        controller.live_speeds.insert("a".to_owned(), (100, 0));
         let generation = controller.store.generation();
         assert!(!controller.apply_daemon_event(&snapshot(vec![active.clone(), task("b")])));
         assert_eq!(controller.store.generation(), generation);
@@ -1509,6 +1512,40 @@ mod tests {
             with_status("orphan", 2, "gone"),
         ]));
         assert!(controller.has_pausable_tasks());
+        assert_eq!(controller.resume_targets(), ResumeTargets::Some);
+        // 做种中（status 3 + seeding_status 1 / 8）可暂停；用户停止做种（4）且文件在则「全部开始」
+        // 有对象，即使其余暂停任务都在停止队列里；停止做种但文件丢失不计入。
+        let with_seeding = |id: &str, seeding_status: i32, file_missing: bool| {
+            let mut dto = with_status(id, 3, "main");
+            dto.seeding_status = seeding_status;
+            dto.file_missing = file_missing;
+            dto
+        };
+        controller.apply_daemon_event(&snapshot(vec![
+            with_status("held", 2, "stopped"),
+            with_seeding("seed", 1, false),
+        ]));
+        assert!(controller.has_pausable_tasks());
+        assert_eq!(
+            controller.resume_targets(),
+            ResumeTargets::OnlyInStoppedQueues
+        );
+        controller.apply_daemon_event(&snapshot(vec![
+            with_status("held", 2, "stopped"),
+            with_seeding("queued", 8, false),
+            with_seeding("ratio", 2, false),
+            with_seeding("missing", 4, true),
+        ]));
+        assert!(controller.has_pausable_tasks());
+        assert_eq!(
+            controller.resume_targets(),
+            ResumeTargets::OnlyInStoppedQueues
+        );
+        controller.apply_daemon_event(&snapshot(vec![
+            with_status("held", 2, "stopped"),
+            with_seeding("stopped", 4, false),
+        ]));
+        assert!(!controller.has_pausable_tasks());
         assert_eq!(controller.resume_targets(), ResumeTargets::Some);
     }
 

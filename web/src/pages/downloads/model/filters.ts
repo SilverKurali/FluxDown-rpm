@@ -1,19 +1,23 @@
 // 侧栏选中项与状态筛选（移植 crates/downloads/src/model/mod.rs）。
 
 import type { CategoryIndex } from './categories'
+import { isSeeding } from './task'
 import type { DownloadTaskView, TaskState } from './task'
 
-export type DownloadStatusFilter = 'all' | 'completed' | 'incomplete' | 'failed' | 'paused'
+export type DownloadStatusFilter = 'all' | 'completed' | 'seeding' | 'incomplete' | 'failed' | 'paused'
 
-/** 侧栏状态文件夹顺序。 */
-export const STATUS_FILTERS: readonly DownloadStatusFilter[] = ['all', 'incomplete', 'completed', 'failed', 'paused']
+/** 侧栏状态文件夹顺序（「做种中」紧随「已完成」）。 */
+export const STATUS_FILTERS: readonly DownloadStatusFilter[] = ['all', 'incomplete', 'completed', 'seeding', 'failed', 'paused']
 
-export function statusMatches(filter: DownloadStatusFilter, state: TaskState): boolean {
+/** `seeding` = 任务是否处于做种中（{@link isSeeding}）；做种任务同时属于「已完成」。 */
+export function statusMatches(filter: DownloadStatusFilter, state: TaskState, seeding: boolean): boolean {
   switch (filter) {
     case 'all':
       return true
     case 'completed':
       return state === 'completed'
+    case 'seeding':
+      return seeding
     // 下载中筛选包含下载中与等待中的任务。
     case 'incomplete':
       return state === 'downloading' || state === 'pending'
@@ -34,7 +38,8 @@ export const FILTER_ALL: DownloadFilter = { status: 'all', category: null }
 
 export function filterMatches(filter: DownloadFilter, view: DownloadTaskView, categories: CategoryIndex): boolean {
   return (
-    statusMatches(filter.status, view.state) && (filter.category === null || categories.matches(filter.category, view))
+    statusMatches(filter.status, view.state, isSeeding(view)) &&
+    (filter.category === null || categories.matches(filter.category, view))
   )
 }
 

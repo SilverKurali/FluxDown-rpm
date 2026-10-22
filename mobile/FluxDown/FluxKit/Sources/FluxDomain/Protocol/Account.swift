@@ -593,6 +593,8 @@ public enum AccountRules {
         case "pairingSignatureInvalid": "errReasonPairingSignatureInvalid"
         case "pairingSelf": "errReasonPairingSelf"
         case "pairingVersionMismatch": "errReasonPairingVersionMismatch"
+        case "pairingTimeout": "errReasonPairingTimeout"
+        case "peerClockSkew": "errReasonPeerClockSkew"
         case "peerNotPaired": "errReasonPeerNotPaired"
         case "peerOffline": "errReasonPeerOffline"
         case "peerOutdated": "errReasonPeerOutdated"
@@ -632,7 +634,8 @@ public enum AccountRules {
         case .pairing:
             switch error.code {
             case .invalidArgument: return "localPairingAddressInvalid"
-            default: if network { return "errReasonPairingPeerUnreachable" }
+            // 不带 reason 的 `unavailable` 是本机服务 / 会话问题，不是「对端地址不可达」（那种情形 agent 会带 `pairingPeerUnreachable`）。
+            default: break
             }
         case .general:
             break

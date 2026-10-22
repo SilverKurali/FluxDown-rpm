@@ -107,6 +107,8 @@ pub enum ErrorReason {
     PairingCodeInvalid,
     /// 局域网配对：配对会话不存在或已过期。
     PairingSessionExpired,
+    /// 局域网配对：对端用户在核验窗口内没有表态（等待超时）。
+    PairingTimeout,
     /// 局域网配对：无法连接对端地址。
     PairingPeerUnreachable,
     /// 局域网配对：对端地址不是 FluxDown 服务（如反代返回了非 FluxDown 响应、协议 / 端口不符）。
@@ -127,6 +129,8 @@ pub enum ErrorReason {
     PeerOffline,
     /// 局域网互联：对端 FluxDown 版本过旧，数据面链路协议不兼容（两端需升级）。
     PeerOutdated,
+    /// 局域网互联：对端拒绝了本机请求，因为两台设备的系统时钟偏差超过容忍窗口。
+    PeerClockSkew,
     /// 局域网互联：本机直连服务未启动（初始化失败或宿主不支持）。
     LinkUnavailable,
     /// Doctor 修复：用户取消了系统管理员授权对话框（UAC / polkit / macOS 授权），未做任何更改。

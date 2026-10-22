@@ -11,6 +11,7 @@ import { confirmDialog, toast } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
 import { rpcErrorKind, rpcErrorText } from '../../../lib/rpcErrorText'
 import { planTaskCommand } from './batchPlan'
+import { folderAnchorMember } from './groupTree'
 import { PLUGIN_ERROR_PREFIX, shareUrl } from './task'
 import type { DownloadTaskView } from './task'
 
@@ -277,4 +278,14 @@ export function copySourceLink(url: string): void {
   if (url === '') return
   copyText(url)
   toast.key('urlCopied', 'success')
+}
+
+/** 「打开组文件夹」：agent 与浏览器同机时可用（与「在文件夹中显示」同一能力）。 */
+export const canOpenGroupFolder = (): boolean => hostOpensTaskFiles()
+
+/** 打开任务组文件夹：定位一个位于组根目录的成员，没有则第一个成员。`views` 为全部视图（取该组成员）。 */
+export async function openGroupFolder(views: readonly DownloadTaskView[], groupId: string, groupDir: string): Promise<boolean> {
+  const members = views.filter((view) => view.source === 'local' && view.groupId === groupId)
+  const anchor = folderAnchorMember(members, groupDir)
+  return anchor === undefined ? false : revealTaskFile(anchor.taskId)
 }

@@ -111,10 +111,9 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --check
 
-      # native/server 已冻结（不构建、不接收改动），不进门禁。测试代码同样过 clippy：
-      # 测试里允许 unwrap/expect（clippy.toml），其余 lint 一视同仁。
+      # 测试代码同样过 clippy：测试里允许 unwrap/expect（clippy.toml），其余 lint 一视同仁。
       - name: cargo clippy
-        run: cargo clippy --workspace --exclude fluxdown_server --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # 插件桌面类型由 gpui-shell 组件目录 + fluxdown 宿主模块生成，入库副本必须与生成结果一致。
       - name: plugin desktop typings drift

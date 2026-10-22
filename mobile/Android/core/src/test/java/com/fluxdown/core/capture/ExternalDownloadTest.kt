@@ -137,6 +137,21 @@ class ExternalDownloadTest {
         assertNull(SilentCapture.plan(video, state(mapOf(SilentCapture.SILENT_PREF to true), config = emptyMap())))
     }
 
+    @Test fun categorySaveDirFollowsRulesAndIgnoresUnconfiguredDirs() {
+        val categories = listOf(
+            mapOf("id" to "builtin_video", "name" to "", "extensions" to listOf("mp4"), "position" to 1,
+                "isBuiltin" to true, "builtinType" to "video", "saveDir" to " /videos "),
+            mapOf("id" to "builtin_archive", "name" to "", "extensions" to listOf("zip"), "position" to 2,
+                "isBuiltin" to true, "builtinType" to "archive", "saveDir" to ""),
+        )
+        val configured = state(mapOf("custom_categories" to categories))
+        // 命中且配置了目录 → 该目录（修剪空白）；确认弹层与免打扰共用
+        assertEquals("/videos", video.categorySaveDir(configured))
+        // 命中但未配置目录 / 未命中任何分类 → null，由调用方回落到默认目录
+        assertNull(ExternalDownload(url = "https://x.test/a.zip").categorySaveDir(configured))
+        assertNull(video.categorySaveDir(state(emptyMap())))
+    }
+
     @Test fun silentPlanUsesHostDefaultsAndBuildsCreateParams() {
         val prefs = mapOf(SilentCapture.SILENT_PREF to true, SilentCapture.SKIP_SELECTION_PREF to true)
         val plan = SilentCapture.plan(video, state(prefs, mapOf("default_save_dir" to "/dl", "default_segments" to "16")))!!

@@ -6,19 +6,23 @@
 import type { CategoryIndex } from './categories'
 import { LOCAL_DEVICE, STATUS_FILTERS, statusMatches } from './filters'
 import type { DownloadFilter } from './filters'
+import { isSeeding } from './task'
 import type { DownloadTaskView, TaskState } from './task'
 
 /** 任务状态命中的状态桶下标（`STATUS_FILTERS` 的下标）。 */
-const slotsOf = (state: TaskState): readonly number[] =>
-  STATUS_FILTERS.flatMap((status, slot) => (statusMatches(status, state) ? [slot] : []))
+const slotsOf = (state: TaskState, seeding: boolean): readonly number[] =>
+  STATUS_FILTERS.flatMap((status, slot) => (statusMatches(status, state, seeding) ? [slot] : []))
 
 const STATE_SLOTS: Record<TaskState, readonly number[]> = {
-  pending: slotsOf('pending'),
-  downloading: slotsOf('downloading'),
-  paused: slotsOf('paused'),
-  completed: slotsOf('completed'),
-  failed: slotsOf('failed'),
+  pending: slotsOf('pending', false),
+  downloading: slotsOf('downloading', false),
+  paused: slotsOf('paused', false),
+  completed: slotsOf('completed', false),
+  failed: slotsOf('failed', false),
 }
+
+/** 做种中的任务（必为已完成）额外命中「做种中」桶。 */
+const SEEDING_SLOTS: readonly number[] = slotsOf('completed', true)
 
 export class SidebarCounts {
   /** 不限分类时各状态的任务数。 */
@@ -58,7 +62,7 @@ export class SidebarCounts {
   }
 
   private tally(view: DownloadTaskView, delta: 1 | -1): void {
-    const slots = STATE_SLOTS[view.state]
+    const slots = isSeeding(view) ? SEEDING_SLOTS : STATE_SLOTS[view.state]
     for (const slot of slots) this.byStatus[slot] = (this.byStatus[slot] as number) + delta
     this.categories.forEachMatch(view, (categoryId) => {
       let buckets = this.byCategory.get(categoryId)

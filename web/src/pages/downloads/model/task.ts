@@ -49,6 +49,8 @@ export interface DownloadTaskView {
   downloadedBytes: number
   /** 字节/秒；未收到实时采样为 null。 */
   speed: number | null
+  /** 做种 / 下载中任务的上传速率（字节/秒）；未收到实时采样（或远程任务）为 null。 */
+  uploadSpeed: number | null
   runtime: TaskRuntimeDto | undefined
   /** daemon 连接就绪（快照未过期）。 */
   runtimeConnected: boolean
@@ -140,6 +142,25 @@ export function stateOfStatus(status: number): TaskState {
   }
 }
 
+/** 做种相关判定所需的视图字段。 */
+type SeedingFacts = Pick<DownloadTaskView, 'source' | 'state' | 'seedingStatus' | 'fileMissing'>
+
+/** 本地已完成任务正在做种或排队等做种槽（seeding_status 1 / 8）；归入「做种中」文件夹，可暂停。 */
+export function isSeeding(view: Pick<SeedingFacts, 'source' | 'state' | 'seedingStatus'>): boolean {
+  return view.source === 'local' && view.state === 'completed' && (view.seedingStatus === 1 || view.seedingStatus === 8)
+}
+
+/** 本地已完成任务因停止原因（seeding_status 2..=7）未在做种且文件仍在：可恢复做种。其余完成态任务不可继续（#935）。 */
+export function canResumeSeeding(view: SeedingFacts): boolean {
+  return (
+    view.source === 'local' &&
+    view.state === 'completed' &&
+    view.seedingStatus >= 2 &&
+    view.seedingStatus <= 7 &&
+    !view.fileMissing
+  )
+}
+
 const REMOTE_STATUS: Record<RemoteTaskDto['status'], number> = {
   pending: 0,
   accepted: 0,
@@ -179,6 +200,7 @@ export function buildLocalView(
   queueKey: number | null,
   runtime: TaskRuntimeDto | undefined,
   runtimeConnected: boolean,
+  uploadSpeed: number | null = null,
 ): DownloadTaskView {
   const live = speed === null ? null : Math.max(0, speed)
   const base = compute(task.fileName, task.totalBytes, task.downloadedBytes, live)
@@ -191,6 +213,7 @@ export function buildLocalView(
     sizeBytes: base.sizeBytes,
     downloadedBytes: base.downloaded,
     speed: live,
+    uploadSpeed: uploadSpeed === null ? null : Math.max(0, uploadSpeed),
     runtime,
     runtimeConnected,
     etaSeconds: base.etaSeconds,
@@ -235,6 +258,7 @@ export function buildRemoteView(task: RemoteTaskDto): DownloadTaskView {
     sizeBytes: base.sizeBytes,
     downloadedBytes: base.downloaded,
     speed,
+    uploadSpeed: null,
     runtime: undefined,
     runtimeConnected: false,
     etaSeconds: base.etaSeconds,

@@ -7,6 +7,14 @@ pub(crate) const SEARCH_SHORTCUT_HINT: &str = "⌘F";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const SEARCH_SHORTCUT_HINT: &str = "Ctrl+F";
 
+/// 组计数行一段的语气：下载中用强调色，失败用破坏色，其余为三级文字。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroupCountTone {
+    Plain,
+    Active,
+    Failed,
+}
+
 #[derive(Clone)]
 pub(crate) struct DownloadStrings {
     pub(crate) category_archive: SharedString,
@@ -73,13 +81,14 @@ pub(crate) struct DownloadStrings {
     pub(crate) status_error: SharedString,
     pub(crate) status_incomplete: SharedString,
     pub(crate) status_paused: SharedString,
+    pub(crate) status_seeding: SharedString,
+    pub(crate) seeding_status_queued: SharedString,
     pub(crate) status_pending: SharedString,
     pub(crate) today: SharedString,
     pub(crate) yesterday: SharedString,
     pub(crate) this_week: SharedString,
     pub(crate) this_month: SharedString,
     pub(crate) older: SharedString,
-    pub(crate) ungrouped: SharedString,
     pub(crate) site_bt: SharedString,
     pub(crate) ignore_plugin_retry: SharedString,
     pub(crate) ignore_plugin_retry_title: SharedString,
@@ -132,6 +141,20 @@ pub(crate) struct DownloadStrings {
     pub(crate) group_delete_with_files: SharedString,
     group_delete_confirm_with_file: SharedString,
     pub(crate) open_group_in_window: SharedString,
+    group_items_count: SharedString,
+    group_done_count: SharedString,
+    group_downloading_count: SharedString,
+    group_pending_count: SharedString,
+    group_paused_count: SharedString,
+    group_failed_count: SharedString,
+    group_done_of_total: SharedString,
+    group_eta_remaining: SharedString,
+    group_dir_count: SharedString,
+    group_detail_subtitle: SharedString,
+    pub(crate) group_detail_source: SharedString,
+    pub(crate) group_detail_save_dir: SharedString,
+    pub(crate) group_detail_created_at: SharedString,
+    pub(crate) group_detail_queue: SharedString,
     pub(crate) search_tasks_placeholder: SharedString,
     pub(crate) unsupported_drop_hint: SharedString,
     pub(crate) sidebar_status: SharedString,
@@ -232,13 +255,14 @@ impl DownloadStrings {
             status_error: shared(translator.text(keys::STATUS_ERROR)),
             status_incomplete: shared(translator.text("tabDownloading")),
             status_paused: shared(translator.text(keys::STATUS_PAUSED)),
+            status_seeding: shared(translator.text("statusSeeding")),
+            seeding_status_queued: shared(translator.text("seedingStatusQueued")),
             status_pending: shared(translator.text("statusPending")),
             today: shared(translator.text(keys::TODAY)),
             yesterday: shared(translator.text("yesterday")),
             this_week: shared(translator.text("thisWeek")),
             this_month: shared(translator.text("thisMonth")),
             older: shared(translator.text("older")),
-            ungrouped: shared(translator.text("ungroupedTasks")),
             site_bt: shared(translator.text("viewSiteBt")),
             ignore_plugin_retry: shared(translator.text("taskIgnorePluginRetry")),
             ignore_plugin_retry_title: shared(translator.text("taskIgnorePluginRetryTitle")),
@@ -280,6 +304,20 @@ impl DownloadStrings {
             group_delete_with_files: shared(translator.text("groupDeleteWithFiles")),
             group_delete_confirm_with_file: shared(translator.text("deleteConfirmDescWithFile")),
             open_group_in_window: shared(translator.text("openGroupInWindowAction")),
+            group_items_count: shared(translator.text("groupItemsCount")),
+            group_done_count: shared(translator.text("groupDoneCount")),
+            group_downloading_count: shared(translator.text("groupDownloadingCount")),
+            group_pending_count: shared(translator.text("groupPendingCount")),
+            group_paused_count: shared(translator.text("groupPausedCount")),
+            group_failed_count: shared(translator.text("groupFailedCount")),
+            group_done_of_total: shared(translator.text("groupDoneOfTotal")),
+            group_eta_remaining: shared(translator.text("groupEtaRemaining")),
+            group_dir_count: shared(translator.text("groupDirCount")),
+            group_detail_subtitle: shared(translator.text("groupDetailSubtitle")),
+            group_detail_source: shared(translator.text("groupDetailSource")),
+            group_detail_save_dir: shared(translator.text("groupDetailSaveDir")),
+            group_detail_created_at: shared(translator.text("groupDetailCreatedAt")),
+            group_detail_queue: shared(translator.text("groupDetailQueue")),
             search_tasks_placeholder: shared(translator.text("searchTasksPlaceholder")),
             unsupported_drop_hint: shared(translator.text("unsupportedDropHint")),
             sidebar_status: shared(translator.text(keys::SIDEBAR_STATUS)),
@@ -353,6 +391,78 @@ impl DownloadStrings {
         )
     }
 
+    /// 组计数行各段（调用方以 ` · ` 连接）：总数恒在，其余为 0 的段省略；剩余时间只在
+    /// 一天以内时给出。
+    pub(crate) fn group_count_segments(
+        &self,
+        counts: &crate::model::group_tree::GroupCounts,
+        eta_seconds: Option<u64>,
+    ) -> Vec<(GroupCountTone, SharedString)> {
+        let count = |template: &SharedString, value: usize| {
+            SharedString::from(template.replace("{n}", &value.to_string()))
+        };
+        let mut segments = vec![(
+            GroupCountTone::Plain,
+            count(&self.group_items_count, counts.total),
+        )];
+        for (value, template, tone) in [
+            (counts.done, &self.group_done_count, GroupCountTone::Plain),
+            (
+                counts.downloading,
+                &self.group_downloading_count,
+                GroupCountTone::Active,
+            ),
+            (
+                counts.pending,
+                &self.group_pending_count,
+                GroupCountTone::Plain,
+            ),
+            (
+                counts.paused,
+                &self.group_paused_count,
+                GroupCountTone::Plain,
+            ),
+            (
+                counts.failed,
+                &self.group_failed_count,
+                GroupCountTone::Failed,
+            ),
+        ] {
+            if value > 0 {
+                segments.push((tone, count(template, value)));
+            }
+        }
+        if let Some(eta) = eta_seconds.filter(|seconds| *seconds <= 86_400) {
+            segments.push((
+                GroupCountTone::Plain,
+                SharedString::from(
+                    self.group_eta_remaining
+                        .replace("{eta}", &self.format_eta(eta)),
+                ),
+            ));
+        }
+        segments
+    }
+
+    /// `{done}/{total}`。
+    pub(crate) fn format_group_done_of_total(&self, done: usize, total: usize) -> SharedString {
+        SharedString::from(
+            self.group_done_of_total
+                .replace("{done}", &done.to_string())
+                .replace("{total}", &total.to_string()),
+        )
+    }
+
+    /// 目录行文件数：`{count} 个文件`（目录大小在「大小」列）。
+    pub(crate) fn format_group_dir_count(&self, count: usize) -> SharedString {
+        SharedString::from(self.group_dir_count.replace("{count}", &count.to_string()))
+    }
+
+    /// 组概览副标题：`任务组 · {status}`。
+    pub(crate) fn format_group_subtitle(&self, status: &str) -> SharedString {
+        SharedString::from(self.group_detail_subtitle.replace("{status}", status))
+    }
+
     pub(crate) fn state_label(&self, state: crate::model::TaskState) -> SharedString {
         match state {
             crate::model::TaskState::Pending => self.status_pending.clone(),
@@ -370,6 +480,13 @@ impl DownloadStrings {
             self.status_file_missing.clone()
         } else if task.state == crate::model::TaskState::Pending && task.preparing {
             self.metadata_loading.clone()
+        } else if task.is_seeding() {
+            // seeding_status 8 = 排队等待做种名额；1 = 做种中。
+            if task.seeding_status == 8 {
+                self.seeding_status_queued.clone()
+            } else {
+                self.status_seeding.clone()
+            }
         } else {
             self.state_label(task.state)
         }
@@ -869,6 +986,9 @@ pub(crate) fn error_text(
         ErrorReason::PasswordChanged => Some("accountSessionRevokedPasswordChanged"),
         ErrorReason::PeerNotPaired => Some("errReasonPeerNotPaired"),
         ErrorReason::PeerOffline => Some("errReasonPeerOffline"),
+        ErrorReason::PeerOutdated => Some("errReasonPeerOutdated"),
+        ErrorReason::LinkUnavailable => Some("errReasonLinkUnavailable"),
+        ErrorReason::PeerClockSkew => Some("errReasonPeerClockSkew"),
         _ => None,
     });
     let key = reason_key.unwrap_or(match error.code {

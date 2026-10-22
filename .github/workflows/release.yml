@@ -76,7 +76,6 @@ jobs:
   #   web/**、native/{agent,daemon,protocol,engine-protocol,api}/** → headless 服务器（server，Docker 镜像 + 多平台二进制）；
   #                            agent/daemon/protocol 同时属于 GPUI 桌面客户端（app）
   #   crates/**              → GPUI 桌面客户端（app）
-  #   native/server/**       → 已冻结的旧 headless 宿主，不再触发任何构建
   #   native/engine/**       → 桌面客户端 + 服务器 + 移动端（共享下载引擎）
   #   native/mobile/**、mobile/Android/** → 原生 Android 移动端资产
   #   docker/**              → 服务器（部署文件变更需重发镜像）
@@ -275,8 +274,6 @@ jobs:
               case "$f" in
                 fluxDown/*)          EXTENSION=true ;;
                 web/*)               SERVER=true ;;
-                # 旧 headless 宿主 native/server 已冻结，不再触发任何组件
-                native/server/*) ;;
                 native/cli/*)        CLI=true ;;
                 native/api/*)        APP=true; SERVER=true; CLI=true; MOBILE=true ;;
                 native/protocol/*)   APP=true; SERVER=true; CLI=true; MOBILE=true ;;

@@ -69,6 +69,7 @@ pub(crate) struct TaskStore {
     /// 本地「全部暂停」作用对象数（等待 / 下载中 / 准备中）与各队列里的暂停任务数，随行变更
     /// 增量维护。
     pausable: Cell<usize>,
+    resumable_seeds: Cell<usize>,
     paused_by_queue: RefCell<HashMap<String, usize>>,
 }
 
@@ -231,6 +232,11 @@ impl TaskStore {
         self.pausable.get()
     }
 
+    /// 本地「全部开始」会重新启动的用户停止做种任务数。
+    pub(crate) fn resumable_seed_count(&self) -> usize {
+        self.resumable_seeds.get()
+    }
+
     /// 各队列里的暂停任务数（只含非零项）。
     pub(crate) fn paused_by_queue(&self) -> Ref<'_, HashMap<String, usize>> {
         self.paused_by_queue.borrow()
@@ -261,17 +267,19 @@ impl TaskStore {
         Ref::map(self.bound_counts.borrow(), |bound| &bound.counts)
     }
 
+    fn adjust(cell: &Cell<usize>, add: bool) {
+        let count = cell.get();
+        cell.set(if add {
+            count + 1
+        } else {
+            count.saturating_sub(1)
+        });
+    }
+
     /// 一行进出存储时更新增量聚合（暂停可作用数、队列暂停数、已绑定的侧栏计数）。
     fn account(&self, row: &DownloadTaskView, add: bool) {
         match row.state {
-            TaskState::Pending | TaskState::Downloading => {
-                let count = self.pausable.get();
-                self.pausable.set(if add {
-                    count + 1
-                } else {
-                    count.saturating_sub(1)
-                });
-            }
+            TaskState::Pending | TaskState::Downloading => Self::adjust(&self.pausable, add),
             TaskState::Paused => {
                 let mut paused = self.paused_by_queue.borrow_mut();
                 if add {
@@ -283,7 +291,14 @@ impl TaskStore {
                     }
                 }
             }
-            TaskState::Completed | TaskState::Failed => {}
+            TaskState::Completed => {
+                if row.is_seeding() {
+                    Self::adjust(&self.pausable, add);
+                } else if row.is_resume_all_seed() {
+                    Self::adjust(&self.resumable_seeds, add);
+                }
+            }
+            TaskState::Failed => {}
         }
         let mut bound = self.bound_counts.borrow_mut();
         if let Some(categories) = bound.categories.clone() {
@@ -298,6 +313,7 @@ impl TaskStore {
     /// 整表替换后重建本地聚合；侧栏计数解绑，下次读取时按新表重算。
     fn rebuild_aggregates(&self, rows: &[DownloadTaskView]) {
         self.pausable.set(0);
+        self.resumable_seeds.set(0);
         self.paused_by_queue.borrow_mut().clear();
         *self.bound_counts.borrow_mut() = BoundCounts::default();
         for row in rows {
@@ -512,6 +528,8 @@ fn same_view_fields(left: &DownloadTaskView, right: &DownloadTaskView) -> bool {
         && left.created_at_secs == right.created_at_secs
         && left.group_id == right.group_id
         && left.to_device == right.to_device
+        && left.seeding_status == right.seeding_status
+        && left.file_missing == right.file_missing
 }
 
 #[cfg(test)]
@@ -534,7 +552,12 @@ mod tests {
             "checksum": ""
         }))
         .expect("task");
-        DownloadTaskView::local(&task, None, false)
+        let mut view = DownloadTaskView::local(&task, None, false);
+        // 由 id + 名称确定性地派生做种状态 / 文件丢失，覆盖 0..=8 各取值。
+        let hash = id.bytes().chain(name.bytes()).map(i32::from).sum::<i32>();
+        view.seeding_status = hash % 9;
+        view.file_missing = hash % 4 == 0;
+        view
     }
 
     fn assert_counts_match_rescan(store: &TaskStore, categories: &Rc<CategoryIndex>) {
@@ -576,8 +599,13 @@ mod tests {
         assert_eq!(
             store.pausable_count(),
             rows.iter()
-                .filter(|row| matches!(row.state, TaskState::Pending | TaskState::Downloading))
+                .filter(|row| row.is_seeding()
+                    || matches!(row.state, TaskState::Pending | TaskState::Downloading))
                 .count()
+        );
+        assert_eq!(
+            store.resumable_seed_count(),
+            rows.iter().filter(|row| row.is_resume_all_seed()).count()
         );
     }
 

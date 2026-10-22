@@ -1,6 +1,6 @@
 use std::{collections::HashSet, rc::Rc};
 
-use fluxdown_ui_components::{FluxIcon, SidebarState, sidebar_toggle_button};
+use fluxdown_ui_components::{SidebarState, sidebar_toggle_button};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -101,8 +101,8 @@ impl ShellRoute {
         }
     }
 
-    /// 创建插件视图路由（`id` 须以 `plugin:` 开头），标签为原文，图标固定为 Sparkles。
-    pub fn plugin(id: RouteId, label: SharedString, view: AnyView) -> Self {
+    /// 创建插件视图路由（`id` 须以 `plugin:` 开头），标签为原文，图标由 app 按插件声明给出。
+    pub fn plugin(id: RouteId, label: SharedString, icon: Icon, view: AnyView) -> Self {
         let button_id = SharedString::from(format!("activity-{}", id.as_str()));
         let tooltip_id = SharedString::from(format!("activity-{}-tooltip", id.as_str()));
         Self {
@@ -110,7 +110,7 @@ impl ShellRoute {
             button_id,
             tooltip_id,
             label: ShellLabel::Text(label),
-            icon: Icon::new(FluxIcon::Sparkles),
+            icon,
             view,
             title_bar: None,
             sidebar: None,
@@ -708,6 +708,7 @@ impl Render for ShellView {
 mod tests {
     use std::{cell::Cell, rc::Rc, sync::Arc};
 
+    use fluxdown_ui_components::FluxIcon;
     use fluxdown_ui_i18n::I18nCatalog;
     use gpui::{AppContext as _, Empty, TestApp};
     use serde_json::json;
@@ -729,7 +730,12 @@ mod tests {
     }
 
     fn route(cx: &mut App, id: &'static str) -> ShellRoute {
-        ShellRoute::plugin(RouteId::new(id), SharedString::new_static(id), view(cx))
+        ShellRoute::plugin(
+            RouteId::new(id),
+            SharedString::new_static(id),
+            Icon::new(FluxIcon::Sparkles),
+            view(cx),
+        )
     }
 
     fn route_ids(shell: &ShellView) -> Vec<String> {

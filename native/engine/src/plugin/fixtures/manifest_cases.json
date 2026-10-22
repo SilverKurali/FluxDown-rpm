@@ -4103,5 +4103,76 @@
    "page/b.js"
   ],
   "ok": false
+ },
+ {
+  "name": "view icon svg ok",
+  "manifest": {
+   "identity": "a@b",
+   "name": "N",
+   "version": "1.0.0",
+   "main": { "entry": "main.js" },
+   "contributes": {
+    "views": [{ "id": "v", "title": "T", "location": "activity", "icon": "icons/v.SVG" }]
+   }
+  },
+  "files": ["main.js", "icons/v.SVG"],
+  "ok": true,
+  "risk": "standard"
+ },
+ {
+  "name": "view icon not svg",
+  "manifest": {
+   "identity": "a@b",
+   "name": "N",
+   "version": "1.0.0",
+   "main": { "entry": "main.js" },
+   "contributes": {
+    "views": [{ "id": "v", "title": "T", "location": "activity", "icon": "icons/v.png" }]
+   }
+  },
+  "files": ["main.js", "icons/v.png"],
+  "ok": false
+ },
+ {
+  "name": "view icon traversal",
+  "manifest": {
+   "identity": "a@b",
+   "name": "N",
+   "version": "1.0.0",
+   "main": { "entry": "main.js" },
+   "contributes": {
+    "views": [{ "id": "v", "title": "T", "location": "activity", "icon": "../v.svg" }]
+   }
+  },
+  "files": ["main.js"],
+  "ok": false
+ },
+ {
+  "name": "view icon file missing",
+  "manifest": {
+   "identity": "a@b",
+   "name": "N",
+   "version": "1.0.0",
+   "main": { "entry": "main.js" },
+   "contributes": {
+    "views": [{ "id": "v", "title": "T", "location": "activity", "icon": "icons/v.svg" }]
+   }
+  },
+  "files": ["main.js"],
+  "ok": false
+ },
+ {
+  "name": "view icon not string",
+  "manifest": {
+   "identity": "a@b",
+   "name": "N",
+   "version": "1.0.0",
+   "main": { "entry": "main.js" },
+   "contributes": {
+    "views": [{ "id": "v", "title": "T", "location": "activity", "icon": 1 }]
+   }
+  },
+  "files": ["main.js"],
+  "ok": false
  }
 ]

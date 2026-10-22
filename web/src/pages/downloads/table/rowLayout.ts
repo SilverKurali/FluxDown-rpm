@@ -8,7 +8,7 @@ import { useMemo } from 'react'
 
 interface LayoutRow {
   key: string
-  type: 'task' | 'group'
+  type: string
 }
 
 export interface RowAccessors {
@@ -16,12 +16,12 @@ export interface RowAccessors {
   estimateSize: (index: number) => number
 }
 
-export function useRowAccessors(rows: readonly LayoutRow[], groupHeight: number, taskHeight: number): RowAccessors {
+export function useRowAccessors(rows: readonly LayoutRow[], bucketHeight: number, taskHeight: number): RowAccessors {
   return useMemo<RowAccessors>(
     () => ({
       getItemKey: (index) => rows[index]?.key ?? index,
-      estimateSize: (index) => (rows[index]?.type === 'group' ? groupHeight : taskHeight),
+      estimateSize: (index) => (rows[index]?.type === 'bucket' ? bucketHeight : taskHeight),
     }),
-    [rows, groupHeight, taskHeight],
+    [rows, bucketHeight, taskHeight],
   )
 }

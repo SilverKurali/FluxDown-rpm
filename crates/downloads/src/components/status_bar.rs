@@ -15,7 +15,7 @@ type NumberConfirm = Rc<dyn Fn(i64, &mut App)>;
 use fluxdown_protocol::ApplicationErrorCode;
 use fluxdown_ui_components::{
     ControlExt as _, DialogIntent, FluxIcon, dialog_footer, dialog_title, field_hint, form,
-    form_field, tabular_numbers, toolbar_action_button,
+    form_field, tabular_numbers, toolbar_action_button, tooltip_view,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -29,7 +29,6 @@ use gpui_component::{
     h_flex,
     input::{Input, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
-    tooltip::Tooltip,
 };
 
 use crate::{
@@ -658,7 +657,7 @@ impl DownloadView {
         div()
             .id(SharedString::from(format!("{id}-tooltip")))
             .flex_none()
-            .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
+            .tooltip(move |window, cx| tooltip_view(tooltip_label.clone(), window, cx))
             .child(button)
             .into_any_element()
     }

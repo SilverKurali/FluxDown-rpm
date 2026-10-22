@@ -14,12 +14,19 @@ import com.fluxdown.fluxui.data.FlowStripState
 
 /** 状态文件夹（ScopeTabs / Rail）；顺序即显示顺序。 */
 enum class StatusFolder {
-    All, Active, Completed, Failed, Paused;
+    All, Active, Completed, Seeding, Failed, Paused;
+
+    /** 本地任务归属：做种中 = 已完成且正在 / 排队做种（仍同时属于已完成，同 qBittorrent）。 */
+    fun accepts(task: Task): Boolean = when (this) {
+        Seeding -> task.isSeeding
+        else -> accepts(task.status)
+    }
 
     fun accepts(status: TaskStatus): Boolean = when (this) {
         All -> true
         Active -> status == TaskStatus.Pending || status == TaskStatus.Downloading || status == TaskStatus.Preparing
         Completed -> status == TaskStatus.Completed
+        Seeding -> false
         Failed -> status == TaskStatus.Failed
         Paused -> status == TaskStatus.Paused
     }
@@ -33,6 +40,7 @@ enum class StatusFolder {
         Active -> status == RemoteTaskStatus.Pending || status == RemoteTaskStatus.Accepted ||
             status == RemoteTaskStatus.Downloading || status is RemoteTaskStatus.Unknown
         Completed -> status == RemoteTaskStatus.Completed
+        Seeding -> false
         Failed -> status == RemoteTaskStatus.Failed || status == RemoteTaskStatus.Canceled
         Paused -> status == RemoteTaskStatus.Paused
     }

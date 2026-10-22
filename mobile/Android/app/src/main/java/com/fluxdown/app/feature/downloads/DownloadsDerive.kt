@@ -223,7 +223,7 @@ internal fun derive(input: DeriveInput, cache: DeriveCache, nowMs: Long, interac
 }
 
 private fun StatusFolder.accepts(it: DownloadItem): Boolean = when (it) {
-    is TaskItem -> accepts(it.task.status)
+    is TaskItem -> accepts(it.task)
     is RemoteItem -> accepts(it.task.status)
 }
 
@@ -374,7 +374,7 @@ private fun sectioned(rows: List<DownloadItem>, folder: StatusFolder, out: Mutab
         inflight.forEachIndexed { i, it -> out += rowEntry(it, RowZone.Flow, first = false, last = i == inflight.lastIndex, visible) }
     }
     if (history.isNotEmpty()) {
-        val named = folder.takeIf { it == StatusFolder.Completed || it == StatusFolder.Failed || it == StatusFolder.Paused }
+        val named = folder.takeIf { it == StatusFolder.Completed || it == StatusFolder.Seeding || it == StatusFolder.Failed || it == StatusFolder.Paused }
         out += HistoryHeaderEntry(history.size, named)
         history.forEachIndexed { i, it -> out += rowEntry(it, RowZone.History, first = i == 0, last = i == history.lastIndex, visible) }
     }

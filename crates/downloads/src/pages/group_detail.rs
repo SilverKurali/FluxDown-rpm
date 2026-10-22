@@ -165,14 +165,14 @@ impl GroupDetailView {
         let status = if self.controller.tables_loading() {
             // 任务表分页载入期间成员数不完整，不能显示「没有成员」。
             self.strings.tasks_loading_title.clone()
-        } else if summary.total == 0 {
+        } else if summary.aggregate.counts.total == 0 {
             self.t(cx, "groupDetailNoMembers")
         } else {
             SharedString::from(format!(
                 "{}/{} · {:.0}%",
-                summary.completed,
-                summary.total,
-                summary.progress * 100.0
+                summary.aggregate.counts.done,
+                summary.aggregate.counts.total,
+                summary.aggregate.progress * 100.0
             ))
         };
         v_flex()
@@ -187,10 +187,10 @@ impl GroupDetailView {
                     .font_weight(extended.title.weight)
                     .min_w_0()
                     .truncate()
-                    .child(SharedString::from(if summary.name.is_empty() {
+                    .child(SharedString::from(if summary.meta.name.is_empty() {
                         self.group_id.clone()
                     } else {
-                        summary.name.clone()
+                        summary.meta.name.clone()
                     })),
             )
             .child(
@@ -204,14 +204,14 @@ impl GroupDetailView {
                         self.t(cx, "groupDetailSource"),
                         div()
                             .truncate()
-                            .child(SharedString::from(summary.origin_url.clone())),
+                            .child(SharedString::from(summary.meta.source_url.clone())),
                         cx,
                     ))
                     .child(detail_row(
                         self.t(cx, "groupDetailSaveDir"),
                         div()
                             .truncate()
-                            .child(SharedString::from(summary.save_dir.clone())),
+                            .child(SharedString::from(summary.meta.save_dir.clone())),
                         cx,
                     )),
             )

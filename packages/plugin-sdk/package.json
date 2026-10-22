@@ -1,6 +1,6 @@
 {
   "name": "fluxdown-plugin-sdk",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Types, JSX runtime, manifest validator and CLI for building FluxDown plugins.",
   "license": "AGPL-3.0-or-later",
   "repository": {
@@ -54,8 +54,7 @@
     "gen:check": "bun scripts/gen-view-types.ts --check && bun scripts/gen-theme-types.ts --check",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test",
-    "build": "bun scripts/build.ts",
-    "sync-index": "bun scripts/sync-index.ts"
+    "build": "bun scripts/build.ts"
   },
   "dependencies": {
     "esbuild": "^0.28.2",

@@ -7,13 +7,19 @@ import Foundation
 
 /// 状态文件夹（范围条）；顺序即显示顺序（02-downloads §3.2）。
 nonisolated enum StatusFolder: CaseIterable, Hashable {
-    case all, active, completed, failed, paused
+    case all, active, completed, seeding, failed, paused
+
+    /// 本机任务是否属于该文件夹：「做种中」按 `isSeeding`（1 / 8）判定，其余按状态；做种任务同时仍在「已完成」。
+    func accepts(_ task: DownloadTask) -> Bool {
+        self == .seeding ? task.isSeeding : accepts(task.status)
+    }
 
     func accepts(_ status: TaskStatus) -> Bool {
         switch self {
         case .all: true
         case .active: status == .pending || status == .downloading || status == .preparing
         case .completed: status == .completed
+        case .seeding: false
         case .failed: status == .failed
         case .paused: status == .paused
         }
@@ -30,6 +36,7 @@ nonisolated enum StatusFolder: CaseIterable, Hashable {
             case .paused, .completed, .failed, .canceled: false
             }
         case .completed: status == .completed
+        case .seeding: false
         case .failed: status == .failed || status == .canceled
         case .paused: status == .paused
         }
@@ -67,7 +74,7 @@ nonisolated enum TaskVisual: Hashable {
         case .completed:
             if task.fileMissing {
                 self = .missing
-            } else if task.seedingStatus == .seeding {
+            } else if task.isSeeding {
                 self = .seeding
             } else {
                 self = .completed

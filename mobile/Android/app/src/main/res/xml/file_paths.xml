@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 打开已完成文件（ACTION_VIEW）时授予只读 URI：公共下载目录与应用私有目录 -->
+<!-- 打开已完成文件（ACTION_VIEW）/ 通知「打开」「分享」时授予只读 URI：公共存储、应用私有目录与可移动存储卡 -->
 <paths>
     <external-path name="external" path="." />
+    <!-- 可移动 SD 卡 / U 盘挂载在 /storage/<卷ID>/，不属于 external-path（仅覆盖主存储）；
+         root-path 以文件系统根为基准、限定 /storage/，使 /storage/6BF9-89B3/... 也能生成 content URI。
+         provider 非导出、仅按 Intent 对单个 URI 授权，不会因此暴露整盘。 -->
+    <root-path name="storage_volumes" path="storage/" />
     <external-files-path name="external_files" path="." />
     <files-path name="files" path="." />
     <!-- 诊断页导出日志：zip 先写到缓存目录，再经系统分享面板分享 -->

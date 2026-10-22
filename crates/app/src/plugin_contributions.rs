@@ -317,9 +317,14 @@ fn build_routes(cx: &mut App) -> Vec<ShellRoute> {
             }
         };
         let weak = entity.downgrade();
+        let icon = match &spec.view.view.icon_svg {
+            Some(svg) => Icon::default().data(svg.as_bytes()),
+            None => Icon::new(FluxIcon::Sparkles),
+        };
         let route = ShellRoute::plugin(
             RouteId::plugin(&spec.view.identity, &spec.view.view.id),
             SharedString::from(spec.label),
+            icon,
             entity.clone().into(),
         )
         .on_activate(Rc::new(move |window, cx| {

@@ -24,7 +24,16 @@ data class ExternalDownload(
     val cookies: String = "",
     val referrer: String = "",
     val headers: Map<String, String> = emptyMap(),
-)
+) {
+    /**
+     * 命中分类（且该分类配置了目录）的保存目录，规则同 agent `capture.rs::with_category_dir`：
+     * 外部唤起不指定目录时按文件名 / 链接路径末段归类；无命中 / 未配置目录返回 null。
+     */
+    fun categorySaveDir(state: HostState): String? =
+        CategoryRules.saveDirFor(CustomCategoryDto.fromPreference(state.preferences[CustomCategoryDto.PREFERENCE_KEY]), fileName, url)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+}
 
 /**
  * Intent 载荷 → [ExternalDownload]。只接收原始字符串（Android `Intent` 的读取在 `:app`）；
@@ -169,9 +178,8 @@ data class SilentCapture(val request: CreateTaskRequest, val unattended: Boolean
         fun plan(download: ExternalDownload, state: HostState): SilentCapture? {
             val prefs = state.preferences
             if (!prefs.bool(SILENT_PREF, false)) return null
-            val categories = CustomCategoryDto.fromPreference(prefs[CustomCategoryDto.PREFERENCE_KEY])
             val remembered = if (prefs.bool(REMEMBER_LAST_SAVE_DIR_PREF, false)) prefs.string(LAST_SAVE_DIR_PREF, "").trim() else ""
-            val saveDir = CategoryRules.saveDirFor(categories, download.fileName, download.url)
+            val saveDir = download.categorySaveDir(state)
                 ?: remembered.ifEmpty { state.config["default_save_dir"].orEmpty().trim() }
             if (saveDir.isEmpty()) return null
             return SilentCapture(

@@ -2,7 +2,7 @@
 //! 不遮挡任何任务行，紧挨刚点过的复选框，鼠标移动距离最短。
 
 use fluxdown_ui_components::{
-    FluxIcon, IconControlExt as _, tabular_numbers, toolbar_action_button,
+    FluxIcon, IconControlExt as _, tabular_numbers, toolbar_action_button, tooltip_view,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -14,7 +14,6 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
-    tooltip::Tooltip,
 };
 
 use crate::{
@@ -113,7 +112,7 @@ impl DownloadView {
         div()
             .id(SharedString::from(format!("{id}-tooltip")))
             .flex_none()
-            .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
+            .tooltip(move |window, cx| tooltip_view(tooltip_label.clone(), window, cx))
             .child(
                 toolbar_action_button(id, label, icon, destructive, disabled, cx)
                     .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx))),

@@ -3,6 +3,7 @@ use std::time::Instant;
 use fluxdown_protocol::{CustomCategoryDto, QueueDto};
 use fluxdown_ui_components::{
     Button, FluxIcon, category_icon, nav_icon_color, sidebar_navigation_button, tabular_numbers,
+    tooltip_view,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -16,7 +17,6 @@ use gpui_component::{
     h_flex,
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
     scroll::ScrollableElement as _,
-    tooltip::Tooltip,
     v_flex,
 };
 
@@ -42,6 +42,7 @@ fn folder_id(status: DownloadStatusFilter) -> &'static str {
         DownloadStatusFilter::All => "download-folder-all",
         DownloadStatusFilter::Incomplete => "download-folder-incomplete",
         DownloadStatusFilter::Completed => "download-folder-completed",
+        DownloadStatusFilter::Seeding => "download-folder-seeding",
         DownloadStatusFilter::Failed => "download-folder-failed",
         DownloadStatusFilter::Paused => "download-folder-paused",
     }
@@ -53,6 +54,7 @@ fn status_icon(status: DownloadStatusFilter) -> FluxIcon {
         DownloadStatusFilter::All => FluxIcon::Layers,
         DownloadStatusFilter::Incomplete => FluxIcon::CircleArrowDown,
         DownloadStatusFilter::Completed => FluxIcon::CircleCheck,
+        DownloadStatusFilter::Seeding => FluxIcon::ArrowUp,
         DownloadStatusFilter::Failed => FluxIcon::CircleAlert,
         DownloadStatusFilter::Paused => FluxIcon::CirclePause,
     }
@@ -517,6 +519,7 @@ impl DownloadView {
             DownloadStatusFilter::All => self.strings.status_all.clone(),
             DownloadStatusFilter::Incomplete => self.strings.status_incomplete.clone(),
             DownloadStatusFilter::Completed => self.strings.status_completed.clone(),
+            DownloadStatusFilter::Seeding => self.strings.status_seeding.clone(),
             DownloadStatusFilter::Failed => self.strings.tab_failed.clone(),
             DownloadStatusFilter::Paused => self.strings.status_paused.clone(),
         }
@@ -818,7 +821,7 @@ impl DownloadView {
                 .cursor_pointer()
                 .text_color(tokens.colors.muted_foreground)
                 .hover(move |style| style.bg(nav_hover).text_color(hover_foreground))
-                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .tooltip(move |window, cx| tooltip_view(tooltip.clone(), window, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();

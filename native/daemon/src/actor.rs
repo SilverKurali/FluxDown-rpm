@@ -439,6 +439,9 @@ async fn run_actor(
     rss_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut seeding = tokio::time::interval(fluxdown_engine::bt_seeding::SEEDING_EVAL_INTERVAL);
     seeding.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut seeding_upload =
+        tokio::time::interval(fluxdown_engine::bt_seeding::SEEDING_UPLOAD_SAMPLE_INTERVAL);
+    seeding_upload.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut queue_positions = tokio::time::interval(Duration::from_millis(250));
     queue_positions.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -507,6 +510,7 @@ async fn run_actor(
                 if let Some(event) = event { engine.manager.on_rss_event(event).await; }
             }
             _ = seeding.tick() => engine.manager.tick_seeding_evaluation().await,
+            _ = seeding_upload.tick() => engine.manager.tick_seeding_upload().await,
         }
     }
 
@@ -1001,7 +1005,7 @@ async fn execute_operation(
             engine.manager.send_tasks_snapshot().await;
         }
         ActorOperation::PauseAll => {
-            let ids = task_ids_by_status(&engine.db, &[0, 1, 5]).await?;
+            let ids = pause_all_task_ids(&engine.db).await?;
             engine.manager.batch_pause_all(&ids).await;
         }
         ActorOperation::PauseTasks { task_ids } => {
@@ -1445,6 +1449,8 @@ async fn commit_tracker_refresh(
         .unwrap_or(0);
     if outcome.is_success() {
         updated_at = now_unix_secs();
+        // 新列表只经 `set_bt_config` 热生效于此后加入的种子（对齐 qBittorrent
+        // 「自动添加到新下载」），不重建 BT 会话、不打断做种与下载。
         let values = BTreeMap::from([
             (
                 "bt_tracker_sub_cache".to_owned(),
@@ -1468,7 +1474,6 @@ async fn commit_tracker_refresh(
         engine
             .manager
             .set_bt_config(crate::config::bt_config_from_map(&all));
-        engine.manager.invalidate_bt_session().await;
     }
     Ok(fluxdown_protocol::TrackerSubRefreshResponse {
         success: outcome.is_success(),
@@ -2041,6 +2046,8 @@ async fn apply_live_config<'a>(
         engine
             .manager
             .set_bt_config(crate::config::bt_config_from_map(all));
+        // 只有监听类设置需要重建会话；tracker 列表（自定义 / 订阅开关与地址）
+        // 已由上面的 `set_bt_config` 热生效于新加入的种子。
         if keys.iter().any(|key| {
             matches!(
                 *key,
@@ -2050,9 +2057,6 @@ async fn apply_live_config<'a>(
                     | "bt_enable_utp"
                     | "bt_port_start"
                     | "bt_port_end"
-                    | "bt_custom_trackers"
-                    | "bt_tracker_sub_enabled"
-                    | "bt_tracker_sub_urls"
                     | "bt_mse_mode"
             )
         }) {
@@ -2159,16 +2163,23 @@ async fn existing_task_ids(
     Ok(task_ids)
 }
 
-async fn task_ids_by_status(
-    db: &fluxdown_engine::db::Db,
-    statuses: &[i32],
-) -> Result<Vec<String>, ActorError> {
+/// 「全部暂停」的作用对象（对齐 qBittorrent Stop all）：下载中 / 排队 / 准备中，
+/// 以及做种中 / 排队做种的已完成 BT 任务（暂停 = 停止做种）。
+async fn pause_all_task_ids(db: &fluxdown_engine::db::Db) -> Result<Vec<String>, ActorError> {
+    use fluxdown_engine::bt_seeding::{SEEDING_STATUS_ACTIVE, SEEDING_STATUS_QUEUED};
     Ok(db
         .load_all_tasks()
         .await
         .map_err(|error| ActorError::Operation(format!("{error:#}")))?
         .into_iter()
-        .filter(|task| statuses.contains(&task.status))
+        .filter(|task| {
+            matches!(task.status, 0 | 1 | 5)
+                || (task.status == 3
+                    && matches!(
+                        task.seeding_status,
+                        SEEDING_STATUS_ACTIVE | SEEDING_STATUS_QUEUED
+                    ))
+        })
         .map(|task| task.task_id)
         .collect())
 }
@@ -2190,7 +2201,7 @@ mod tests {
 
     use super::{
         ActorError, ActorOperation, BT_DISABLED_MESSAGE, delete_site_auth, execute_operation,
-        resolve_queue_id, save_site_auth,
+        pause_all_task_ids, resolve_queue_id, save_site_auth,
     };
 
     async fn open_db() -> (fluxdown_engine::db::Db, std::path::PathBuf) {
@@ -2249,6 +2260,62 @@ mod tests {
                 .expect("stale default falls back"),
             "",
             "engine maps '' to the builtin main queue"
+        );
+
+        drop(db);
+        if let Err(error) = tokio::fs::remove_dir_all(dir).await {
+            eprintln!("actor test directory removal failed: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_all_targets_active_downloads_and_live_seeders_only() {
+        let (db, dir) = open_db().await;
+        // (id, status, seeding_status)
+        let rows = [
+            ("pending", 0, 0),
+            ("downloading", 1, 0),
+            ("paused", 2, 0),
+            ("completed", 3, 0),
+            ("failed", 4, 0),
+            ("preparing", 5, 0),
+            ("seeding", 3, 1),
+            ("seed-queued", 3, 8),
+            ("seed-user-stopped", 3, 4),
+            ("seed-ratio-reached", 3, 2),
+        ];
+        for (id, status, seeding) in rows {
+            db.insert_task(
+                id,
+                "magnet:?xt=urn:btih:x",
+                id,
+                "/tmp",
+                1,
+                0,
+                "",
+                "",
+                "",
+                status,
+            )
+            .await
+            .expect("insert task");
+            if seeding != 0 {
+                db.update_task_seeding_status(id, seeding, "")
+                    .await
+                    .expect("set seeding status");
+            }
+        }
+        let mut ids = pause_all_task_ids(&db).await.expect("pause-all ids");
+        ids.sort();
+        assert_eq!(
+            ids,
+            [
+                "downloading",
+                "pending",
+                "preparing",
+                "seed-queued",
+                "seeding"
+            ]
         );
 
         drop(db);

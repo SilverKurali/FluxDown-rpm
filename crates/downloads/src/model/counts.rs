@@ -14,9 +14,9 @@ use super::{
 #[derive(Default)]
 pub(crate) struct SidebarCounts {
     /// 不限分类时各状态的任务数（下标见 `DownloadStatusFilter::slot`）。
-    by_status: [usize; 5],
+    by_status: [usize; DownloadStatusFilter::COUNT],
     /// 分类 id → 各状态的任务数。只含至少命中过一个任务的分类。
-    by_category: HashMap<String, [usize; 5]>,
+    by_category: HashMap<String, [usize; DownloadStatusFilter::COUNT]>,
     /// 本地任务按队列。
     by_queue: HashMap<String, usize>,
     local: usize,
@@ -40,9 +40,9 @@ impl SidebarCounts {
 
     /// 一个任务进入时计入各桶；与 [`Self::remove`] 互逆。
     pub(crate) fn add(&mut self, task: &DownloadTaskView, categories: &CategoryIndex) {
-        let mut statuses = [None; 5];
+        let mut statuses = [None; DownloadStatusFilter::COUNT];
         for status in DownloadStatusFilter::ALL {
-            if status.matches(task.state) {
+            if status.matches(task) {
                 self.by_status[status.slot()] += 1;
                 statuses[status.slot()] = Some(status);
             }
@@ -50,7 +50,7 @@ impl SidebarCounts {
         categories.for_each_match(task, |id| match self.by_category.get_mut(id) {
             Some(buckets) => bump(buckets, &statuses),
             None => {
-                let mut buckets = [0; 5];
+                let mut buckets = [0; DownloadStatusFilter::COUNT];
                 bump(&mut buckets, &statuses);
                 self.by_category.insert(id.to_owned(), buckets);
             }
@@ -80,9 +80,9 @@ impl SidebarCounts {
     /// 撤销 [`Self::add`] 对同一任务（同一状态 / 分类 / 队列 / 设备）的计入；清零的分类、队列、
     /// 设备桶一并移除，结果与对剩余任务重新 [`Self::compute`] 相同。
     pub(crate) fn remove(&mut self, task: &DownloadTaskView, categories: &CategoryIndex) {
-        let mut statuses = [None; 5];
+        let mut statuses = [None; DownloadStatusFilter::COUNT];
         for status in DownloadStatusFilter::ALL {
-            if status.matches(task.state) {
+            if status.matches(task) {
                 let count = &mut self.by_status[status.slot()];
                 *count = count.saturating_sub(1);
                 statuses[status.slot()] = Some(status);
@@ -141,7 +141,10 @@ impl SidebarCounts {
 }
 
 /// 任务命中的每个状态各记一次。
-fn bump(buckets: &mut [usize; 5], statuses: &[Option<DownloadStatusFilter>; 5]) {
+fn bump(
+    buckets: &mut [usize; DownloadStatusFilter::COUNT],
+    statuses: &[Option<DownloadStatusFilter>; DownloadStatusFilter::COUNT],
+) {
     for status in statuses.iter().flatten() {
         buckets[status.slot()] += 1;
     }

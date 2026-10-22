@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use fluxdown_ui_components::{
     CheckState, ControlExt as _, FluxIcon, check_mark, segmented_tabs, toolbar_action_button,
+    tooltip_view,
 };
 use fluxdown_ui_i18n::{Translator, keys};
 use fluxdown_ui_theme::active_theme;
@@ -24,7 +25,6 @@ use gpui_component::{
     popover::Popover,
     scroll::ScrollableElement as _,
     table::TableState,
-    tooltip::Tooltip,
     v_flex,
 };
 
@@ -77,14 +77,13 @@ impl ViewMenuPage {
     }
 }
 
-const GROUP_OPTIONS: [ViewGroupBy; 7] = [
+const GROUP_OPTIONS: [ViewGroupBy; 6] = [
     ViewGroupBy::None,
     ViewGroupBy::Status,
     ViewGroupBy::Date,
     ViewGroupBy::Type,
     ViewGroupBy::Queue,
     ViewGroupBy::Site,
-    ViewGroupBy::Group,
 ];
 
 const SORT_OPTIONS: [ViewSortKey; 7] = [
@@ -105,7 +104,6 @@ fn group_by_key(group_by: ViewGroupBy) -> &'static str {
         ViewGroupBy::Type => "viewGroupType",
         ViewGroupBy::Queue => "viewGroupQueue",
         ViewGroupBy::Site => "viewGroupSite",
-        ViewGroupBy::Group => "viewGroupGroup",
     }
 }
 
@@ -307,7 +305,7 @@ impl Render for DownloadTitleBar {
                     .flex_none()
                     .tooltip({
                         let label = new_label.clone();
-                        move |window, cx| Tooltip::new(label.clone()).build(window, cx)
+                        move |window, cx| tooltip_view(label.clone(), window, cx)
                     })
                     .child(
                         toolbar_action_button(

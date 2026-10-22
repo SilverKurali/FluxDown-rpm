@@ -42,9 +42,6 @@ pub mod file_exists;
 pub mod ftp_downloader;
 pub mod hls_downloader;
 pub mod intercept;
-/// 设备互联（`fluxdown_link`）的引擎数据库存储后端。仅 `link` feature 下编译。
-#[cfg(feature = "link")]
-pub mod link;
 pub mod logger;
 /// 下载来源标记（Windows Zone.Identifier / macOS quarantine）。
 pub mod mark_of_the_web;

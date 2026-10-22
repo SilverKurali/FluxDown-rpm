@@ -47,6 +47,7 @@ import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.app.shell.hostState
 import com.fluxdown.app.ui.fileCategory
 import com.fluxdown.app.ui.label
+import com.fluxdown.app.ui.launchDocumentPicker
 import com.fluxdown.core.host.ImportRules
 import com.fluxdown.core.host.groupImportBatches
 import com.fluxdown.core.host.isError
@@ -381,6 +382,7 @@ private fun NewDownloadContent(
     val clipboardEmpty = str(R.string.mobileClipboardEmpty)
     val pasted = str(R.string.mobilePasted)
     val importNone = str(R.string.importTxtNoUrls)
+    val noFilePicker = str(R.string.mobileNoFilePicker)
     val importFound = str(R.string.importTxtFound)
     val noEntries = form.entries.isEmpty()
     val hasText = form.urlText.isNotBlank()
@@ -485,7 +487,7 @@ private fun NewDownloadContent(
             )
             FluxButton(
                 str(R.string.importTxtFile),
-                { importLauncher.launch(arrayOf("text/*", "application/octet-stream")) },
+                { launchDocumentPicker(overlays, noFilePicker) { importLauncher.launch(arrayOf("text/*", "application/octet-stream")) } },
                 size = ButtonSize.Sm,
                 icon = FluxIcons.FileText,
                 fullWidth = true,
@@ -493,7 +495,7 @@ private fun NewDownloadContent(
             )
             FluxButton(
                 str(R.string.openTorrentFile),
-                { torrentLauncher.launch(arrayOf(TorrentFile.MIME_TYPE, "application/octet-stream")) },
+                { launchDocumentPicker(overlays, noFilePicker) { torrentLauncher.launch(arrayOf(TorrentFile.MIME_TYPE, "application/octet-stream")) } },
                 size = ButtonSize.Sm,
                 icon = FluxIcons.FileUp,
                 fullWidth = true,

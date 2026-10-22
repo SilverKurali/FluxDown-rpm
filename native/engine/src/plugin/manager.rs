@@ -143,6 +143,8 @@ pub struct LoadedPlugin {
     main_entry: Option<PathBuf>,
     /// 非 dev 模式的 `main` 源码缓存。
     main_cache: Option<String>,
+    /// 视图图标 SVG 文本（view id → 内容），加载期读入并校验。
+    view_icons: Vec<(String, String)>,
     /// 熔断计数（连续 Timeout/MemoryLimit）。
     timeout_streak: Arc<AtomicU32>,
 }
@@ -247,6 +249,8 @@ pub struct PluginInfo {
     pub load_error: String,
     /// manifest 声明的贡献点（视图 / 命令 / 嗅探规则）；加载失败的插件为空。
     pub contributions: super::manifest::ContributesDecl,
+    /// 视图图标 SVG 文本（view id → 内容）；加载失败的插件为空。
+    pub view_icons: Vec<(String, String)>,
     /// manifest 是否声明了 `main`（可移植视图由 main 提供）。
     pub has_main: bool,
     /// 由权限推导的风险等级。
@@ -536,6 +540,25 @@ impl PluginManager {
                 }
             }
         }
+        let mut view_icons = Vec::new();
+        if file_check.is_ok()
+            && let Some(contributes) = manifest.contributes.as_ref()
+        {
+            for view in &contributes.views {
+                let Some(icon) = &view.icon else { continue };
+                file_check = match tokio::fs::read(dir.join(icon)).await {
+                    Ok(bytes) => super::manifest::validate_view_icon(&view.id, bytes)
+                        .map(|svg| view_icons.push((view.id.clone(), svg))),
+                    Err(e) => Err(PluginError::ManifestInvalid(format!(
+                        "view '{}' icon '{icon}' 读取失败: {e}",
+                        view.id
+                    ))),
+                };
+                if file_check.is_err() {
+                    break;
+                }
+            }
+        }
         if let Err(e) = file_check {
             log_info!("[plugin] 跳过 {}: {e}", manifest.identity);
             return Err(FailedPlugin {
@@ -657,6 +680,7 @@ impl PluginManager {
             subscription_cache,
             main_entry,
             main_cache,
+            view_icons,
             timeout_streak: Arc::new(AtomicU32::new(0)),
         })
     }
@@ -1821,6 +1845,7 @@ impl PluginManager {
                 load_status: PluginLoadStatus::Loaded.as_str().to_string(),
                 load_error: String::new(),
                 contributions: p.manifest.contributes.clone().unwrap_or_default(),
+                view_icons: p.view_icons.clone(),
                 has_main: p.manifest.main.is_some(),
                 risk: p.manifest.risk(),
                 network_hosts: p.manifest.network_hosts(),
@@ -1900,6 +1925,7 @@ impl PluginManager {
                 load_status: PluginLoadStatus::Failed.as_str().to_string(),
                 load_error: truncate_load_error(&p.error),
                 contributions: super::manifest::ContributesDecl::default(),
+                view_icons: Vec::new(),
                 has_main: false,
                 risk: p
                     .manifest
@@ -2701,6 +2727,7 @@ mod tests {
             subscription_cache: None,
             main_entry: None,
             main_cache: None,
+            view_icons: Vec::new(),
             timeout_streak: Arc::new(AtomicU32::new(0)),
         }
     }

@@ -98,7 +98,6 @@ fun SettingsScreen() {
     val listState = rememberLazyListState()
     val gate = rememberFlowInGate()
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    DockMiniOnScroll(listState, nav)
     val version = remember(context) { context.appVersionName() }
     var query by rememberSaveable { mutableStateOf("") }
 

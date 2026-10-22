@@ -27,6 +27,7 @@ import com.fluxdown.core.format.Format
 import com.fluxdown.core.format.Measure
 import com.fluxdown.core.model.FileConflicts
 import com.fluxdown.core.model.QueueOrder
+import com.fluxdown.core.model.allTasksPaused
 import com.fluxdown.core.model.TaskStatus
 import com.fluxdown.core.store.Connection
 import com.fluxdown.core.store.HostState
@@ -280,7 +281,7 @@ internal data class LiveStats(
 
 internal fun HostState.toLiveStats(): LiveStats {
     val st = stats
-    val allPaused = st.activeTasks == 0 && st.pendingTasks == 0 && tasks.any { it.status == TaskStatus.Paused }
+    val allPaused = allTasksPaused(tasks, st.activeTasks, st.pendingTasks)
     return LiveStats(
         down = st.totalDownloadBps,
         up = st.totalUploadBps,

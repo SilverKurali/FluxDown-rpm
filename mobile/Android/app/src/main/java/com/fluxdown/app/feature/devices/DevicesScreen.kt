@@ -113,7 +113,6 @@ fun DevicesScreen() {
     var renaming by remember { mutableStateOf<LinkDevice?>(null) }
 
     val listState = rememberLazyListState()
-    DockMiniEffect(listState)
     val swipe = LocalSwipeRevealCoordinator.current
     val gate = rememberFlowInGate()
     val margin = space.screenMargin
@@ -149,6 +148,7 @@ fun DevicesScreen() {
                 hostRef = hostRef,
                 facts = facts.value,
                 onSwitch = { nav.openSheet(SheetRoute.HostSwitch) },
+                onRepair = { (hostRef as? HostRef.Remote)?.let { nav.openSheet(SheetRoute.AddHost(repair = it)) } },
                 modifier = Modifier.padding(horizontal = margin, vertical = 6.dp).fluxFlowIn(1, gate, "host"),
             )
         }
@@ -267,7 +267,7 @@ private fun com.fluxdown.core.store.HostState.toFacts(): HostFacts {
 // ── 当前主机卡 ──────────────────────────────────────────────────────────
 
 @Composable
-private fun HostCard(hostRef: HostRef, facts: HostFacts, onSwitch: () -> Unit, modifier: Modifier = Modifier) {
+private fun HostCard(hostRef: HostRef, facts: HostFacts, onSwitch: () -> Unit, onRepair: () -> Unit, modifier: Modifier = Modifier) {
     val c = FluxTheme.colors
     val t = FluxTheme.type
     val actions = LocalTaskActions.current
@@ -278,7 +278,13 @@ private fun HostCard(hostRef: HostRef, facts: HostFacts, onSwitch: () -> Unit, m
         Connection.Stale -> str(R.string.mobileHostConnStale) to Tone.Amber
         is Connection.Failed -> str(R.string.mobileHostConnFailed) to Tone.Coral
     }
-    val connError = (facts.connection as? Connection.Failed)?.let { actions.errorText(it.error) }
+    val failure = (facts.connection as? Connection.Failed)?.error
+    val needsRepair = failure != null && hostRef.needsRepair(failure)
+    val connError = when {
+        needsRepair -> str(R.string.mobileHostRepairNeeded)
+        failure != null -> actions.errorText(failure)
+        else -> null
+    }
 
     Column(
         modifier
@@ -308,6 +314,15 @@ private fun HostCard(hostRef: HostRef, facts: HostFacts, onSwitch: () -> Unit, m
                 },
             )
             if (connError != null) FluxText(connError, style = t.sm, color = c.coralText)
+            if (needsRepair) {
+                FluxButton(
+                    text = str(R.string.mobileHostRepair),
+                    onClick = onRepair,
+                    variant = ButtonVariant.Secondary,
+                    size = ButtonSize.Sm,
+                    icon = FluxIcons.Link,
+                )
+            }
         }
         FluxDivider()
         val disk = facts.diskFree?.let { Format.bytes(it) }
@@ -344,6 +359,8 @@ private fun DeviceRow(
     version: String?,
     current: Boolean,
     subtitleOverride: String? = null,
+    /** 附在状态行末尾的说明（如「可控制本机」）。 */
+    note: String? = null,
     trailing: (@Composable () -> Unit)? = null,
 ) {
     val c = FluxTheme.colors
@@ -351,6 +368,7 @@ private fun DeviceRow(
         str(if (online) R.string.deviceOnline else R.string.deviceOffline),
         platformLabel(platform),
         version?.takeIf { it.isNotBlank() }?.let { "v$it" },
+        note,
     ).joinToString(" · ")
     FluxListRow(
         title = name,
@@ -388,6 +406,7 @@ private fun LinkedDeviceRow(
         version = device.appVersion,
         current = false,
         subtitleOverride = if (device.revoked) str(R.string.linkedDeviceRevokedDesc) else null,
+        note = if (device.grantsControl && !device.revoked) str(R.string.linkControlGrantedTag) else null,
         trailing = {
             Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
                 when {

@@ -15,6 +15,7 @@ import com.fluxdown.app.i18n.str
 import com.fluxdown.app.ui.TaskVisualState
 import com.fluxdown.core.format.Format
 import com.fluxdown.core.model.Queue
+import com.fluxdown.core.model.SeedingStatus
 import com.fluxdown.core.model.TaskProtocol
 import com.fluxdown.fluxui.data.MetaTone
 import com.fluxdown.fluxui.data.buildTaskMeta
@@ -31,6 +32,7 @@ internal class RowText(c: Context) {
     val preparing = c.str(R.string.subtitlePreparing)
     val verifying = c.str(R.string.statusVerifying)
     val seeding = c.str(R.string.statusSeeding)
+    val seedingQueued = c.str(R.string.seedingStatusQueued)
     val completed = c.str(R.string.statusCompleted)
     val missing = c.str(R.string.statusFileMissing)
     val failed = c.str(R.string.statusError)
@@ -169,8 +171,12 @@ internal fun buildRowMeta(
             if (showSize) part(totalSize)
         }
         TaskVisualState.Seeding -> {
-            part(t.seeding, MetaTone.Mint)
-            part(upText)
+            if (task.seedingStatus == SeedingStatus.QueuedForSlot) {
+                part(t.seedingQueued, MetaTone.Mint)
+            } else {
+                part(t.seeding, MetaTone.Mint)
+                part(upText)
+            }
             if (showSize) part(totalSize)
         }
         TaskVisualState.Completed -> {

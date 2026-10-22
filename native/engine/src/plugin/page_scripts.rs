@@ -365,6 +365,7 @@ mod tests {
                 page_scripts: scripts,
                 ..ContributesDecl::default()
             },
+            view_icons: Vec::new(),
             has_main: false,
             risk: PluginRisk::Full,
             network_hosts: Vec::new(),

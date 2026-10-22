@@ -631,7 +631,7 @@ pub struct TaskDto {
 
 // `TaskDto` 默认值字段不上线：二十万任务的全表传输里它们占了约三分之一字节。反序列化端
 // 对应字段都带 `#[serde(default)]`，缺省值与这里判定的「默认」一致。
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 
@@ -1033,6 +1033,10 @@ pub struct PluginViewDeclDto {
     /// 桌面增强实现（仅 GPUI 桌面端经 gpui-shell 运行，daemon 不执行）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop: Option<PluginDesktopEntryDto>,
+    /// 视图图标 SVG 文本（manifest `icon` 指向的包内文件，加载期读入并校验）；客户端
+    /// 只把它当单色蒙版按主题着色渲染。未声明时为 `None`，客户端用默认图标。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_svg: Option<String>,
 }
 
 /// 视图的桌面增强入口。
@@ -1524,6 +1528,11 @@ pub struct LinkPingInfo {
     /// 发起方在下发 / 交换信息前据此判定对端过旧并返回 `PeerOutdated`，不发送请求。
     #[serde(default)]
     pub link_protocol: u32,
+    /// 设备控制配对能力版本：`>= 1` 表示本机接受带 `requestControl` 的配对 hello。旧版对端没有
+    /// 此字段（按 0 处理），发起方据此在发出 hello 之前判定对端不支持并放弃，避免对端静默忽略
+    /// 控制请求后只配成一台普通设备。
+    #[serde(default)]
+    pub link_control: u32,
 }
 
 /// 配对 `hello` 请求（发起方 → 响应方）。全部密钥/签名字段为 base64。
@@ -1558,6 +1567,10 @@ pub struct LinkPairHelloRequest {
     /// 发起方自报可达候选地址（`ip:port`），供响应方存为回连候选。
     #[serde(default)]
     pub initiator_addrs: Vec<String>,
+    /// 发起方请求「完全控制」本机（`/rpc`）。受签名保护（`true` 时进入 hello 签名字节与转录）；
+    /// `false` 时省略，与旧版 hello 逐字节兼容。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub request_control: bool,
 }
 
 /// 配对 `hello` 回复（响应方 → 发起方）：本次会话全新的临时公钥与随机数。不含 SAS
@@ -1854,6 +1867,12 @@ pub struct LinkDeviceInfo {
     /// 对端已解除与本机的配对（对端经已认证链路通知）：不可再下发，只能删除或重新配对。
     #[serde(default)]
     pub revoked: bool,
+    /// 该设备被本机授权可经 `/rpc` 完全控制本机（本机用户批准了其 `requestControl` 配对）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub grants_control: bool,
+    /// 本机可经 `/rpc` 控制该设备（本机以 `requestControl` 向它发起并完成了配对）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub controllable: bool,
 }
 
 /// 发现快照响应（`GET /api/v1/link/discovered`）。

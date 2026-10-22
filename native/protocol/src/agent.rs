@@ -421,6 +421,35 @@ pub struct CloudReferralValidateResult {
     pub reason: Option<String>,
 }
 
+/// 插件市场收藏概览：全站计数 + 本人收藏。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFavoritesDto {
+    /// 仅含收藏数大于 0 的插件。
+    pub counts: std::collections::BTreeMap<String, u64>,
+    /// 本人收藏的插件 id（最近收藏在前）；未登录为空。
+    pub mine: Vec<String>,
+    pub signed_in: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFavoriteSetRequest {
+    pub plugin_id: String,
+    pub favorited: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFavoriteResultDto {
+    pub plugin_id: String,
+    pub favorited: bool,
+    pub count: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
@@ -699,6 +728,14 @@ pub struct LinkPairingRequestDto {
     /// 双方肉眼核对的短认证串。
     pub sas: String,
     pub expires_at_unix_ms: i64,
+    /// 生成本 DTO 时刻的剩余有效毫秒数：客户端以「收到 DTO 的本机时刻 + `ttl_ms`」计算过期，
+    /// 不依赖与主机的时钟对齐。旧主机没有此字段（`0`），回退 `expires_at_unix_ms`。
+    #[serde(default)]
+    pub ttl_ms: u64,
+    /// 对端在配对中请求「完全控制」本机：批准即授权它经 `/rpc` 操作本机（含访问密钥、下载任务、
+    /// 设置）。UI 必须明确警示。
+    #[serde(default)]
+    pub requests_control: bool,
 }
 
 /// 本机当前展示的局域网配对码（供对端输入）。
@@ -708,10 +745,24 @@ pub struct LinkPairingRequestDto {
 pub struct LinkPairingCodeDto {
     pub code: String,
     pub expires_at_unix_ms: i64,
+    /// 生成本 DTO 时刻的剩余有效毫秒数（语义同 [`LinkPairingRequestDto::ttl_ms`]）。
+    #[serde(default)]
+    pub ttl_ms: u64,
     /// 本机可被对端直连的地址（`http(s)://host:port`），供对端手动输入。
     pub addresses: Vec<String>,
     pub fingerprint: String,
     pub device_name: String,
+}
+
+/// `agent.link.stopPairing` 参数。带 `code` 时只有它仍是当前展示的配对码才作废（多个客户端
+/// 互不干扰：某个客户端关闭自己的面板，不会作废另一个客户端刚刷新出来的新码）；省略则无条件
+/// 作废当前配对码。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkStopPairingParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 /// `agent.link.discovery.set` 参数。
@@ -738,6 +789,11 @@ pub struct LinkAddressParams {
 pub struct LinkPairBeginParams {
     pub address: String,
     pub code: String,
+    /// 同时请求「完全控制」对端（对端用户批准后，本机可用 `agent.link.controlCredential` 取得
+    /// 对端 `/rpc` 的设备控制凭据）。对端必须声明支持（`/ping` 的 `linkControl >= 1`），否则
+    /// 返回 `pairingVersionMismatch`、不发出 hello。
+    #[serde(default)]
+    pub request_control: bool,
 }
 
 /// `agent.link.pairFinish` 参数：发起端核对 SAS 后确认 / 放弃。
@@ -764,6 +820,15 @@ pub struct LinkApproveParams {
 #[serde(rename_all = "camelCase")]
 pub struct LinkDeviceParams {
     pub fingerprint: String,
+}
+
+/// `agent.link.controlCredential` 结果：本机可用来连接已配对主机 `/rpc` 的设备控制凭据
+/// （`fdl1.<发起方指纹>.<base64url(HMAC)>`，仅 `Authorization: Bearer` 使用）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkControlCredentialDto {
+    pub token: String,
 }
 
 /// `agent.link.rename` 参数：给已配对设备设置仅本机可见的备注名。`name` 省略、为空或全空白

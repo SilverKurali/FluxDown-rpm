@@ -35,6 +35,7 @@ private fun StatusFolder.icon() = when (this) {
     StatusFolder.All -> FluxIcons.Layers
     StatusFolder.Active -> FluxIcons.Download
     StatusFolder.Completed -> FluxIcons.CheckCheck
+    StatusFolder.Seeding -> FluxIcons.Upload
     StatusFolder.Failed -> FluxIcons.FileWarning
     StatusFolder.Paused -> FluxIcons.Pause
 }
@@ -171,11 +172,8 @@ private fun SelectionDockContent(modifier: Modifier, reservedEnd: Dp) {
                 val sel = nav.selection
                 for (t in host.value.tasks) {
                     if (t.taskId !in sel) continue
-                    when (t.status) {
-                        TaskStatus.Paused, TaskStatus.Failed -> resume = true
-                        TaskStatus.Downloading, TaskStatus.Pending, TaskStatus.Preparing -> pause = true
-                        else -> Unit
-                    }
+                    if (t.canResume) resume = true
+                    if (t.canPause) pause = true
                 }
                 SelectionCaps(resume, pause)
             }

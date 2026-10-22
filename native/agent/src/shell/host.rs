@@ -55,6 +55,9 @@ enum HostEvent {
     /// 向主线程的全局热键后端整表下发绑定（仅 macOS）。
     #[cfg(target_os = "macos")]
     HotkeyApply(Vec<HotkeyBinding>),
+    /// 右键点击托盘图标后在主线程弹出菜单（仅 macOS，见 [`TrayUi::pop_up_menu`]）。
+    #[cfg(target_os = "macos")]
+    ShowMenu,
 }
 
 struct ProxyPort(Mutex<EventLoopProxy<HostEvent>>);
@@ -165,7 +168,7 @@ where
                 let Some((run_runtime, actions_rx)) = pending.take() else {
                     return;
                 };
-                let availability = match TrayUi::create(&actions_tx) {
+                let availability = match TrayUi::create(&actions_tx, &proxy) {
                     Ok(created) => {
                         ui = Some(created);
                         TrayAvailability::Available
@@ -249,6 +252,12 @@ where
                 Some(backend) => backend.apply(bindings),
                 None => tracing::debug!("global hotkey table dropped: backend not running"),
             },
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(HostEvent::ShowMenu) => {
+                if let Some(ui) = ui.as_ref() {
+                    ui.pop_up_menu();
+                }
+            }
             Event::UserEvent(HostEvent::Apply(model)) => {
                 if let Some(ui) = ui.as_mut() {
                     ui.apply(&model);
@@ -376,7 +385,10 @@ struct TrayUi {
 }
 
 impl TrayUi {
-    fn create(actions: &mpsc::UnboundedSender<TrayAction>) -> Result<Self, TrayUnavailableReason> {
+    fn create(
+        actions: &mpsc::UnboundedSender<TrayAction>,
+        proxy: &EventLoopProxy<HostEvent>,
+    ) -> Result<Self, TrayUnavailableReason> {
         #[cfg(target_os = "linux")]
         if !linux::status_notifier_host_present() {
             tracing::info!("no StatusNotifier host on the session bus; tray disabled");
@@ -413,18 +425,48 @@ impl TrayUi {
             }
         }));
         let click_actions = actions.clone();
+        #[cfg(target_os = "macos")]
+        let click_proxy = Mutex::new(proxy.clone());
+        #[cfg(not(target_os = "macos"))]
+        let _ = proxy;
         TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
+            let TrayIconEvent::Click {
+                button,
+                button_state,
                 ..
             } = event
-                && click_actions.send(TrayAction::ShowWindow).is_err()
-            {
-                tracing::trace!("agent runtime closed before tray click action");
+            else {
+                return;
+            };
+            match (button, button_state) {
+                (MouseButton::Left, MouseButtonState::Up) => {
+                    if click_actions.send(TrayAction::ShowWindow).is_err() {
+                        tracing::trace!("agent runtime closed before tray click action");
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                (MouseButton::Right, MouseButtonState::Down) => {
+                    let proxy = click_proxy
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if proxy.send_event(HostEvent::ShowMenu).is_err() {
+                        tracing::trace!("tray event loop closed before menu request");
+                    }
+                }
+                _ => {}
             }
         }));
         Ok(ui)
+    }
+
+    /// macOS：`NSStatusItem` 一旦挂了菜单，AppKit 对任何点击都直接弹菜单，
+    /// `menu_on_left_click(false)` 拦不住。因此平时不挂菜单，右键时临时挂上、弹出
+    /// （`performClick` 在菜单关闭后才返回），再摘掉，左键才能走「显示窗口」。
+    #[cfg(target_os = "macos")]
+    fn pop_up_menu(&self) {
+        self.icon.set_menu(Some(Box::new(self.menu.clone())));
+        self.icon.show_menu();
+        self.icon.set_menu(None);
     }
 
     fn build() -> Result<Self, String> {
@@ -456,8 +498,11 @@ impl TrayUi {
         };
         #[cfg(not(windows))]
         let bytes = ICON_BYTES;
-        let icon = TrayIconBuilder::new()
-            .with_menu(Box::new(menu.clone()))
+        let builder = TrayIconBuilder::new();
+        // macOS 不在状态栏项上常挂菜单，见 [`TrayUi::pop_up_menu`]。
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.with_menu(Box::new(menu.clone()));
+        let icon = builder
             .with_tooltip(DEFAULT_TOOLTIP)
             .with_menu_on_left_click(false)
             .with_icon(decode_icon(bytes)?)

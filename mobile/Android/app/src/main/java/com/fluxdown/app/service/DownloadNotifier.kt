@@ -363,7 +363,7 @@ object DownloadNotifier {
 
     /**
      * 完成通知的「打开」「分享」：任务属于本机主机且是普通文件时才提供（目录 / 远端文件无法打开或分享）；
-     * 文件不在 FileProvider 声明的根目录内（如外置存储卡）时同样不提供。
+     * 文件不在 FileProvider 声明的根目录内时同样不提供。
      */
     private fun addFileActions(builder: NotificationCompat.Builder, context: Context, hostId: String, state: HostState, taskId: String, code: Int) {
         if (hostId != HostRef.Local.ID) return

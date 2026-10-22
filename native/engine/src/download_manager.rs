@@ -39,6 +39,7 @@ use crate::speed_limiter::SpeedLimiter;
 use crate::transfer_activity::TaskRuntime;
 
 mod boost;
+mod group_dirs;
 pub use boost::BoostError;
 #[cfg(test)]
 mod import_tests;
@@ -2430,6 +2431,27 @@ fn effective_upload_bps(task_bps: i64, queue_kbps: Option<i64>) -> u64 {
     (queue_kbps.unwrap_or(0).max(0) as u64) * 1024
 }
 
+/// 做种上传采样发进度帧所需的任务行事实（已落库的累计值）。求值 tick 写库后
+/// 刷新；采样帧的累计上传 = `uploaded_bytes` + 做种者未落库的增量。
+#[cfg(feature = "bt")]
+#[derive(Debug, Clone, Copy)]
+struct SeedRowTotals {
+    downloaded_bytes: i64,
+    total_bytes: i64,
+    uploaded_bytes: i64,
+}
+
+#[cfg(feature = "bt")]
+impl SeedRowTotals {
+    fn of(task: &TaskInfo) -> Self {
+        Self {
+            downloaded_bytes: task.downloaded_bytes,
+            total_bytes: task.total_bytes,
+            uploaded_bytes: task.uploaded_bytes,
+        }
+    }
+}
+
 /// 定时边沿标识：`(queue_id, 是否启动边沿)`。启动/停止各是独立边沿，
 /// 分别按天记账（见 `DownloadManager::schedule_fired`）。
 type ScheduleEdge = (String, bool);
@@ -3595,6 +3617,10 @@ pub struct DownloadManager {
     /// 落库是否到点，见 [`seed_times_persist_due`]。
     #[cfg(feature = "bt")]
     last_seed_time_persist: Mutex<std::time::Instant>,
+    /// 活动做种者的任务行事实缓存，供 [`Self::tick_seeding_upload`] 高频发帧
+    /// 而不读库；求值 tick 写库后整体刷新，采样时剔除已不在做种的项。
+    #[cfg(feature = "bt")]
+    seed_row_totals: Mutex<HashMap<String, SeedRowTotals>>,
     /// BT 会话进入「仅因暂停中的未完成任务而保活」空闲期的起点（内存级）。
     /// `None` = 不在该空闲期。超过 [`BT_SESSION_PAUSED_IDLE_GRACE`] 后释放会话，
     /// 见 [`decide_bt_session_release`]。
@@ -3816,6 +3842,8 @@ impl DownloadManager {
             retry_pending_reported: 0,
             #[cfg(feature = "bt")]
             last_seed_time_persist: Mutex::new(std::time::Instant::now()),
+            #[cfg(feature = "bt")]
+            seed_row_totals: Mutex::new(HashMap::new()),
             #[cfg(feature = "bt")]
             bt_paused_idle_since: None,
             #[cfg(feature = "bt")]
@@ -5500,22 +5528,25 @@ impl DownloadManager {
     }
 
     /// Update BT configuration. Runtime-read settings (seeding limits, the
-    /// active-seeder cap) take effect immediately; session-level settings
-    /// (ports, DHT, trackers) take effect when the next BT session is created
-    /// (either on first BT download or after `invalidate_bt_session`).
+    /// active-seeder cap, the extra-tracker list for new torrents) take effect
+    /// immediately; listener-level settings (ports, DHT, UPnP, uTP, MSE) take
+    /// effect when the session is rebuilt by `invalidate_bt_session`.
     pub fn set_bt_config(&mut self, config: BtConfig) {
         // 活动做种数上限热生效：直接写入 SeedingManager，队列在下一次
-        // 做种求值 tick 的 reconcile 中被重新平衡。
+        // 做种求值 tick 的 reconcile 中被重新平衡。追加 tracker 同样热生效于
+        // 此后加入的种子（对齐 qBittorrent「自动添加到新下载」），不重建会话。
         #[cfg(feature = "bt")]
         if let Some(ref bt) = self.bt_session {
             bt.seeding_manager().set_cap(config.seed_max_active);
+            bt.set_extra_trackers(&config);
         }
         self.bt_config = config.effective();
     }
 
     /// Periodically drive the seeding lifecycle:
-    /// 1. rebalance active seeders against `seed_max_active`（promote/demote），
-    /// 2. persist upload deltas and emit live upload stats,
+    /// 1. sample live uploads and persist every seeder's unpersisted upload,
+    /// 2. rebalance active seeders against `seed_max_active`（promote/demote）——
+    ///    放在落库之后，降级者已采样的上传不会随条目离开活动表而丢失，
     /// 3. accumulate seeding time in memory — it reaches the DB only alongside
     ///    upload deltas, on seeding state transitions / shutdown, or via the
     ///    30-minute fallback (see [`seed_times_persist_due`]),
@@ -5523,11 +5554,12 @@ impl DownloadManager {
     /// 5. release the BT session once only paused incomplete tasks have held
     ///    it for [`BT_SESSION_PAUSED_IDLE_GRACE`].
     ///
+    /// 实时上传进度帧由 [`Self::tick_seeding_upload`] 按更快的节奏发出。
     /// This is a cheap no-op (zero I/O) when no BT session exists or nothing seeds.
     #[cfg(feature = "bt")]
     pub async fn tick_seeding_evaluation(&mut self) {
-        self.reconcile_seeding_slots().await;
         let rows = self.account_seeding_tick().await;
+        self.reconcile_seeding_slots().await;
         let to_stop = self.evaluate_seeding_limits(&rows).await;
         let had_stops = !to_stop.is_empty();
         let then_action =
@@ -5734,31 +5766,155 @@ impl DownloadManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = std::time::Instant::now();
     }
 
-    /// 正常关机结算：把所有活动做种者的内存累计做种时长落库。做种时长平时不按
-    /// 固定周期落库（见 [`SEED_TIME_FALLBACK_PERSIST_INTERVAL`]），关机是除状态迁移
-    /// 外最后的落库机会；崩溃/断电最多丢失一个兜底间隔的累计。
+    /// 正常关机结算：把所有活动做种者已采样未落库的上传与内存累计做种时长落库。
+    /// 做种时长平时不按固定周期落库（见 [`SEED_TIME_FALLBACK_PERSIST_INTERVAL`]），
+    /// 关机是除状态迁移外最后的落库机会；崩溃/断电最多丢失一个兜底间隔的时长
+    /// 与一个 [`crate::bt_seeding::SEEDING_EVAL_INTERVAL`] 的上传。
     #[cfg(feature = "bt")]
     async fn flush_seed_times(&self) {
         let Some(bt) = &self.bt_session else {
             return;
         };
-        let times = bt.seeding_manager().seed_time_snapshot().await;
-        if times.is_empty() {
+        let seeding_mgr = bt.seeding_manager();
+        let uploads = seeding_mgr.unpersisted_uploads().await;
+        let times = seeding_mgr.seed_time_snapshot().await;
+        if uploads.is_empty() && times.is_empty() {
             return;
         }
-        match self.db.apply_seeding_tick(&[], &times).await {
-            Ok(_) => self.mark_seed_times_persisted(),
-            Err(e) => log_info!("[manager] shutdown: persist seeding times error: {}", e),
+        match self.db.apply_seeding_tick(&uploads, &times).await {
+            Ok(_) => {
+                seeding_mgr.mark_uploads_persisted(&uploads).await;
+                self.mark_seed_times_persisted();
+            }
+            Err(e) => log_info!("[manager] shutdown: persist seeding state error: {}", e),
         }
     }
 
-    /// 做种 tick 的统计与落库：所有活动做种者的上传增量合并为**一个事务**写库，
-    /// 做种时长快照仅在本轮本来就要写库或兜底到点时顺带写入同一事务；做种者的
-    /// 任务行用**一次批量读取**取回，随后为每个做种者发一条带实时上传速率与
-    /// 内存实时做种时长的进度事件。
+    /// 读每个活动做种者的 librqbit 上传计数，把增量计入其未落库累计。
+    /// 返回 `(任务 id, 实时上传速率 B/s)`；暂停中（无 live 快照）的做种者跳过。
+    #[cfg(feature = "bt")]
+    async fn sample_seeder_uploads(
+        seeding_mgr: &crate::bt_seeding::SeedingManager,
+        task_ids: &[String],
+    ) -> Vec<(String, i64)> {
+        let mut observed = Vec::with_capacity(task_ids.len());
+        for task_id in task_ids {
+            let Some(handle) = seeding_mgr.get_handle(task_id).await else {
+                continue;
+            };
+            let stats = handle.stats();
+            let Some(live) = stats.live.as_ref() else {
+                // 暂停期间没有 live 快照——不能用 0 覆盖。
+                continue;
+            };
+            let snapshot_uploaded = live.snapshot.uploaded_bytes as i64;
+            let upload_speed_bps = (live.upload_speed.mbps * 1024.0 * 1024.0) as i64;
+            if seeding_mgr
+                .apply_upload_snapshot(task_id, snapshot_uploaded, upload_speed_bps)
+                .await
+                .is_some()
+            {
+                observed.push((task_id.clone(), upload_speed_bps));
+            }
+        }
+        observed
+    }
+
+    /// 做种实时上传帧（每 [`crate::bt_seeding::SEEDING_UPLOAD_SAMPLE_INTERVAL`]）：
+    /// 采样各活动做种者的上传，为每个做种者发一条带实时上传速率、累计上传
+    /// （已落库 + 未落库）与内存实时做种时长的进度事件。宿主的总上传速率由
+    /// 相邻帧的累计增量折算，帧间隔必须与下载进度同为 500ms 级。
+    ///
+    /// 不写库；任务行事实取自 [`Self::account_seeding_tick`] 刷新的缓存，仅对
+    /// 首次出现的做种者批量读一次库。无会话或无做种者时零 I/O。文件名 / 目录 /
+    /// 地址留空（各端投影按「空 = 不变」处理）。
+    #[cfg(feature = "bt")]
+    pub async fn tick_seeding_upload(&self) {
+        let Some(ref bt) = self.bt_session else {
+            return;
+        };
+        let seeding_mgr = bt.seeding_manager();
+        let task_ids = seeding_mgr.active_task_ids().await;
+        let missing: Vec<String> = {
+            let mut cache = self
+                .seed_row_totals
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.retain(|id, _| task_ids.contains(id));
+            task_ids
+                .iter()
+                .filter(|id| !cache.contains_key(*id))
+                .cloned()
+                .collect()
+        };
+        if task_ids.is_empty() {
+            return;
+        }
+        if !missing.is_empty() {
+            match self.db.load_tasks_by_ids(&missing).await {
+                Ok(tasks) => {
+                    let mut cache = self
+                        .seed_row_totals
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for task in &tasks {
+                        cache.insert(task.task_id.clone(), SeedRowTotals::of(task));
+                    }
+                }
+                Err(e) => log_info!("[manager] seeding upload sample: load rows error: {}", e),
+            }
+        }
+
+        let observed = Self::sample_seeder_uploads(&seeding_mgr, &task_ids).await;
+        let pending: HashMap<String, i64> = seeding_mgr
+            .unpersisted_uploads()
+            .await
+            .into_iter()
+            .collect();
+        let times: HashMap<String, i64> =
+            seeding_mgr.seed_time_snapshot().await.into_iter().collect();
+        let cache = self
+            .seed_row_totals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (task_id, upload_speed_bps) in observed {
+            let Some(row) = cache.get(&task_id) else {
+                continue;
+            };
+            let uploaded_bytes = row
+                .uploaded_bytes
+                .saturating_add(pending.get(&task_id).copied().unwrap_or(0));
+            let seeding_time_secs = times.get(&task_id).copied().unwrap_or(0);
+            self.sink.emit(EngineEvent::TaskProgress {
+                task_id,
+                status: 3,
+                downloaded_bytes: row.downloaded_bytes,
+                total_bytes: row.total_bytes,
+                speed: 0,
+                file_name: String::new(),
+                save_dir: String::new(),
+                url: String::new(),
+                error_message: String::new(),
+                upload_speed_bps,
+                uploaded_bytes,
+                seeding_status: 1,
+                seeding_message: String::new(),
+                seeding_time_secs,
+            });
+        }
+    }
+
+    /// 无 BT 后端：没有做种者，上传采样为空操作。
+    #[cfg(not(feature = "bt"))]
+    pub async fn tick_seeding_upload(&self) {}
+
+    /// 做种 tick 的统计与落库：先采样一次，再把所有活动做种者未落库的上传合并为
+    /// **一个事务**写库，做种时长快照仅在本轮本来就要写库或兜底到点时顺带写入
+    /// 同一事务；做种者的任务行用**一次批量读取**取回，并刷新
+    /// [`Self::tick_seeding_upload`] 的行缓存。本函数不发进度帧。
     ///
     /// 上传累计用增量法，`tasks.uploaded_bytes` 在 librqbit 计数复位（暂停/恢复或
-    /// 会话重建）后仍然正确；零增量不写库，但事件照发，上传速率归零能同步到 UI。
+    /// 会话重建）后仍然正确；写库失败的增量留在内存，下一 tick 重试。
     /// 零上传且未到兜底点时整个 tick 不产生 DB 写（NAS 上休眠的 HDD 不被唤醒）。
     /// 返回的任务行已折入本轮写入的累计上传与内存实时做种时长，供限额求值直接使用。
     #[cfg(feature = "bt")]
@@ -5780,35 +5936,12 @@ impl DownloadManager {
             }
         };
 
-        // (任务 id, 本轮上传增量, 实时上传速率 B/s)
-        let mut observed: Vec<(String, i64, i64)> = Vec::new();
-        for task_id in &task_ids {
-            if !rows.contains_key(task_id) {
-                continue;
-            }
-            let Some(handle) = seeding_mgr.get_handle(task_id).await else {
-                continue;
-            };
-            let stats = handle.stats();
-            let Some(live) = stats.live.as_ref() else {
-                // 暂停期间没有 live 快照——不能用 0 覆盖。
-                continue;
-            };
-            let snapshot_uploaded = live.snapshot.uploaded_bytes as i64;
-            let upload_speed_bps = (live.upload_speed.mbps * 1024.0 * 1024.0) as i64;
-            let Some(delta) = seeding_mgr
-                .apply_upload_snapshot(task_id, snapshot_uploaded, upload_speed_bps)
-                .await
-            else {
-                continue;
-            };
-            observed.push((task_id.clone(), delta, upload_speed_bps));
-        }
-
-        let deltas: Vec<(String, i64)> = observed
-            .iter()
-            .filter(|(_, delta, _)| *delta != 0)
-            .map(|(id, delta, _)| (id.clone(), *delta))
+        Self::sample_seeder_uploads(&seeding_mgr, &task_ids).await;
+        let deltas: Vec<(String, i64)> = seeding_mgr
+            .unpersisted_uploads()
+            .await
+            .into_iter()
+            .filter(|(id, _)| rows.contains_key(id))
             .collect();
         // 实时累计做种时长取内存值（`SeedingEntry` 里的墙钟累计）：UI 进度事件与
         // 限额求值都读这份，不依赖落库频率；DB 行里的值只是上次落库时的快照。
@@ -5822,8 +5955,9 @@ impl DownloadManager {
         // 做种既无增量也未到点，`apply_seeding_tick` 对空输入直接返回、不碰 DB。
         let persist_times = self.seed_times_due(!deltas.is_empty());
         let times: &[(String, i64)] = if persist_times { &time_snapshot } else { &[] };
-        let persisted = match self.db.apply_seeding_tick(&deltas, times).await {
+        match self.db.apply_seeding_tick(&deltas, times).await {
             Ok(totals) => {
+                seeding_mgr.mark_uploads_persisted(&deltas).await;
                 if persist_times {
                     self.mark_seed_times_persisted();
                 }
@@ -5832,39 +5966,17 @@ impl DownloadManager {
                         row.uploaded_bytes = total;
                     }
                 }
-                true
             }
-            Err(e) => {
-                log_info!("[manager] seeding tick persist error: {}", e);
-                false
-            }
-        };
-
-        for (task_id, delta, upload_speed_bps) in observed {
-            // 写库失败时，有增量的任务不发事件（累计值未落库，避免 UI 与库分叉）。
-            if delta != 0 && !persisted {
-                continue;
-            }
-            let Some(t) = rows.get(&task_id) else {
-                continue;
-            };
-            self.sink.emit(EngineEvent::TaskProgress {
-                task_id,
-                status: 3,
-                downloaded_bytes: t.downloaded_bytes,
-                total_bytes: t.total_bytes,
-                speed: 0,
-                file_name: t.file_name.clone(),
-                save_dir: t.save_dir.clone(),
-                url: t.url.clone(),
-                error_message: String::new(),
-                upload_speed_bps,
-                uploaded_bytes: t.uploaded_bytes,
-                seeding_status: 1,
-                seeding_message: String::new(),
-                seeding_time_secs: t.seeding_time_secs,
-            });
+            Err(e) => log_info!("[manager] seeding tick persist error: {}", e),
         }
+
+        *self
+            .seed_row_totals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = rows
+            .iter()
+            .map(|(id, row)| (id.clone(), SeedRowTotals::of(row)))
+            .collect();
         rows
     }
 
@@ -5977,10 +6089,14 @@ impl DownloadManager {
         }
     }
 
-    /// Invalidate (destroy) the current BT session so it will be re-created
-    /// with the latest `bt_config` on the next BT download.  Active BT
-    /// downloads are gracefully paused first so their progress is preserved
-    /// and they appear as "paused" (status 2) in the UI.
+    /// 用最新 `bt_config` 重建共享会话，或在 BT 被禁用时释放它。只有监听类
+    /// 设置（端口 / DHT / UPnP / uTP / MSE）与启用开关走这里；tracker 列表经
+    /// [`Self::set_bt_config`] 热生效，不重建。
+    ///
+    /// 对齐 qBittorrent「改设置不打断任务」：BT 仍启用时，重建前在跑的 BT 下载
+    /// 在新会话上自动继续；做种中 / 排队做种 / 正在校验挂载的任务从磁盘重新
+    /// 挂载继续做种。BT 被禁用时下载落回暂停（status 2），做种落「会话释放」
+    /// 停止态。
     #[cfg(feature = "bt")]
     pub async fn invalidate_bt_session(&mut self) {
         // BT 刚被禁用时，排队中的 BT 项立即落回暂停（不必等下一次 drain）。
@@ -5988,45 +6104,83 @@ impl DownloadManager {
         if self.bt_session.is_none() {
             return;
         }
+        let rebuild = self.bt_config.enabled;
+        // 已采样未落库的上传与做种时长先落库，随后的注销不丢数据。
+        self.flush_seed_times().await;
+        let Some(bt) = self.bt_session.take() else {
+            return;
+        };
 
-        // 1. Collect all active BT task IDs.
+        // 1. 宣布关停：在途的重新挂载（启动续种 / 恢复做种的本地数据校验）
+        //    不再向旧会话登记。先读在途挂载、再读做种表——挂载任务完成做种
+        //    登记后才注销在途登记，按此顺序读取不会漏掉任何任务。
+        bt.closing_token().cancel();
+        let mut seeders = bt.reseeding_task_ids();
+        for id in bt.seeding_manager().all_task_ids().await {
+            if !seeders.contains(&id) {
+                seeders.push(id);
+            }
+        }
+        let released = crate::bt_seeding::SeedingStopReason::SessionReleased;
+        for tid in &seeders {
+            // 结算本 stint 的做种时长。
+            if let Some(seed) = bt.unregister_seeder(tid).await
+                && let Err(error) = self
+                    .db
+                    .set_task_seeding_time(tid, seed.seed_time_secs)
+                    .await
+            {
+                crate::logger::report_error("download-manager", "persist task state", &error);
+            }
+            // 落「会话释放」：禁用时就是终态；重建时作为重新挂载失败的回退停止态
+            // （挂载开始即改写为排队做种「校验中」，界面不闪停止）。
+            if let Err(error) = self
+                .db
+                .update_task_seeding_status(tid, released.as_i32(), released.message())
+                .await
+            {
+                crate::logger::report_error("download-manager", "persist task state", &error);
+                continue;
+            }
+            if !rebuild {
+                self.emit_progress_from_db(tid, 3, released.as_i32(), released.message(), 0)
+                    .await;
+            }
+        }
+
+        // 2. Gracefully pause each active BT download (cancel token, persist
+        //    progress, update DB status to paused, notify the host).
         let bt_task_ids: Vec<String> = self
             .active_tasks
             .iter()
             .filter(|(_, e)| e.is_bt)
             .map(|(id, _)| id.clone())
             .collect();
-
-        // 1b. Mark any seeders (active or queued) as stopped because the whole
-        // BT session is about to be released. This prevents stale "seeding"
-        // UI state. Final cumulative seeding time is settled first.
-        if let Some(ref bt) = self.bt_session {
-            let seeder_ids = bt.seeding_manager().all_task_ids().await;
-            for tid in &seeder_ids {
-                if let Some(seed) = bt.unregister_seeder(tid).await
-                    && let Err(error) = self
-                        .db
-                        .set_task_seeding_time(tid, seed.seed_time_secs)
-                        .await
-                {
-                    crate::logger::report_error("download-manager", "persist task state", &error);
+        let mut paused_downloads: Vec<String> = Vec::with_capacity(bt_task_ids.len());
+        if !bt_task_ids.is_empty() {
+            log_info!(
+                "[manager] pausing {} active BT task(s) before session invalidation",
+                bt_task_ids.len()
+            );
+            for tid in &bt_task_ids {
+                let Some(entry) = self.active_tasks.remove(tid) else {
+                    continue;
+                };
+                entry.token.cancel();
+                // Pause the torrent handle in the session so librqbit
+                // flushes its piece-level state to disk.
+                if let Err(error) = bt.pause_task(tid).await {
+                    crate::logger::report_error("download-manager", "pause BT task", &error);
                 }
-                if let Err(error) = self
-                    .db
-                    .update_task_seeding_status(
-                        tid,
-                        crate::bt_seeding::SeedingStopReason::SessionReleased.as_i32(),
-                        crate::bt_seeding::SeedingStopReason::SessionReleased.message(),
-                    )
-                    .await
-                {
+                if let Err(error) = self.db.update_task_status(tid, 2, "").await {
                     crate::logger::report_error("download-manager", "persist task state", &error);
                     continue;
                 }
+                paused_downloads.push(tid.clone());
                 if let Ok(Some(t)) = self.db.load_task_by_id(tid).await {
                     self.sink.emit(EngineEvent::TaskProgress {
                         task_id: tid.clone(),
-                        status: t.status,
+                        status: 2,
                         downloaded_bytes: t.downloaded_bytes,
                         total_bytes: t.total_bytes,
                         speed: 0,
@@ -6036,105 +6190,98 @@ impl DownloadManager {
                         error_message: String::new(),
                         upload_speed_bps: 0,
                         uploaded_bytes: t.uploaded_bytes,
-                        seeding_status: crate::bt_seeding::SeedingStopReason::SessionReleased
-                            .as_i32(),
-                        seeding_message: crate::bt_seeding::SeedingStopReason::SessionReleased
-                            .message()
-                            .to_string(),
+                        seeding_status: t.seeding_status,
+                        seeding_message: t.seeding_message.clone(),
                         seeding_time_secs: t.seeding_time_secs,
                     });
+                    self.send_segments_from_db(tid, t.total_bytes).await;
+                }
+                // Boost guard: if the paused task was the current priority
+                // (Boost) target, cancel Boost and resume other tasks.
+                if self.priority_task_id.as_deref() == Some(tid.as_str()) {
+                    self.clear_priority().await;
                 }
             }
-        }
-
-        // 2. Gracefully pause each active BT task (cancel token, persist
-        //    progress, update DB status to paused, notify the host).
-        if !bt_task_ids.is_empty() {
-            log_info!(
-                "[manager] pausing {} active BT task(s) before session invalidation",
-                bt_task_ids.len()
-            );
-            for tid in &bt_task_ids {
-                if let Some(entry) = self.active_tasks.remove(tid) {
-                    entry.token.cancel();
-
-                    // Pause the torrent handle in the session so librqbit
-                    // flushes its piece-level state to disk.
-                    if let Some(ref bt) = self.bt_session
-                        && let Err(error) = bt.pause_task(tid).await
-                    {
-                        crate::logger::report_error("download-manager", "pause BT task", &error);
-                    }
-
-                    if let Err(error) = self.db.update_task_status(tid, 2, "").await {
-                        crate::logger::report_error(
-                            "download-manager",
-                            "persist task state",
-                            &error,
-                        );
-                        continue;
-                    }
-
-                    if let Ok(Some(t)) = self.db.load_task_by_id(tid).await {
-                        self.sink.emit(EngineEvent::TaskProgress {
-                            task_id: tid.clone(),
-                            status: 2,
-                            downloaded_bytes: t.downloaded_bytes,
-                            total_bytes: t.total_bytes,
-                            speed: 0,
-                            file_name: t.file_name.clone(),
-                            save_dir: t.save_dir.clone(),
-                            url: t.url.clone(),
-                            error_message: String::new(),
-                            upload_speed_bps: 0,
-                            uploaded_bytes: t.uploaded_bytes,
-                            seeding_status: t.seeding_status,
-                            seeding_message: t.seeding_message.clone(),
-                            seeding_time_secs: t.seeding_time_secs,
-                        });
-
-                        self.send_segments_from_db(tid, t.total_bytes).await;
-                    }
-
-                    // Boost guard: if the paused task was the current priority
-                    // (Boost) target, cancel Boost and resume other tasks.
-                    if self.priority_task_id.as_deref() == Some(tid.as_str()) {
-                        self.clear_priority().await;
-                    }
-                }
-            }
-
             // Give in-flight BT download loops a moment to detect
-            // cancellation and exit cleanly before we tear down the runtime.
+            // cancellation and exit cleanly before we tear down the session.
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         }
 
         // 2b. 等待仍在进行的 detached `add_torrent` 任务（如 magnet 的 DHT
-        //     元数据解析）结束后再关停。这些任务持有 `Arc<Session>`，绑定着
-        //     BT 监听端口；若在它们结束前关停并重建 session，下一次 BT 下载
-        //     会因端口仍被占用而立即失败。与 `maybe_release_bt_session` 的
-        //     inflight 检查对齐——固定 600ms 是经验值，无法保证 add_torrent
-        //     已完成，故在此显式轮询直至归零或超时。
-        if let Some(ref bt) = self.bt_session {
-            let deadline = tokio::time::Instant::now() + INVALIDATE_INFLIGHT_TIMEOUT;
-            while bt.has_inflight_adds() && tokio::time::Instant::now() < deadline {
-                tokio::time::sleep(INVALIDATE_INFLIGHT_POLL_INTERVAL).await;
-            }
-            if bt.has_inflight_adds() {
-                log_info!(
-                    "[manager] invalidate: inflight add_torrent still pending after timeout, forcing shutdown"
-                );
+        //     元数据解析）结束后再关停，与 `maybe_release_bt_session` 的
+        //     inflight 检查对齐；超时则强制关停（关停会取消会话、释放端口）。
+        let deadline = tokio::time::Instant::now() + INVALIDATE_INFLIGHT_TIMEOUT;
+        while bt.has_inflight_adds() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(INVALIDATE_INFLIGHT_POLL_INTERVAL).await;
+        }
+        if bt.has_inflight_adds() {
+            log_info!(
+                "[manager] invalidate: inflight add_torrent still pending after timeout, forcing shutdown"
+            );
+        }
+
+        // 3. 关停旧会话：暂停全部 torrent 落盘并取消 librqbit 会话（释放监听
+        //    端口）。最后一个 `Arc` 在独立线程释放，runtime 有时间收尾。
+        let carry_over = rebuild && (!seeders.is_empty() || !paused_downloads.is_empty());
+        log_info!(
+            "[manager] {} BT session for config change ({} seeder(s), {} download(s))",
+            if carry_over {
+                "rebuilding"
+            } else {
+                "releasing"
+            },
+            seeders.len(),
+            paused_downloads.len()
+        );
+        if !carry_over {
+            // 没有要接回的任务：新会话在下一次 BT 活动时惰性创建。
+            std::thread::spawn(move || bt.shutdown());
+            return;
+        }
+        // 旧会话的引用在纯同步线程释放并等它结束：它是最后一个引用时，旧 runtime
+        // 限时收尾后 librqbit 会话连同 uTP 套接字一起释放，新会话能绑回同一端口。
+        let released_old = tokio::task::spawn_blocking(move || {
+            bt.shutdown();
+            std::thread::spawn(move || drop(bt)).join().is_ok()
+        })
+        .await;
+        match released_old {
+            Ok(true) => {}
+            Ok(false) => log_info!("[manager] rebuild BT session: old session drop panicked"),
+            Err(error) => {
+                crate::logger::report_error("download-manager", "shut down BT session", &error);
+                return;
             }
         }
 
-        // 3. Destroy the session on a background thread (block_on inside).
-        if let Some(bt) = self.bt_session.take() {
-            log_info!("[manager] invalidating BT session for config change");
-            std::thread::spawn(move || match Arc::try_unwrap(bt) {
-                Ok(owned) => owned.shutdown(),
-                Err(shared) => shared.shutdown(),
-            });
+        // 4. 新配置建会话，把重建前的做种与下载接回去。
+        if let Err(e) = self.ensure_bt_session().await {
+            log_info!(
+                "[manager] rebuild BT session: init failed, seeders stay released: {}",
+                e
+            );
+            for tid in &seeders {
+                self.emit_progress_from_db(tid, 3, released.as_i32(), released.message(), 0)
+                    .await;
+            }
+            return;
         }
+        let Some(bt) = self.bt_session.clone() else {
+            return;
+        };
+        match self.db.load_tasks_by_ids(&seeders).await {
+            Ok(tasks) => {
+                for task in tasks.iter().filter(|task| task.status == 3) {
+                    self.spawn_reseed_from_disk(bt.clone(), task).await;
+                }
+            }
+            Err(error) => crate::logger::report_error(
+                "download-manager",
+                "load released seeders for reseed",
+                &error,
+            ),
+        }
+        self.batch_resume(&paused_downloads).await;
     }
 
     /// 无 BT 后端：没有会话可释放；仅把排队中的 BT 项落回暂停（沿用禁用路径）。
@@ -7151,7 +7298,7 @@ impl DownloadManager {
     /// ```no_run
     /// # use std::sync::Arc;
     /// # use fluxdown_engine::{Engine, EngineConfig, NoopSelection, NoopSink};
-    /// # use fluxdown_engine::bt_downloader::BtConfig;
+    /// # use fluxdown_engine::bt_config::BtConfig;
     /// # use fluxdown_engine::proxy_config::ProxyConfig;
     /// # async fn run() -> Result<(), fluxdown_engine::EngineError> {
     /// # let config = EngineConfig { max_concurrent: 5, speed_limit_bps: 0, upload_limit_bps: 0, default_save_dir: "/tmp/downloads".to_string(), app_data_dir: "/tmp/fluxdown".to_string(), bt_config: BtConfig::default(), proxy_config: ProxyConfig::default(), user_agent: String::new(), data_dir_override: None, database_url: None };
@@ -11583,6 +11730,12 @@ impl DownloadManager {
             self.sync_queue_occupancy();
             return;
         }
+        // 任务行删除后就查不到组归属：先登记组成员目录，删除成功后清理留空的组目录。
+        let group_dirs = if delete_files {
+            self.group_dir_targets(&[task_id.to_string()]).await
+        } else {
+            Vec::new()
+        };
         match self.db.delete_task(task_id).await {
             Ok(sources) => self.broadcast_deleted_rss_sources(sources).await,
             Err(error) => {
@@ -11592,6 +11745,8 @@ impl DownloadManager {
                 return;
             }
         }
+        self.prune_group_dirs(group_dirs, &[task_id.to_string()])
+            .await;
 
         // Notify progress_reporter so it can remove its per-task HashMap
         // entries (states, last_dart_send, last_db_save).  Without this the
@@ -11666,6 +11821,12 @@ impl DownloadManager {
         );
         // 预读成功后才动运行态：读库失败不会留下「已取消却未删除」的任务。
         let mut plans = self.plan_batch_deletion(task_ids, delete_files).await?;
+        // 任务行删除后就查不到组归属：先登记组成员目录，删除成功后清理留空的组目录。
+        let group_dirs = if delete_files {
+            self.group_dir_targets(task_ids).await
+        } else {
+            Vec::new()
+        };
 
         let id_set: HashSet<&str> = task_ids.iter().map(String::as_str).collect();
         self.pending_queue
@@ -11747,7 +11908,10 @@ impl DownloadManager {
 
         if !deleted.is_empty() {
             match self.db.delete_tasks_batch(&deleted).await {
-                Ok(sources) => self.broadcast_deleted_rss_sources(sources).await,
+                Ok(sources) => {
+                    self.broadcast_deleted_rss_sources(sources).await;
+                    self.prune_group_dirs(group_dirs, &deleted).await;
+                }
                 Err(error) => {
                     crate::logger::report_error(
                         "download-manager",
@@ -12169,18 +12333,27 @@ impl DownloadManager {
         let sink = self.sink.clone();
         let uploaded_at_completion = task.uploaded_at_completion;
         let upload_limit_bps = self.effective_task_upload_bps(task);
+        // 在途登记与关停信号：会话重建（改监听类设置 / 禁用 BT）时，本任务不再向
+        // 旧会话登记，由 `invalidate_bt_session` 在新会话上统一重新挂载。
+        let reseed_guard = bt.begin_reseed(&task_id);
+        let closing = bt.closing_token();
         bt.clone().runtime_handle().spawn(async move {
-            match bt
-                .readd_for_seeding(
+            let _reseed_guard = reseed_guard;
+            let readd = tokio::select! {
+                () = closing.cancelled() => return,
+                result = bt.readd_for_seeding(
                     &task_id,
                     source,
                     output_folder,
                     only_files,
                     upload_limit_bps,
                     parts_factory,
-                )
-                .await
-            {
+                ) => result,
+            };
+            if closing.is_cancelled() {
+                return;
+            }
+            match readd {
                 Ok(handle) => {
                     // 校验窗口期删除的消费点：readd 期间（本地数据校验可长达
                     // 分钟级）用户删除任务时句柄尚未入 map，manager 只能写
@@ -12209,6 +12382,11 @@ impl DownloadManager {
                             seed_time_base,
                         )
                         .await;
+                    // 登记期间会话进入关停：做种表已被重建方读走或即将读到本任务
+                    // （守卫仍在），不再写库，免得盖掉重建方的状态。
+                    if closing.is_cancelled() {
+                        return;
+                    }
                     match registration {
                         SeedingRegistration::Activated | SeedingRegistration::AlreadyPresent => {
                             if let Err(e) = bt.resume_task(&task_id).await {
@@ -13756,9 +13934,11 @@ impl DownloadManager {
     }
 
     /// 全局恢复：恢复所有「运行中队列」内的 paused 任务；停止队列内的任务
-    /// 不动（由「启动队列」显式恢复）。返回尝试恢复的任务数。
+    /// 不动（由「启动队列」显式恢复）。对齐 qBittorrent Start all，另外恢复
+    /// 用户手动停止做种的已完成 BT 任务（见 [`Self::resume_user_stopped_seeds`]）。
+    /// 返回尝试恢复的任务数。
     pub async fn resume_all_eligible(&mut self) -> usize {
-        match self.db.eligible_resume_task_ids().await {
+        let resumed = match self.db.eligible_resume_task_ids().await {
             Ok(ids) => {
                 let n = ids.len();
                 self.batch_resume(&ids).await;
@@ -13768,7 +13948,61 @@ impl DownloadManager {
                 log_info!("[manager] resume_all_eligible error: {}", e);
                 0
             }
+        };
+        #[cfg(feature = "bt")]
+        let resumed = resumed + self.resume_user_stopped_seeds().await;
+        resumed
+    }
+
+    /// 「全部开始」的做种部分：只恢复 `UserStopped` 且文件仍在的已完成任务。
+    /// 达分享率 / 时长 / 不活跃限制而停止的不纳入——恢复后下一次求值 tick
+    /// 会立即再停，结果与不恢复等价，只多一轮状态抖动。全局「完成后自动做种」
+    /// 关闭时（完成即落 UserStopped）整段跳过，免得全部开始把历史任务全拉起做种；
+    /// BT 全局禁用时同样跳过（单任务恢复由 daemon 回报 BT 已禁用）。
+    #[cfg(feature = "bt")]
+    async fn resume_user_stopped_seeds(&mut self) -> usize {
+        if !self.bt_config.enabled {
+            return 0;
         }
+        let seed_enabled = match self.db.get_config("bt_seed_enabled").await {
+            Ok(value) => value.is_none_or(|v| v != "0"),
+            Err(error) => {
+                crate::logger::report_warning(
+                    "download-manager",
+                    "read seeding setting for resume all",
+                    &error,
+                );
+                return 0;
+            }
+        };
+        if !seed_enabled {
+            return 0;
+        }
+        let stopped = match self
+            .db
+            .load_tasks_with_seeding_status(SeedingStopReason::UserStopped.as_i32())
+            .await
+        {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                crate::logger::report_error(
+                    "download-manager",
+                    "load user-stopped seeds for resume all",
+                    &error,
+                );
+                return 0;
+            }
+        };
+        let mut resumed = 0;
+        for task in stopped
+            .into_iter()
+            .filter(|task| task.status == 3 && !task.file_missing)
+        {
+            if self.try_resume_seeding(&task.task_id, &task).await {
+                resumed += 1;
+            }
+        }
+        resumed
     }
 }
 
@@ -15811,6 +16045,222 @@ mod tests {
 
         if let Err(error) = std::fs::remove_dir_all(&work) {
             tracing::debug!(%error, "BT disable test directory cleanup skipped");
+        }
+    }
+
+    #[cfg(feature = "bt")]
+    fn bt_test_config(port: u16) -> BtConfig {
+        BtConfig {
+            enabled: true,
+            enable_dht: false,
+            enable_upnp: false,
+            enable_utp: false,
+            port_start: port,
+            port_end: port,
+            ..Default::default()
+        }
+    }
+
+    #[cfg(feature = "bt")]
+    fn bt_test_manager(db: Db, work: &std::path::Path, config: BtConfig) -> DownloadManager {
+        DownloadManager::new(
+            db,
+            DownloadManagerConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: work.to_string_lossy().into_owned(),
+                app_data_dir: work.to_string_lossy().into_owned(),
+                data_dir: work.to_path_buf(),
+                bt_config: config,
+                proxy_config: ProxyConfig::default(),
+                user_agent: String::new(),
+            },
+            Arc::new(RecordingSink::new()),
+            Arc::new(crate::NoopSelection),
+        )
+        .expect("construct manager")
+    }
+
+    #[cfg(feature = "bt")]
+    fn bt_test_dir(tag: &str) -> (std::path::PathBuf, u16) {
+        let work = std::env::temp_dir().join(format!(
+            "fluxdown_bt_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&work).expect("create work dir");
+        let port = std::net::TcpListener::bind(("0.0.0.0", 0))
+            .expect("bind ephemeral port")
+            .local_addr()
+            .expect("local addr")
+            .port();
+        (work, port)
+    }
+
+    /// #939 现场：启动续种的本地数据校验尚在途时，会话因监听类设置变更重建。
+    /// 任务必须在新会话上继续做种（对齐 qBittorrent：改设置不打断做种），
+    /// 旧会话连同其 runtime 必须真正释放（不 panic、不留继续上传的僵尸会话），
+    /// 新会话绑回同一端口。
+    #[cfg(feature = "bt")]
+    #[tokio::test]
+    async fn session_rebuild_carries_in_flight_reseed_onto_new_session() {
+        let (work, port) = bt_test_dir("rebuild_reseed");
+        let save = work.join("save");
+        std::fs::create_dir_all(&save).expect("save dir");
+        let payload: Vec<u8> = (0..8 * 1024 * 1024_u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        std::fs::write(save.join("payload.bin"), &payload).expect("payload");
+        let torrent = librqbit::create_torrent(
+            &save.join("payload.bin"),
+            librqbit::CreateTorrentOptions {
+                piece_length: Some(64 * 1024),
+                ..Default::default()
+            },
+            &librqbit::spawn_utils::BlockingSpawner::new(1),
+        )
+        .await
+        .expect("create torrent")
+        .as_bytes()
+        .expect("torrent bytes");
+
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        db.insert_task(
+            "seed",
+            "torrent-file://local",
+            "payload.bin",
+            &save.to_string_lossy(),
+            1,
+            payload.len() as i64,
+            "",
+            "",
+            "",
+            3,
+        )
+        .await
+        .expect("insert task");
+        db.save_torrent_file_bytes("seed", &torrent)
+            .await
+            .expect("save torrent bytes");
+        db.set_task_seeding_active("seed", 0)
+            .await
+            .expect("mark seeding");
+        let config = bt_test_config(port);
+        let mut mgr = bt_test_manager(db, &work, config.clone());
+        mgr.ensure_bt_session().await.expect("BT session");
+        let old = mgr.bt_session.clone().expect("live session");
+        let task = mgr
+            .db
+            .load_task_by_id("seed")
+            .await
+            .expect("load task")
+            .expect("task row");
+        // 启动续种：挂载在 BT runtime 上进行，校验未完成就触发重建。
+        mgr.spawn_reseed_from_disk(old.clone(), &task).await;
+        let old_session = Arc::downgrade(&old);
+        let old_port = old.session().listen_addr().map(|addr| addr.port());
+        drop(old);
+
+        mgr.set_bt_config(BtConfig {
+            mse_mode: crate::bt_config::BtMseMode::Forced,
+            ..config
+        });
+        mgr.invalidate_bt_session().await;
+
+        let new = mgr.bt_session.clone().expect("session rebuilt");
+        assert_ne!(Arc::as_ptr(&new), old_session.as_ptr(), "a new session");
+        assert_eq!(
+            new.session().listen_addr().map(|addr| addr.port()),
+            old_port,
+            "rebuilt session binds the same port"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let row = mgr
+                .db
+                .load_task_by_id("seed")
+                .await
+                .expect("load task")
+                .expect("task row");
+            let registered = new
+                .seeding_manager()
+                .active_task_ids()
+                .await
+                .contains(&"seed".to_string());
+            if row.seeding_status == SEEDING_STATUS_ACTIVE
+                && registered
+                && old_session.upgrade().is_none()
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "seeding must resume on the new session and the old one must be released \
+                 (status={}, registered={registered}, old alive={})",
+                row.seeding_status,
+                old_session.upgrade().is_some()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        mgr.shutdown().await;
+        drop(new);
+        if let Err(error) = std::fs::remove_dir_all(&work) {
+            tracing::debug!(%error, "BT rebuild test directory cleanup skipped");
+        }
+    }
+
+    /// tracker 列表变更（设置 / 订阅刷新）只经 `set_bt_config` 热生效于新加入
+    /// 的种子：会话不重建（做种与下载不被打断），新 add 带上新列表。
+    #[cfg(feature = "bt")]
+    #[tokio::test]
+    async fn tracker_list_change_applies_to_new_torrents_without_rebuild() {
+        let (work, port) = bt_test_dir("tracker_hot");
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let config = bt_test_config(port);
+        let mut mgr = bt_test_manager(db, &work, config.clone());
+        mgr.ensure_bt_session().await.expect("BT session");
+        let before = mgr.bt_session.clone().expect("live session");
+
+        mgr.set_bt_config(BtConfig {
+            custom_trackers: "udp://fresh.example:6969/announce".into(),
+            subscription_trackers: "https://sub.example/announce".into(),
+            ..config
+        });
+        let after = mgr.bt_session.clone().expect("session kept");
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "tracker change must not rebuild"
+        );
+
+        let source = crate::bt_downloader::TorrentSource::Magnet(
+            "magnet:?xt=urn:btih:def7006974f228ca39c44c806a0fb839a0469c97".into(),
+        );
+        let mut opts = librqbit::AddTorrentOptions::default();
+        let librqbit::AddTorrent::Url(url) = after.add_input(&source, &mut opts) else {
+            panic!("magnet stays a URL add");
+        };
+        let parsed = librqbit::Magnet::parse(&url).expect("valid magnet");
+        assert_eq!(
+            parsed.trackers,
+            [
+                "udp://fresh.example:6969/announce",
+                "https://sub.example/announce"
+            ]
+        );
+
+        mgr.shutdown().await;
+        drop((before, after));
+        if let Err(error) = std::fs::remove_dir_all(&work) {
+            tracing::debug!(%error, "BT tracker test directory cleanup skipped");
         }
     }
 

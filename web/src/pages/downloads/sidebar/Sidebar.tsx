@@ -2,6 +2,7 @@
 
 import { useNavigate } from '@tanstack/react-router'
 import {
+  ArrowUpFromLine,
   ChevronRight,
   CircleAlert,
   CircleArrowDown,
@@ -39,6 +40,7 @@ const STATUS_ICON: Record<DownloadStatusFilter, LucideIcon> = {
   all: Layers,
   incomplete: CircleArrowDown,
   completed: CircleCheck,
+  seeding: ArrowUpFromLine,
   failed: CircleAlert,
   paused: CirclePause,
 }
@@ -47,6 +49,7 @@ const STATUS_LABEL_KEY: Record<DownloadStatusFilter, string> = {
   all: 'tabAll',
   incomplete: 'statusIncomplete',
   completed: 'statusCompleted',
+  seeding: 'statusSeeding',
   failed: 'tabError',
   paused: 'statusPaused',
 }

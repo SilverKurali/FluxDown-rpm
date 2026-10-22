@@ -209,6 +209,8 @@ public enum HostMethod {
     public static let agentLinkRefresh = "agent.link.refresh"
     /// `LinkDispatchParams` → `LinkDispatchResult`：下发下载到已配对设备。
     public static let agentLinkDispatch = "agent.link.dispatch"
+    /// `LinkDeviceParams` → `LinkControlCredentialDto`：向本机 agent 申请对某已配对主机的设备控制凭据（仅 `controllable && !revoked`）。
+    public static let agentLinkControlCredential = "agent.link.controlCredential"
     public static let agentPlanList = "agent.plan.list"
     public static let agentOrderCreate = "agent.order.create"
     public static let agentOrderGet = "agent.order.get"

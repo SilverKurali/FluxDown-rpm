@@ -15,8 +15,8 @@ use fluxdown_agent::{
 use fluxdown_daemon::config::DaemonConfig;
 use fluxdown_daemon::runtime::{DaemonReady, run_with};
 use fluxdown_protocol::{
-    ApplicationErrorCode, PROTOCOL_VERSION, RequestId, RpcRequest, RpcResponse, ServiceEvent,
-    ServiceRole, method,
+    ApplicationErrorCode, ErrorReason, PROTOCOL_VERSION, RequestId, RpcRequest, RpcResponse,
+    ServiceEvent, ServiceRole, method,
 };
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
@@ -362,6 +362,131 @@ async fn shutdown_closes_event_streams_and_releases_the_agent_data_directory() {
     drop(connection);
     restarted.shutdown().await;
     daemon.stop().await;
+}
+
+/// 本机嵌入主机启用互联（手机上局域网配对添加远程主机）：只做出站，带 `agent.deviceLink`
+/// 能力，`agent.link.*` 可用；设备身份落在本机 agent 状态里，重启不变；空闲时不写盘。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedded_agent_with_link_pairs_outbound_only_and_keeps_its_identity() {
+    let daemon = Daemon::start("link").await;
+    let mut config = daemon.agent_config("agent");
+    config.enable_link = true;
+    let agent_dir = config.agent_data_dir.clone();
+
+    let agent = start_embedded(config.clone(), CancellationToken::new())
+        .await
+        .expect("start embedded agent with link");
+    let connection = connect(&agent).await;
+    assert!(
+        connection
+            .hello()
+            .capabilities
+            .iter()
+            .any(|capability| capability == method::CAPABILITY_AGENT_DEVICE_LINK),
+        "link-enabled hosts must advertise agent.deviceLink"
+    );
+    let (_, code) = success(
+        connection
+            .call(call_request(
+                RequestId::Integer(1),
+                method::AGENT_LINK_PAIRING_CODE,
+                None,
+            ))
+            .await,
+    );
+    let fingerprint = code["fingerprint"]
+        .as_str()
+        .expect("fingerprint")
+        .to_owned();
+    assert_eq!(fingerprint.len(), 64);
+    // 没有监听端口：没有可被对端直连的地址，也不广播。
+    assert_eq!(code["addresses"], json!([]));
+    let (_, devices) = success(
+        connection
+            .call(call_request(
+                RequestId::Integer(2),
+                method::AGENT_LINK_REFRESH,
+                None,
+            ))
+            .await,
+    );
+    assert_eq!(devices, json!([]));
+
+    // 出站配对（请求控制）：对端不可达得到稳定的「无法连接对端」原因，而不是 Unsupported。
+    let failure = match connection
+        .call(call_request(
+            RequestId::Integer(3),
+            method::AGENT_LINK_PAIR_BEGIN,
+            Some(json!({
+                "address": "127.0.0.1:1",
+                "code": "123456",
+                "requestControl": true,
+            })),
+        ))
+        .await
+    {
+        RpcResponse::Failure(failure) => failure,
+        RpcResponse::Success(success) => panic!("pairing a dead address succeeded: {success:?}"),
+    };
+    assert_eq!(
+        failure.error.data.and_then(|data| data.reason),
+        Some(ErrorReason::PairingPeerUnreachable)
+    );
+    connection.close().await;
+    agent.shutdown().await;
+
+    // 身份在本机 agent 状态里：同一数据目录重启后指纹不变。
+    let restarted = start_embedded(config, CancellationToken::new())
+        .await
+        .expect("restart embedded agent with link");
+    let connection = connect(&restarted).await;
+    let (_, again) = success(
+        connection
+            .call(call_request(
+                RequestId::Integer(1),
+                method::AGENT_LINK_PAIRING_CODE,
+                None,
+            ))
+            .await,
+    );
+    assert_eq!(again["fingerprint"], json!(fingerprint));
+
+    // 空闲静默：互联服务的后台轮询（名册为空时无事可做）不写盘。
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let before = tree_stamp(&agent_dir);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        tree_stamp(&agent_dir),
+        before,
+        "an idle link-enabled agent must not write its state"
+    );
+
+    drop(connection);
+    restarted.shutdown().await;
+    daemon.stop().await;
+}
+
+/// 目录树的（路径、修改时间、长度）快照，用来断言空闲期间没有任何文件被写。
+fn tree_stamp(dir: &std::path::Path) -> Vec<(PathBuf, std::time::SystemTime, u64)> {
+    let mut stamp = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        for entry in std::fs::read_dir(&current).expect("read agent dir") {
+            let entry = entry.expect("agent dir entry");
+            let metadata = entry.metadata().expect("agent file metadata");
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                stamp.push((
+                    entry.path(),
+                    metadata.modified().expect("modified time"),
+                    metadata.len(),
+                ));
+            }
+        }
+    }
+    stamp.sort();
+    stamp
 }
 
 /// 嵌入宿主没有 TCP 网关 / NMH IPC / 兼容 HTTP API，也不跑在机械盘上：这些检查不得出现

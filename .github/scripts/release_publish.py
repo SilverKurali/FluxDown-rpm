@@ -125,7 +125,7 @@ fluxdown ls
 | 32 位 ARM | `FluxDown-{version}-android-armeabi-v7a.apk` |
 | x86_64（模拟器 / Chromebook） | `FluxDown-{version}-android-x86_64.apk` |
 
-⚠️ **从旧版（Flutter 版）升级**：新版 Android 客户端换用了新的签名证书，不能直接覆盖安装旧版（系统会提示「应用未安装」或签名冲突）。
+⚠️ **从旧版（Flutter 版）升级**：新版 Android 客户端换用了新的签名证书，不能直接覆盖安装旧版（系统可能提示「应用未安装」「软件包无效」「无法降级」或签名冲突）。
 请先在旧版中记下需要保留的下载任务与设置，卸载旧版后再安装新版；卸载会清除旧版的本地数据，已下载到公共目录的文件不受影响。
 """
         )

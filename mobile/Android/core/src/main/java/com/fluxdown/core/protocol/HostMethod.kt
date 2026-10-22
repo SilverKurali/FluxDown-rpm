@@ -205,6 +205,8 @@ object HostMethod {
     const val agentLinkRefresh = "agent.link.refresh"
     /** `LinkDispatchParams` → `LinkDispatchResult`：下发下载到已配对设备。 */
     const val agentLinkDispatch = "agent.link.dispatch"
+    /** `LinkDeviceParams` → `LinkControlCredentialDto`：本机对已配对且可控制的主机签发设备专属控制凭据（仅发起方）。 */
+    const val agentLinkControlCredential = "agent.link.controlCredential"
     const val agentPlanList = "agent.plan.list"
     const val agentOrderCreate = "agent.order.create"
     const val agentOrderGet = "agent.order.get"

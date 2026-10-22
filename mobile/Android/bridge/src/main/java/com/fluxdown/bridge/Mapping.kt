@@ -327,6 +327,8 @@ internal fun LinkDeviceDto.toCore() = LinkDevice(
     revoked = revoked,
     pairedAt = pairedAt,
     lastSeenAt = lastSeenAt,
+    grantsControl = grantsControl,
+    controllable = controllable,
 )
 
 internal fun CategoryDto.toCore() = Category(

@@ -37,15 +37,23 @@ export interface GroupTally {
   total: number
   completed: number
   failed: number
+  /** 下载中 + 准备中（引擎 status 5 已占用并发名额）。 */
   downloading: number
+  /** 排队（不含准备中）。 */
+  pending: number
+  paused: number
   downloaded: number
   totalBytes: number
+  /** 下载中成员的速度合计（B/s）。 */
+  speed: number
 }
 
 export interface RowEngineInput {
   tasks: readonly TaskDto[]
   /** taskId → 下载速率 B/s。 */
   speeds: Readonly<Record<string, number>>
+  /** taskId → BT 上传速率 B/s。 */
+  uploads: Readonly<Record<string, number>>
   boostedId: string | null
   queuePositions: readonly QueuePositionDto[]
   runtimes: Readonly<Record<string, TaskRuntimeDto>>
@@ -55,6 +63,8 @@ export interface RowEngineInput {
   selection: SidebarSelection
   /** 已 trim + 小写的搜索词。 */
   query: string
+  /** 显示名命中搜索词的任务组 id：其成员即使自身不命中搜索也算命中（搜索为空时为空集）。 */
+  groupMatches: ReadonlySet<string>
   categories: CategoryIndex
   sortKey: ViewSortKey
   sortDir: SortDir
@@ -93,6 +103,7 @@ interface Entry extends TaskRow {
   /** 本地任务的最新 DTO；远程行为 undefined。 */
   task: TaskDto | undefined
   speed: number | null
+  upload: number | null
   boosted: boolean
   queueKey: number | null
   runtime: TaskRuntimeDto | undefined
@@ -258,8 +269,10 @@ function tallyDiffer(left: DownloadTaskView, right: DownloadTaskView): boolean {
   return (
     left.groupId !== right.groupId ||
     left.state !== right.state ||
+    left.preparing !== right.preparing ||
     left.downloadedBytes !== right.downloadedBytes ||
-    left.sizeBytes !== right.sizeBytes
+    left.sizeBytes !== right.sizeBytes ||
+    (left.groupId !== '' && left.speed !== right.speed)
   )
 }
 
@@ -284,9 +297,11 @@ export class RowEngine {
   private prevTasks: readonly TaskDto[] = []
   private prevQueue: readonly QueuePositionDto[] = []
   private prevSpeeds: Readonly<Record<string, number>> = {}
+  private prevUploads: Readonly<Record<string, number>> = {}
   private prevRuntimes: Readonly<Record<string, TaskRuntimeDto>> = {}
   private prevRemote: readonly DownloadTaskView[] = []
   private speeds: Readonly<Record<string, number>> = {}
+  private uploads: Readonly<Record<string, number>> = {}
   private runtimes: Readonly<Record<string, TaskRuntimeDto>> = {}
   private boostedId: string | null = null
   private connected = false
@@ -296,6 +311,7 @@ export class RowEngine {
   // 配置。
   private selection: SidebarSelection | null = null
   private query = ''
+  private groupMatches: ReadonlySet<string> = new Set()
   private categories: CategoryIndex | null = null
   private sortKey: ViewSortKey = 'smart'
   private sortDir: SortDir = 'desc'
@@ -371,12 +387,14 @@ export class RowEngine {
       first ||
       categoriesChanged ||
       this.query !== input.query ||
+      this.groupMatches !== input.groupMatches ||
       this.selection === null ||
       !sameSelection(this.selection, input.selection)
     this.rebuildCounts = categoriesChanged
     if (categoriesChanged) this.countsLive = new SidebarCounts([], input.categories)
     this.selection = input.selection
     this.query = input.query
+    this.groupMatches = input.groupMatches
     this.categories = input.categories
     if (sortChanged) {
       this.sortKey = input.sortKey
@@ -392,6 +410,7 @@ export class RowEngine {
     const touched = new Set<string>()
     this.syncQueue(input.queuePositions, touched)
     this.syncSpeeds(input.speeds, touched)
+    this.syncUploads(input.uploads, touched)
     this.syncRuntimes(input.runtimes, touched)
     if (this.boostedId !== input.boostedId) {
       if (this.boostedId !== null) touched.add(this.boostedId)
@@ -544,6 +563,15 @@ export class RowEngine {
     for (const taskId of Object.keys(prev)) if (next[taskId] === undefined) touched.add(taskId)
   }
 
+  private syncUploads(next: Readonly<Record<string, number>>, touched: Set<string>): void {
+    const prev = this.prevUploads
+    this.uploads = next
+    if (prev === next) return
+    this.prevUploads = next
+    for (const taskId of Object.keys(next)) if (next[taskId] !== prev[taskId]) touched.add(taskId)
+    for (const taskId of Object.keys(prev)) if (next[taskId] === undefined) touched.add(taskId)
+  }
+
   private syncRuntimes(next: Readonly<Record<string, TaskRuntimeDto>>, touched: Set<string>): void {
     const prev = this.prevRuntimes
     this.runtimes = next
@@ -617,12 +645,14 @@ export class RowEngine {
   private addLocal(task: TaskDto): void {
     const taskId = task.taskId
     const speed = this.speeds[taskId] ?? null
+    const upload = this.uploads[taskId] ?? null
     const boosted = this.boostedId === taskId
     const queueKey = this.queueKeys.get(taskId) ?? null
     const runtime = this.runtimes[taskId]
-    const view = buildLocalView(task, speed, boosted, queueKey, runtime, this.connected)
+    const view = buildLocalView(task, speed, boosted, queueKey, runtime, this.connected, upload)
     const entry = this.addEntry(view, task)
     entry.speed = speed
+    entry.upload = upload
     entry.boosted = boosted
     entry.queueKey = queueKey
     entry.runtime = runtime
@@ -636,6 +666,7 @@ export class RowEngine {
       view,
       task,
       speed: null,
+      upload: null,
       boosted: false,
       queueKey: null,
       runtime: undefined,
@@ -661,12 +692,14 @@ export class RowEngine {
   private refresh(entry: Entry, task: TaskDto): void {
     const taskId = task.taskId
     const speed = this.speeds[taskId] ?? null
+    const upload = this.uploads[taskId] ?? null
     const boosted = this.boostedId === taskId
     const queueKey = this.queueKeys.get(taskId) ?? null
     const runtime = this.runtimes[taskId]
     if (
       entry.task === task &&
       entry.speed === speed &&
+      entry.upload === upload &&
       entry.boosted === boosted &&
       entry.queueKey === queueKey &&
       entry.runtime === runtime &&
@@ -676,11 +709,12 @@ export class RowEngine {
     }
     entry.task = task
     entry.speed = speed
+    entry.upload = upload
     entry.boosted = boosted
     entry.queueKey = queueKey
     entry.runtime = runtime
     entry.connected = this.connected
-    this.pushUpdate(entry, buildLocalView(task, speed, boosted, queueKey, runtime, this.connected))
+    this.pushUpdate(entry, buildLocalView(task, speed, boosted, queueKey, runtime, this.connected, upload))
   }
 
   private pushUpdate(entry: Entry, view: DownloadTaskView): void {
@@ -719,13 +753,19 @@ export class RowEngine {
     if (view.source !== 'local' || view.groupId === '') return
     let tally = this.tallies.get(view.groupId)
     if (tally === undefined) {
-      tally = { total: 0, completed: 0, failed: 0, downloading: 0, downloaded: 0, totalBytes: 0 }
+      tally = { total: 0, completed: 0, failed: 0, downloading: 0, pending: 0, paused: 0, downloaded: 0, totalBytes: 0, speed: 0 }
       this.tallies.set(view.groupId, tally)
     }
     tally.total += delta
     if (view.state === 'completed') tally.completed += delta
     else if (view.state === 'failed') tally.failed += delta
-    else if (view.state === 'downloading') tally.downloading += delta
+    else if (view.state === 'downloading') {
+      tally.downloading += delta
+      tally.speed += delta * (view.speed ?? 0)
+    } else if (view.state === 'pending') {
+      if (view.preparing) tally.downloading += delta
+      else tally.pending += delta
+    } else if (view.state === 'paused') tally.paused += delta
     tally.downloaded += delta * view.downloadedBytes
     tally.totalBytes += delta * view.sizeBytes
     if (tally.total === 0) this.tallies.delete(view.groupId)
@@ -733,7 +773,8 @@ export class RowEngine {
 
   private matches(view: DownloadTaskView): boolean {
     if (this.unfiltered) return true
-    return selectionMatches(this.selection as SidebarSelection, view, this.categories as CategoryIndex) && matchesQuery(view, this.query)
+    if (!selectionMatches(this.selection as SidebarSelection, view, this.categories as CategoryIndex)) return false
+    return matchesQuery(view, this.query) || (view.groupId !== '' && this.groupMatches.has(view.groupId))
   }
 
   // ---- 顺序维护 ----

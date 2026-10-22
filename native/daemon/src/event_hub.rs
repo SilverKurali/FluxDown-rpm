@@ -1604,6 +1604,30 @@ mod tests {
         })
     }
 
+    /// 做种上传帧按引擎采样节奏到达时，总上传速率必须读作真实速率（#939：
+    /// 5 秒一帧时状态栏在约 5 倍真实速率与 0 之间跳动，看似突破上传限速）。
+    #[test]
+    fn seeding_frames_at_engine_sample_cadence_read_as_real_upload_rate() {
+        const MIB: i64 = 1024 * 1024;
+        let cadence = fluxdown_engine::bt_seeding::SEEDING_UPLOAD_SAMPLE_INTERVAL;
+        let cadence_ticks = u64::try_from(cadence.as_millis() / 100).unwrap_or(u64::MAX);
+        assert!(cadence_ticks >= 1);
+        let start = std::time::Instant::now();
+        let mut accounting =
+            super::RuntimeAccounting::new(&[traffic_task("seed", 3, 10 * MIB, 0)], start);
+        // 1 MiB/s 的稳定做种上传（会话级限速下的真实流量）。
+        for tick in 1..=300_u64 {
+            let now = start + std::time::Duration::from_millis(tick * 100);
+            if tick % cadence_ticks == 0 {
+                let uploaded = i64::try_from(tick).unwrap_or_default() * MIB / 10;
+                accounting.apply(&traffic_progress("seed", 3, 10 * MIB, uploaded), now);
+            }
+            if tick >= 40 {
+                assert_eq!(accounting.rates(now), (0, MIB), "tick {tick}");
+            }
+        }
+    }
+
     #[test]
     fn fast_completions_accumulate_real_bytes_then_expire_without_task_events() {
         let hub = DaemonEventHub::new(DaemonSnapshot::default(), 64);

@@ -34,7 +34,6 @@ struct RootView: View {
         @Bindable var router = container.router
         let state = container.store.state
         return tabs(selection: $router.tab)
-            .tabBarMinimizeBehavior(.onScrollDown)
             .bottomAccessory(suppressed: router.isBottomAccessorySuppressed)
             .sheet(item: $router.sheet, onDismiss: sheetDismissed) { route in
                 sheetContent(route)

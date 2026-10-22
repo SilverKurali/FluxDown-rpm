@@ -238,6 +238,9 @@ pub const AGENT_LINK_REMOVE: &str = "agent.link.remove";
 pub const AGENT_LINK_RENAME: &str = "agent.link.rename";
 /// 探测全部已配对设备在线状态 → `Vec<LinkDeviceInfo>`（同时推送 `LinkedDevicesChanged`）。
 pub const AGENT_LINK_REFRESH: &str = "agent.link.refresh";
+/// `LinkDeviceParams` → `LinkControlCredentialDto`：为「本机可控制」的已配对主机签发 `/rpc`
+/// 设备控制凭据（仅 `controllable && !revoked` 的记录）。
+pub const AGENT_LINK_CONTROL_CREDENTIAL: &str = "agent.link.controlCredential";
 /// `LinkDispatchParams` → `LinkDispatchResult`：下发下载到已配对设备。
 pub const AGENT_LINK_DISPATCH: &str = "agent.link.dispatch";
 
@@ -251,6 +254,10 @@ pub const AGENT_REFERRAL_CREATE_CODE: &str = "agent.referral.createCode";
 pub const AGENT_REFERRAL_DELETE_CODE: &str = "agent.referral.deleteCode";
 pub const AGENT_REFERRAL_LIST_RECORDS: &str = "agent.referral.listRecords";
 pub const AGENT_REFERRAL_VALIDATE: &str = "agent.referral.validate";
+/// 插件市场收藏：公开计数 + （已登录时）本人收藏 → `PluginFavoritesDto`。
+pub const AGENT_PLUGIN_FAVORITE_LIST: &str = "agent.pluginFavorite.list";
+/// 收藏 / 取消收藏单个插件 → `PluginFavoriteResultDto`。
+pub const AGENT_PLUGIN_FAVORITE_SET: &str = "agent.pluginFavorite.set";
 
 /// 云端推送状态 → `CloudNotifyStateDto`（读本机缓存；过期时后台刷新并经 `CloudNotifyChanged` 推送）。
 pub const AGENT_CLOUD_NOTIFY_GET: &str = "agent.cloudNotify.get";
@@ -509,6 +516,7 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_LINK_REMOVE,
     AGENT_LINK_RENAME,
     AGENT_LINK_REFRESH,
+    AGENT_LINK_CONTROL_CREDENTIAL,
     AGENT_LINK_DISPATCH,
     AGENT_PLAN_LIST,
     AGENT_ORDER_CREATE,
@@ -520,6 +528,8 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_REFERRAL_DELETE_CODE,
     AGENT_REFERRAL_LIST_RECORDS,
     AGENT_REFERRAL_VALIDATE,
+    AGENT_PLUGIN_FAVORITE_LIST,
+    AGENT_PLUGIN_FAVORITE_SET,
     AGENT_CLOUD_NOTIFY_GET,
     AGENT_CLOUD_NOTIFY_REFRESH,
     AGENT_CLOUD_NOTIFY_SET_REPORTING,

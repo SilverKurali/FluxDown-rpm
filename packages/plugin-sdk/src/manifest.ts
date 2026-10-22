@@ -40,6 +40,7 @@ export const VIEWS_MAX = 16;
 export const COMMANDS_MAX = 32;
 export const TITLE_MAX_CHARS = 40;
 export const SNIFF_PACK_MAX_BYTES = 256 * 1024;
+export const VIEW_ICON_MAX_BYTES = 16 * 1024;
 export const SNIFF_PACK_MAX_RULES = 500;
 export const SNIFF_PACK_FORMAT = "fluxdown-sniff-pack";
 export const PAGE_SCRIPTS_MAX = 16;
@@ -47,6 +48,10 @@ export const PAGE_SCRIPT_MATCHES_MAX = 32;
 export const PAGE_SCRIPT_JS_MAX = 8;
 export const PAGE_SCRIPT_FILE_MAX_BYTES = 256 * 1024;
 export const PAGE_SCRIPT_MAX_BYTES = 384 * 1024;
+/** Client install limits (engine `install.rs` / `market.rs`): .fxplug size, zip entries, total unpacked bytes. */
+export const PACKAGE_MAX_BYTES = 10 * 1024 * 1024;
+export const PACKAGE_MAX_ENTRIES = 200;
+export const PACKAGE_MAX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024;
 
 const RSS_PROVIDER_ID = "rss";
 
@@ -416,7 +421,7 @@ function checkContributes(
         errors.push("view 须为对象");
         continue;
       }
-      unknownKeys(errors, "view", view, ["id", "title", "location", "desktop", "portable"]);
+      unknownKeys(errors, "view", view, ["id", "title", "location", "desktop", "portable", "icon"]);
       if (!isValidContributionId(view.id)) {
         errors.push(`view id '${String(view.id)}' 非法：须匹配 ^[a-z][a-z0-9-]{0,31}$`);
       } else if (seen.has(view.id)) {
@@ -438,6 +443,16 @@ function checkContributes(
       if (!hasDesktop) {
         if (view.portable === true) errors.push(`view '${String(view.id)}' 的 portable 仅允许与 desktop 同时声明`);
       } else checkDesktop(errors, view, view.desktop, files, permissions);
+      if (view.icon !== undefined && view.icon !== null) {
+        if (typeof view.icon !== "string") errors.push(`view '${String(view.id)}' icon 须为字符串`);
+        else if (!isSafeRelativePath(view.icon)) errors.push(`view '${String(view.id)}' icon 路径 '${view.icon}' 非法`);
+        else {
+          if (!hasExtension(view.icon, [".svg"])) {
+            errors.push(`view '${String(view.id)}' icon '${view.icon}' 扩展名须为 .svg`);
+          }
+          if (!inPackage(files, view.icon)) errors.push(`包内缺少文件 '${view.icon}'`);
+        }
+      }
       const portable = !hasDesktop || view.portable === true;
       if (portable && !hasMain) errors.push(`view '${String(view.id)}' 有可移植实现，必须声明 main`);
     }
@@ -771,7 +786,7 @@ export function networkHostsOf(manifest: {
   return [...hosts].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-/** Files that must exist at install: `main.entry`, each `desktop.entry`, `sniffRules`, every pageScript `js`. */
+/** Files that must exist at install: `main.entry`, each `desktop.entry`, each view `icon`, `sniffRules`, every pageScript `js`. */
 export function packageFilesOf(manifest: Obj): string[] {
   const files: string[] = [];
   const main = manifest.main;
@@ -783,6 +798,9 @@ export function packageFilesOf(manifest: Obj): string[] {
         if (isObject(view) && isObject(view.desktop) && typeof view.desktop.entry === "string") {
           files.push(view.desktop.entry);
         }
+      }
+      for (const view of contributes.views) {
+        if (isObject(view) && typeof view.icon === "string") files.push(view.icon);
       }
     }
     if (typeof contributes.sniffRules === "string") files.push(contributes.sniffRules);
@@ -821,6 +839,31 @@ export function validateSniffPack(content: string | Uint8Array): ValidationResul
     errors.push(`sniffRules 至多 ${SNIFF_PACK_MAX_RULES} 条规则`);
   }
   return { ok: errors.length === 0, errors };
+}
+
+/**
+ * Validates a view `icon` SVG (Rust `validate_view_icon`): ≤16 KiB, valid UTF-8, and a SVG
+ * document (after a leading BOM / whitespace it starts with `<svg` or `<?xml` and contains `<svg`).
+ */
+export function validateViewIcon(viewId: string, content: string | Uint8Array): ValidationResult {
+  const size = typeof content === "string" ? utf8Length(content) : content.byteLength;
+  if (size > VIEW_ICON_MAX_BYTES) {
+    return { ok: false, errors: [`view '${viewId}' icon 超过 ${VIEW_ICON_MAX_BYTES} 字节`] };
+  }
+  let text: string;
+  if (typeof content === "string") text = content;
+  else {
+    try {
+      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content);
+    } catch {
+      return { ok: false, errors: [`view '${viewId}' icon 不是合法 UTF-8`] };
+    }
+  }
+  const head = text.replace(/^\uFEFF/, "").trim().toLowerCase();
+  if (!((head.startsWith("<svg") || head.startsWith("<?xml")) && head.includes("<svg"))) {
+    return { ok: false, errors: [`view '${viewId}' icon 不是 SVG 文档`] };
+  }
+  return { ok: true, errors: [] };
 }
 
 /**
@@ -873,4 +916,68 @@ export function validatePageScriptFiles(
     }
   }
   return { ok: true, errors, code };
+}
+
+/** File contents keyed by package-relative path (`/` separators). */
+export type PackageFiles = ReadonlyMap<string, Uint8Array | string>;
+
+/**
+ * Every check a client applies when installing a package, in listing-strict mode: the manifest
+ * rules plus file count / unpacked size and the contents of the sniff rule pack, view icons and
+ * page scripts. `fluxdown-plugin validate` and the plugin index both admit packages through this
+ * one function, so a new install rule only has to be added here.
+ */
+export function validatePackage(manifest: unknown, files: PackageFiles): ValidationResult {
+  const errors = [...validateManifest(manifest, new Set(files.keys()), { strict: true }).errors];
+  if (files.size > PACKAGE_MAX_ENTRIES) errors.push(`包内文件数 ${files.size} 超过上限 ${PACKAGE_MAX_ENTRIES}`);
+  let total = 0;
+  for (const content of files.values()) total += typeof content === "string" ? utf8Length(content) : content.byteLength;
+  if (total > PACKAGE_MAX_UNCOMPRESSED_BYTES) errors.push(`包解压总量 ${total} 字节超过上限 ${PACKAGE_MAX_UNCOMPRESSED_BYTES}`);
+  const read = (path: string) => files.get(path.replaceAll("\\", "/"));
+  const contributes = isObject(manifest) && isObject(manifest.contributes) ? manifest.contributes : null;
+  if (contributes === null) return { ok: errors.length === 0, errors };
+  // A missing or illegal path is already reported by validateManifest; only present files are read.
+  const rules = typeof contributes.sniffRules === "string" ? read(contributes.sniffRules) : undefined;
+  if (rules !== undefined) errors.push(...validateSniffPack(rules).errors);
+  for (const view of Array.isArray(contributes.views) ? contributes.views : []) {
+    const icon = isObject(view) && typeof view.icon === "string" ? read(view.icon) : undefined;
+    if (icon !== undefined) errors.push(...validateViewIcon(String((view as Obj).id), icon).errors);
+  }
+  for (const script of Array.isArray(contributes.pageScripts) ? contributes.pageScripts : []) {
+    if (!isObject(script) || !Array.isArray(script.js)) continue;
+    if (!script.js.every((file) => typeof file === "string" && read(file) !== undefined)) continue;
+    errors.push(...validatePageScriptFiles(script, read).errors);
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+/** What a reviewer has to approve before a package is listed: the same facts the client's consent dialog shows. */
+export interface PackageReview {
+  permissions: string[];
+  risk: PluginRisk;
+  /** Hosts desktop scripts may reach (`networkHostsOf`). */
+  networkHosts: string[];
+  /** URL globs whose downloads the plugin handles: resolver, hooks and interceptors `match.urls`. */
+  downloadUrls: string[];
+  /** Web pages the browser extension runs the plugin's page scripts on (`pageScripts[].matches`). */
+  pageScriptMatches: string[];
+}
+
+const sortedUnique = (values: Iterable<string>) => [...new Set(values)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+const matchUrls = (decl: unknown): string[] =>
+  isObject(decl) && isObject(decl.match) && stringArray(decl.match.urls) ? decl.match.urls : [];
+
+/** Review summary of a manifest that passed {@link validatePackage}. */
+export function reviewOf(manifest: Obj): PackageReview {
+  const contributes = isObject(manifest.contributes) ? manifest.contributes : {};
+  const resolvers = Array.isArray(manifest.resolvers) ? manifest.resolvers : [];
+  const pageScripts = Array.isArray(contributes.pageScripts) ? contributes.pageScripts : [];
+  return {
+    permissions: stringArray(manifest.permissions) ? [...manifest.permissions] : [],
+    risk: riskOf(manifest as { permissions?: string[] }),
+    networkHosts: networkHostsOf(manifest as Parameters<typeof networkHostsOf>[0]),
+    downloadUrls: sortedUnique([...resolvers.flatMap(matchUrls), ...matchUrls(manifest.hooks), ...matchUrls(manifest.interceptors)]),
+    pageScriptMatches: sortedUnique(pageScripts.flatMap((s) => (isObject(s) && stringArray(s.matches) ? s.matches : []))),
+  };
 }

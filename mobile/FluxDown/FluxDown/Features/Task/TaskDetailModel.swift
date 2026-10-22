@@ -18,7 +18,7 @@ nonisolated enum TaskDetailVisual: Sendable, Hashable {
         case .completed:
             if task.fileMissing {
                 self = .missing
-            } else if task.seedingStatus == .seeding {
+            } else if task.isSeeding {
                 self = .seeding
             } else {
                 self = .completed

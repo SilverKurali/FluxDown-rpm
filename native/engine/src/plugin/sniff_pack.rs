@@ -310,6 +310,7 @@ mod tests {
                 sniff_rules: rules.map(str::to_string),
                 ..ContributesDecl::default()
             },
+            view_icons: Vec::new(),
             has_main: false,
             risk: PluginRisk::Elevated,
             network_hosts: Vec::new(),

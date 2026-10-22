@@ -506,6 +506,28 @@ mod tests {
     }
 
     #[test]
+    fn lan_pairing_address_shapes_map_to_the_rpc_endpoint() {
+        // 局域网配对得到的主机地址（发现的 `host:port`、手输、配对码里的 `http(s)://host:port`、
+        // 反代子路径）直接作为远端主机端点：设备控制凭据走同一条 `/rpc` 升级。
+        assert_eq!(norm("192.168.1.20:17800"), "ws://192.168.1.20:17800/rpc");
+        assert_eq!(
+            norm("http://192.168.1.20:17800"),
+            "ws://192.168.1.20:17800/rpc"
+        );
+        assert_eq!(norm("http://nas.local:17800/"), "ws://nas.local:17800/rpc");
+        assert_eq!(
+            norm("https://nas.example.com/fluxdown"),
+            "wss://nas.example.com/fluxdown/rpc"
+        );
+        assert_eq!(
+            norm("https://nas.example.com:8443/fluxdown/"),
+            "wss://nas.example.com:8443/fluxdown/rpc"
+        );
+        assert_eq!(norm("[fd00::5]:17800"), "ws://[fd00::5]:17800/rpc");
+        assert_eq!(norm("http://[fd00::5]:17800"), "ws://[fd00::5]:17800/rpc");
+    }
+
+    #[test]
     fn rejects_empty_unknown_scheme_and_credentials() {
         for bad in [
             "",

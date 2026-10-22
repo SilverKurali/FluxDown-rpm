@@ -11,6 +11,7 @@ import {
   parsePluginRouteId,
   pluginRouteId,
   settingsViewOf,
+  svgMaskUrl,
 } from './contributions'
 
 function plugin(over: Partial<PluginDto> & { identity: string }): PluginDto {
@@ -65,6 +66,24 @@ describe('plugin contributions', () => {
     const entries = deriveActivityEntries(all)
     expect(entries.map((entry) => entry.id)).toEqual(['plugin:a@x:dash'])
     expect(entries[0]?.label).toBe('T-dash')
+  })
+
+  test('activity icon: declared svg becomes a mask, otherwise default glyph', () => {
+    const iconSvg = '<svg viewBox="0 0 24 24"><path d="M4 12h16"/></svg>'
+    const withIcon = plugin({ ...good, contributions: { ...good.contributions, views: [{ ...view('dash', 'activity'), iconSvg }] } })
+    expect(deriveActivityEntries([withIcon])[0]?.iconMask).toBe(svgMaskUrl(iconSvg))
+    expect(deriveActivityEntries([good])[0]?.iconMask).toBeNull()
+  })
+
+  test('svg mask adds the svg namespace only when missing', () => {
+    const decode = (mask: string) => decodeURIComponent(mask.slice('url("data:image/svg+xml;charset=utf-8,'.length, -2))
+    expect(decode(svgMaskUrl('<?xml version="1.0"?>\n<svg viewBox="0 0 1 1"><g/></svg>'))).toBe(
+      '<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><g/></svg>',
+    )
+    const namespaced = '<svg xmlns="http://www.w3.org/2000/svg"><g/></svg>'
+    expect(decode(svgMaskUrl(namespaced))).toBe(namespaced)
+    // 编码后不含能提前结束 CSS url("...") 的双引号。
+    expect(svgMaskUrl('<svg a="b">"</svg>').slice(5, -2).includes('"')).toBe(false)
   })
 
   test('chrome specs default to railTop with rail/title families', () => {

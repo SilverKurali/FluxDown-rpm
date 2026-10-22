@@ -4,7 +4,7 @@ description: "Rust 禁止 todo!/unimplemented! 与静默忽略错误（lint deny
 ---
 <!-- 由 .omp/ 生成（python3 .augment/sync_from_omp.py），请改 .omp 源文件 -->
 
-根 `Cargo.toml` 的 `[workspace.lints]` 把以下 lint 设为 deny（所有活动 crate 经 `[lints] workspace = true` 继承，冻结的 `native/server` 除外）。`unused_must_use` 在普通编译时生效，其余由 Clippy 门禁拦截；不得只跑 `cargo check` 就宣称全部规则通过：
+根 `Cargo.toml` 的 `[workspace.lints]` 把以下 lint 设为 deny（所有 crate 经 `[lints] workspace = true` 继承）。`unused_must_use` 在普通编译时生效，其余由 Clippy 门禁拦截；不得只跑 `cargo check` 就宣称全部规则通过：
 
 |lint|拦截的写法|
 |---|---|

@@ -111,7 +111,7 @@ struct RowText {
         case .completed:
             return StatusLine(text: t("statusCompleted"), tone: .secondary)
         case .seeding:
-            var text = t("statusSeeding")
+            var text = t(item.task.seedingStatus == .queuedForSlot ? "seedingStatusQueued" : "statusSeeding")
             if item.speedUp > 0, let up = Format.speed(item.speedUp) { text += " · ↑ " + up.description }
             return StatusLine(text: text, tone: .success)
         case .missing:

@@ -18,7 +18,7 @@ export function useRowEngine(input: RowEngineInput): RowEngineState {
   const [engine] = useState(() => new RowEngine())
   const [tick, setTick] = useState(0)
   const forced = useRef(0)
-  const { tasks, speeds, boostedId, queuePositions, runtimes, connected, remote, selection, query, categories, sortKey, sortDir } = input
+  const { tasks, speeds, uploads, boostedId, queuePositions, runtimes, connected, remote, selection, query, groupMatches, categories, sortKey, sortDir } = input
   const dynamicKey = isDynamicSortKey(sortKey)
   const dynamicRef = useRef(dynamicKey)
   dynamicRef.current = dynamicKey
@@ -27,10 +27,10 @@ export function useRowEngine(input: RowEngineInput): RowEngineState {
     const force = tick !== forced.current
     forced.current = tick
     return engine.update(
-      { tasks, speeds, boostedId, queuePositions, runtimes, connected, remote, selection, query, categories, sortKey, sortDir },
+      { tasks, speeds, uploads, boostedId, queuePositions, runtimes, connected, remote, selection, query, groupMatches, categories, sortKey, sortDir },
       { now: Date.now(), lastPointerAt: pointerActivity.lastAt, menuOpen: isMenuOpen(), force },
     )
-  }, [engine, tick, tasks, speeds, boostedId, queuePositions, runtimes, connected, remote, selection, query, categories, sortKey, sortDir])
+  }, [engine, tick, tasks, speeds, uploads, boostedId, queuePositions, runtimes, connected, remote, selection, query, groupMatches, categories, sortKey, sortDir])
 
   useEffect(() => {
     if (!snapshot.stale) return

@@ -83,7 +83,7 @@ fun Task.visualState(queued: Boolean): TaskVisualState = when (status) {
     TaskStatus.Failed -> TaskVisualState.Failed
     TaskStatus.Completed -> when {
         fileMissing -> TaskVisualState.Missing
-        seedingStatus == com.fluxdown.core.model.SeedingStatus.Seeding -> TaskVisualState.Seeding
+        isSeeding -> TaskVisualState.Seeding
         else -> TaskVisualState.Completed
     }
     TaskStatus.Unknown -> TaskVisualState.Pending

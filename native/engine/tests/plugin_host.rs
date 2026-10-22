@@ -494,3 +494,58 @@ async fn plugin_host_reports_tasks_started_by_page_calls_only() {
     assert_eq!(value, json!("seen"));
     assert_eq!(started, fluxdown_engine::plugin::StartedTasks::default());
 }
+
+const ICON_MANIFEST: &str = r#"{
+  "identity": "tester@host",
+  "name": "Icon Test",
+  "version": "1.0.0",
+  "main": { "entry": "main.js" },
+  "contributes": {
+    "views": [
+      { "id": "a", "title": "A", "location": "activity", "icon": "icons/a.svg" },
+      { "id": "b", "title": "B", "location": "activity" }
+    ]
+  }
+}"#;
+
+const ICON_SVG: &str =
+    r#"<svg viewBox="0 0 24 24"><path d="M4 12h16" stroke="currentColor"/></svg>"#;
+
+/// 视图图标在加载期读入，按 view id 挂到插件投影上；未声明图标的视图没有条目。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_view_icon_is_loaded_with_the_package() {
+    let fx = fixture_with(ICON_MANIFEST, "", &[], &[("icons/a.svg", ICON_SVG)]).await;
+    let plugins = fx.pm.list().await;
+    let plugin = plugins
+        .iter()
+        .find(|p| p.identity == IDENTITY)
+        .expect("listed");
+    assert_eq!(plugin.load_status, "Loaded");
+    assert_eq!(
+        plugin.view_icons,
+        vec![("a".to_owned(), ICON_SVG.to_owned())]
+    );
+}
+
+/// 图标文件不是 SVG 文档时安装失败并回滚，而不是静默回退默认图标。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_install_rejects_non_svg_view_icon() {
+    let work = std::env::temp_dir().join(format!("fluxdown-plugin-icon-{}", uniq()));
+    let src = work.join("plugin-src");
+    tokio::fs::create_dir_all(src.join("icons"))
+        .await
+        .expect("src dir");
+    tokio::fs::write(src.join("manifest.json"), ICON_MANIFEST)
+        .await
+        .expect("manifest");
+    tokio::fs::write(src.join("main.js"), "")
+        .await
+        .expect("main");
+    tokio::fs::write(src.join("icons/a.svg"), "<html></html>")
+        .await
+        .expect("icon");
+    let engine = make_engine(&work, Arc::new(CaptureSink::default())).await;
+    let pm = engine.manager.plugin_manager().expect("pm installed");
+    assert!(pm.install_from_dir(&src).await.is_err());
+    assert!(pm.list().await.iter().all(|p| p.identity != IDENTITY));
+}

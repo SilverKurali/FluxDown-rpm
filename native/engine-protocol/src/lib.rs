@@ -519,7 +519,7 @@ pub fn plugin_info_to_dto(
         resolver_urls: plugin.resolver_urls,
         load_status: plugin.load_status,
         load_error: plugin.load_error,
-        contributions: plugin_contributions_to_dto(&plugin.contributions),
+        contributions: plugin_contributions_to_dto(&plugin.contributions, plugin.view_icons),
         risk: plugin.risk.as_str().to_owned(),
         consent_pending: plugin.consent_pending,
         consent_pending_hosts: plugin.consent_pending_hosts,
@@ -532,6 +532,7 @@ pub fn plugin_info_to_dto(
 #[cfg(feature = "plugins")]
 fn plugin_contributions_to_dto(
     contributes: &fluxdown_engine::plugin::manifest::ContributesDecl,
+    mut view_icons: Vec<(String, String)>,
 ) -> fluxdown_protocol::daemon::PluginContributionsDto {
     use fluxdown_protocol::daemon::{
         PluginCommandDeclDto, PluginContributionsDto, PluginDesktopEntryDto,
@@ -552,6 +553,10 @@ fn plugin_contributions_to_dto(
                     height: d.height,
                     network_hosts: d.network_hosts.clone(),
                 }),
+                icon_svg: view_icons
+                    .iter()
+                    .position(|(id, _)| *id == view.id)
+                    .map(|index| view_icons.swap_remove(index).1),
             })
             .collect(),
         commands: contributes

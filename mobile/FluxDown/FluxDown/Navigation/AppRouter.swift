@@ -91,6 +91,14 @@ final class AppRouter {
     var dismissedSelections: Set<String> = []
     /// 待目标页执行的一次性意图（见 `AppIntent`）。
     var pendingIntent: AppIntent?
+    /// 「重新配对」入口给添加主机面板预填的主机地址（面板出现时一次性消费，见 `AddHostSheet`）。
+    var addHostRepairAddress: String?
+
+    /// 已配对主机被拒后重新配对：打开添加主机面板（配对模式）并预填该主机的地址。
+    func presentRepair(address: String) {
+        addHostRepairAddress = address
+        sheet = .addHost
+    }
 
     /// 收起当前 Sheet、切到意图所在的标签，并登记意图（目标页在标签被选中且无 Sheet 后消费）。
     func perform(_ intent: AppIntent) {

@@ -1812,7 +1812,7 @@
   "openGroupInWindowAction": "在獨立視窗開啟群組",
   "groupPluginBadge": "外掛",
   "groupMemberExpiredResolve": "直接連結已過期 · 下次啟動時自動重新解析 ↻",
-  "groupDirMeta": "{count} 個檔案 · {size}",
+  "groupDirCount": "{count} 個檔案",
   "groupDetailOverviewTab": "概覽",
   "groupDetailMembersTab": "成員",
   "groupDetailSource": "來源",

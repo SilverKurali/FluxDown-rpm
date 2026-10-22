@@ -156,6 +156,9 @@ resolver、拦截器、订阅 provider 或 `main` 调用中，**连续** 3 次�
 | `读取入口文件 '…' 失败: …` | 入口文件存在但读不出来（没有权限、路径是个目录，或文件不是合法的 UTF-8）；冒号之后是系统错误。出现的场合同上。 | 修好权限或文件（UTF-8 文本），然后**重新加载**。 |
 | `main entry '…' 扩展名须为 .js` | `main` 不是 `.js` 文件。 | 改名。 |
 | `sniffRules '…' 扩展名须为 .json` / `sniffRules format 须为 fluxdown-sniff-pack` / `sniffRules 至多 500 条规则` / `sniffRules 文件超过 262144 字节` | 嗅探规则包有问题。 | 见 [Manifest 参考](/docs/zh/plugins/manifest/)。 |
+| `view '<id>' icon 路径 '…' 非法` / `view '<id>' icon '…' 扩展名须为 .svg` | 视图 `icon` 不是安全的包内相对路径，或不是 `.svg` 文件。 | 使用包内的相对 `.svg` 路径。 |
+| `view '<id>' icon 超过 16384 字节` / `view '<id>' icon 不是合法 UTF-8` | 图标文件超过 16 KiB，或不是 UTF-8 文本。 | 精简 SVG；以 UTF-8 保存。 |
+| `view '<id>' icon 不是 SVG 文档` | 去掉可选的 BOM 与空白后，文件不以 `<svg` 或 `<?xml` 开头，或不含 `<svg`。 | 提供真正的 SVG 文件。 |
 | `需要 App ≥ X，当前 Y` | `minAppVersion` 比你的应用新。 | 升级 FluxDown，或降低 `minAppVersion`。 |
 | `脚本编译失败: …` | resolver、hooks、interceptors、auth 或订阅脚本有语法错误——**或者在顶层就抛了异常**。检查时会在一个没有 `flux` 和 `console` 的空白上下文里把脚本求值一次。 | 修正语法；把所有 `flux.*` / `console.*` 调用挪进入口函数。TypeScript 项目请运行 `npm run typecheck`，并确认产物已重新构建。 |
 | `安装后未能加载插件（校验失败或版本门槛不满足）` | 上面这些检查在安装过程中失败了；如果有旧版本，已经被恢复。 | 看日志里更早的几行，找到真正的原因。 |

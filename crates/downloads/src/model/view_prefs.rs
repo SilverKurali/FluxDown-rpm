@@ -4,12 +4,15 @@ use std::cmp::Ordering;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use fluxdown_ui_theme::DensityTokens;
-use gpui::Pixels;
+use gpui::{Pixels, px};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{DownloadTaskView, TaskState};
 
 pub(crate) const VIEW_PREFS_KEY: &str = "desktop.downloads.view";
+/// 宽松密度行高 = 旧 Flutter 默认列表的 64px（Web `rowHeightClass` 同值）。字号放大到舒适行
+/// 本身超过它时取舒适行高，保证两行文字不被裁切。
+const RELAXED_ROW_HEIGHT: f32 = 64.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,13 +24,14 @@ pub(crate) enum ViewDensity {
 }
 
 impl ViewDensity {
-    /// 任务行高：舒适双行取 `density.taskRow`（默认 44 = 13/18 正文 + 12/16 元信息 + 上下留白），
-    /// 紧凑单行取 `density.taskRowCompact`（默认 30），宽松双行取舒适的 1.5 倍（默认 66）。
+    /// 任务行高：舒适双行取 `density.taskRow`（默认 44 = 13/18 正文 + 12/16 元信息 + 上下留白，
+    /// 随字号增长），紧凑单行取 `density.taskRowCompact`（默认 30），宽松双行固定 64（旧 Flutter
+    /// 默认列表行高，不随字号叠加），仅在舒适行高更大时跟随它。
     pub(crate) fn row_height(self, density: &DensityTokens) -> Pixels {
         match self {
             Self::Comfortable => density.task_row,
             Self::Compact => density.task_row_compact,
-            Self::Relaxed => density.task_row * 1.5,
+            Self::Relaxed => density.task_row.max(px(RELAXED_ROW_HEIGHT)),
         }
     }
 
@@ -55,18 +59,16 @@ pub(crate) enum ViewGroupBy {
     Type,
     Queue,
     Site,
-    Group,
 }
 
 impl ViewGroupBy {
-    const CYCLE: [Self; 7] = [
+    const CYCLE: [Self; 6] = [
         Self::None,
         Self::Status,
         Self::Date,
         Self::Type,
         Self::Queue,
         Self::Site,
-        Self::Group,
     ];
 
     pub(crate) fn next(self) -> Self {

@@ -4649,46 +4649,8 @@ impl Db {
         Ok(())
     }
 
-    /// 插入或更新一条已配对设备（link 名册）。冲突（同指纹 = 同一设备）时刷新
-    /// 展示名/平台/候选端点/**链路密钥**/配对与最近活跃时间——重新配对会用新
-    /// ECDH 派生的密钥覆盖旧值（支持密钥轮换）。`identity_pub` 由指纹决定，不变。
-    #[allow(clippy::too_many_arguments)]
-    pub async fn link_upsert_device(
-        &self,
-        fingerprint: &str,
-        identity_pub: &[u8],
-        name: &str,
-        platform: &str,
-        link_secret: &[u8],
-        candidates_json: &str,
-        paired_at: i64,
-        last_seen_at: i64,
-    ) -> Result<(), DbError> {
-        sqlx::query(
-            "INSERT INTO link_devices (fingerprint, identity_pub, name, platform, link_secret, candidates, paired_at, last_seen_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             ON CONFLICT (fingerprint) DO UPDATE SET
-                 name = excluded.name,
-                 platform = excluded.platform,
-                 link_secret = excluded.link_secret,
-                 candidates = excluded.candidates,
-                 paired_at = excluded.paired_at,
-                 last_seen_at = excluded.last_seen_at",
-        )
-        .bind(fingerprint)
-        .bind(identity_pub)
-        .bind(name)
-        .bind(platform)
-        .bind(link_secret)
-        .bind(candidates_json)
-        .bind(paired_at)
-        .bind(last_seen_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// 读取全部已配对设备，按最近活跃降序。
+    /// 读取旧版遗留的已配对设备名册（按最近活跃降序），仅供 daemon 向 agent
+    /// 一次性迁移（`link_migration_export`）；互联状态现由 agent 自行持久化。
     pub async fn link_load_devices(&self) -> Result<Vec<LinkDeviceRow>, DbError> {
         let rows = sqlx::query(
             "SELECT fingerprint, identity_pub, name, platform, link_secret, candidates, paired_at, last_seen_at
@@ -4700,66 +4662,6 @@ impl Db {
             .map(link_device_from_row)
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
-    }
-
-    /// 按指纹读取单台已配对设备（数据面链路鉴权时查密钥用）。
-    pub async fn link_load_device(
-        &self,
-        fingerprint: &str,
-    ) -> Result<Option<LinkDeviceRow>, DbError> {
-        let row = sqlx::query(
-            "SELECT fingerprint, identity_pub, name, platform, link_secret, candidates, paired_at, last_seen_at
-             FROM link_devices WHERE fingerprint = $1",
-        )
-        .bind(fingerprint)
-        .fetch_optional(&self.pool)
-        .await?;
-        match row {
-            Some(r) => Ok(Some(link_device_from_row(&r)?)),
-            None => Ok(None),
-        }
-    }
-
-    /// 删除一台已配对设备（解除配对）。返回是否删到行。
-    pub async fn link_delete_device(&self, fingerprint: &str) -> Result<bool, DbError> {
-        let r = sqlx::query("DELETE FROM link_devices WHERE fingerprint = $1")
-            .bind(fingerprint)
-            .execute(&self.pool)
-            .await?;
-        Ok(r.rows_affected() > 0)
-    }
-
-    /// 刷新设备最近活跃时间（成功连接/探活后）。
-    pub async fn link_touch_device(
-        &self,
-        fingerprint: &str,
-        last_seen_at: i64,
-    ) -> Result<(), DbError> {
-        sqlx::query("UPDATE link_devices SET last_seen_at = $1 WHERE fingerprint = $2")
-            .bind(last_seen_at)
-            .bind(fingerprint)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// 刷新一台已配对设备的候选端点（mDNS 重新发现命中已配对指纹时调用，
-    /// 修复设备 DHCP 换 IP 后旧候选失效的问题）。**不**顺带刷新
-    /// `last_seen_at`——mDNS 广播只证明「对端在广播」，不证明「本机刚和它
-    /// 说上话」，与 [`Self::link_touch_device`]「拨通了才算在线」的语义
-    /// 冲突（否则设备开着但从未真正连接过也会被判定为「最近活跃」）。
-    /// 返回是否命中已配对设备。
-    pub async fn link_update_candidates(
-        &self,
-        fingerprint: &str,
-        candidates_json: &str,
-    ) -> Result<bool, DbError> {
-        let r = sqlx::query("UPDATE link_devices SET candidates = $1 WHERE fingerprint = $2")
-            .bind(candidates_json)
-            .bind(fingerprint)
-            .execute(&self.pool)
-            .await?;
-        Ok(r.rows_affected() > 0)
     }
 
     // -----------------------------------------------------------------------

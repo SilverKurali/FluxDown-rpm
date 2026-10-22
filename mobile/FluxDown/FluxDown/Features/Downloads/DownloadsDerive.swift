@@ -100,7 +100,7 @@ struct DownloadsDeriver {
             : []
         var folderCounts = Array(repeating: 0, count: StatusFolder.allCases.count)
         for it in scoped {
-            for (i, folder) in StatusFolder.allCases.enumerated() where folder.accepts(it.task.status) {
+            for (i, folder) in StatusFolder.allCases.enumerated() where folder.accepts(it.task) {
                 folderCounts[i] += 1
             }
         }
@@ -111,7 +111,7 @@ struct DownloadsDeriver {
         }
 
         // 3. 文件夹内 → 分类计数 → 分类 / 仅远程筛选
-        let inFolder = scoped.filter { f.folder.accepts($0.task.status) }
+        let inFolder = scoped.filter { f.folder.accepts($0.task) }
         let remoteInFolder = remoteRows(remoteScoped.filter { f.folder.accepts($0.status) })
         var categoryCounts: [String: Int] = [:]
         for it in inFolder {
@@ -547,7 +547,7 @@ struct DownloadsDeriver {
             visible.append(contentsOf: inflight.compactMap { $0.item?.id })
         }
         if !history.isEmpty {
-            let named: StatusFolder? = (folder == .completed || folder == .failed || folder == .paused) ? folder : nil
+            let named: StatusFolder? = (folder == .completed || folder == .seeding || folder == .failed || folder == .paused) ? folder : nil
             sections.append(DownloadsSection(
                 id: "history", kind: .history, title: .history(named), count: history.count, doneOfTotal: nil,
                 downSpeed: 0, collapsed: false, rows: history

@@ -10,9 +10,9 @@
 //! 本文件（纯模块）只做结构校验：`pattern` 仅 string 有效、非空即存储；实际编译/
 //! 匹配在持有 runtime 的 manager 侧完成。
 //!
-//! 官方插件索引（`zerx-lab/fluxdown-plugin-index`）的 `scripts/package-lib.mjs` 镜像本文件
-//! 与 `install.rs` 的准入规则，市场收录的包必须能在客户端安装：改字段、权限、事件、
-//! 设置矩阵或安装限制时同步该脚本。
+//! 官方插件索引（`zerx-lab/fluxdown-plugin-index`）用已发布 SDK 的 `dist/manifest.mjs`
+//! （`packages/plugin-sdk/src/manifest.ts::validatePackage`）做准入，市场收录的包必须能在客户端
+//! 安装：改字段、权限、事件、设置矩阵或安装限制时同步 SDK 并发版，索引仓自动同步。
 
 use std::collections::HashSet;
 
@@ -279,6 +279,10 @@ pub struct ViewDecl {
     /// 仅允许与 `desktop` 同时出现；未声明 `desktop` 的 view 恒为可移植。
     #[serde(default)]
     pub portable: bool,
+    /// 视图图标：包内相对路径的 `.svg` 文件（单色，按宿主主题着色）。加载期读入并随
+    /// 插件 DTO 内联下发；未声明时宿主用默认图标。
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 impl ViewDecl {
@@ -400,6 +404,8 @@ pub const VIEWS_MAX: usize = 16;
 pub const COMMANDS_MAX: usize = 32;
 /// view / command 标题的最大字符数。
 const TITLE_MAX_CHARS: usize = 40;
+/// 视图图标（`contributes.views[].icon`）文件大小上限。
+pub const VIEW_ICON_MAX_BYTES: usize = 16 * 1024;
 /// sniff 规则包文件大小与规则数上限。
 pub const SNIFF_PACK_MAX_BYTES: usize = 256 * 1024;
 pub const SNIFF_PACK_MAX_RULES: usize = 500;
@@ -765,7 +771,8 @@ impl PluginManifest {
         hosts
     }
 
-    /// 包内必须存在的文件：`main.entry`、各 `desktop.entry`、`sniffRules`。
+    /// 包内必须存在的文件：`main.entry`、各 `desktop.entry`、各视图 `icon`、`sniffRules`、
+    /// 页面脚本 `js`。
     pub fn package_files(&self) -> Vec<String> {
         let mut files = Vec::new();
         if let Some(main) = &self.main {
@@ -778,6 +785,7 @@ impl PluginManifest {
                     .filter_map(|v| v.desktop.as_ref())
                     .map(|d| d.entry.clone()),
             );
+            files.extend(c.views.iter().filter_map(|v| v.icon.clone()));
             files.extend(c.sniff_rules.iter().cloned());
             files.extend(c.page_scripts.iter().flat_map(|s| s.js.iter().cloned()));
         }
@@ -885,6 +893,14 @@ fn validate_contributes(m: &PluginManifest) -> Result<(), PluginError> {
         }
         if v.is_portable() && m.main.is_none() {
             return manifest_err(format!("view '{}' 有可移植实现，必须声明 main", v.id));
+        }
+        if let Some(icon) = &v.icon {
+            if !is_safe_relative_path(icon) {
+                return manifest_err(format!("view '{}' icon 路径 '{icon}' 非法", v.id));
+            }
+            if !has_extension(icon, &[".svg"]) {
+                return manifest_err(format!("view '{}' icon '{icon}' 扩展名须为 .svg", v.id));
+            }
         }
     }
     if c.commands.len() > COMMANDS_MAX {
@@ -1155,6 +1171,27 @@ pub fn validate_sniff_pack(bytes: &[u8]) -> Result<(), PluginError> {
         return manifest_err(format!("sniffRules 至多 {SNIFF_PACK_MAX_RULES} 条规则"));
     }
     Ok(())
+}
+
+/// 校验视图图标文件内容：≤16 KiB、合法 UTF-8、根元素为 `<svg>`（允许前置 BOM / 空白 /
+/// XML 声明）。返回图标 SVG 文本。宿主只把它当单色蒙版渲染（GPUI `svg` / Web CSS
+/// `mask-image`），这两种上下文都不执行脚本、不加载外部资源。
+pub fn validate_view_icon(view_id: &str, bytes: Vec<u8>) -> Result<String, PluginError> {
+    if bytes.len() > VIEW_ICON_MAX_BYTES {
+        return manifest_err(format!(
+            "view '{view_id}' icon 超过 {VIEW_ICON_MAX_BYTES} 字节"
+        ));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| {
+        PluginError::ManifestInvalid(format!("view '{view_id}' icon 不是合法 UTF-8"))
+    })?;
+    let head = text
+        .trim_start_matches(|c: char| c == '\u{feff}' || c.is_whitespace())
+        .to_ascii_lowercase();
+    if !(head.starts_with("<svg") || head.starts_with("<?xml")) || !head.contains("<svg") {
+        return manifest_err(format!("view '{view_id}' icon 不是 SVG 文档"));
+    }
+    Ok(text)
 }
 
 /// 小写 DNS 主机名（RFC 1123 标签，总长 ≤253）或 IP 字面量；禁 scheme/端口/路径/通配符。
@@ -1650,6 +1687,25 @@ mod tests {
         assert!(validate_sniff_pack(many.as_bytes()).is_err());
         let big = vec![b' '; super::SNIFF_PACK_MAX_BYTES + 1];
         assert!(validate_sniff_pack(&big).is_err());
+    }
+
+    #[test]
+    fn view_icon_content_validation() {
+        use super::{VIEW_ICON_MAX_BYTES, validate_view_icon};
+        let svg = "\u{feff}\n <SVG viewBox=\"0 0 24 24\"><path d=\"M4 12h16\"/></SVG>";
+        assert_eq!(validate_view_icon("v", svg.into()).unwrap(), svg);
+        let declared = "<?xml version=\"1.0\"?><svg viewBox=\"0 0 1 1\"/>";
+        assert!(validate_view_icon("v", declared.into()).is_ok());
+        // XML 声明后没有 svg 根、非 SVG 文档、非 UTF-8、超限都拒绝。
+        assert!(validate_view_icon("v", "<?xml version=\"1.0\"?><html/>".into()).is_err());
+        assert!(validate_view_icon("v", "<html><svg/></html>".into()).is_err());
+        assert!(validate_view_icon("v", vec![b'<', b's', b'v', b'g', 0xff]).is_err());
+        let mut big = b"<svg>".to_vec();
+        big.resize(VIEW_ICON_MAX_BYTES + 1, b' ');
+        assert!(validate_view_icon("v", big).is_err());
+        let mut edge = b"<svg>".to_vec();
+        edge.resize(VIEW_ICON_MAX_BYTES, b' ');
+        assert!(validate_view_icon("v", edge).is_ok());
     }
 
     #[test]

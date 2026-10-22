@@ -62,6 +62,8 @@ export type ErrorReason =
   | 'saveDirUnavailable'
   | 'pairingCodeInvalid'
   | 'pairingSessionExpired'
+  | 'pairingTimeout'
+  | 'peerClockSkew'
   | 'pairingPeerUnreachable'
   | 'pairingNotFluxDown'
   | 'pairingThrottled'

@@ -46,10 +46,13 @@ impl AgentEventHub {
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         let state = lock_or_recover(&self.state);
+        let mut snapshot = state.snapshot.clone();
+        // 入站配对请求的相对剩余时间按取快照时刻重算（晚连接的客户端不能拿到建请求时的旧值）。
+        crate::link::refresh_request_ttls(&mut snapshot.link_pairing_requests);
         Snapshot {
             epoch: state.epoch.clone(),
             sequence: state.sequence,
-            body: SnapshotBody::Agent(Box::new(state.snapshot.clone())),
+            body: SnapshotBody::Agent(Box::new(snapshot)),
         }
     }
 
@@ -58,10 +61,12 @@ impl AgentEventHub {
     #[must_use]
     pub fn wire_snapshot(&self) -> Snapshot {
         let state = lock_or_recover(&self.state);
+        let mut header = state.snapshot.paged_header();
+        crate::link::refresh_request_ttls(&mut header.link_pairing_requests);
         Snapshot {
             epoch: state.epoch.clone(),
             sequence: state.sequence,
-            body: SnapshotBody::Agent(Box::new(state.snapshot.paged_header())),
+            body: SnapshotBody::Agent(Box::new(header)),
         }
     }
 
