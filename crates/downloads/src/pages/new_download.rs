@@ -12,6 +12,7 @@ use hints::HintAutofill;
 use probe::LinkProbe;
 
 use std::{
+    cell::Cell,
     collections::{BTreeMap, HashMap},
     rc::Rc,
     sync::Arc,
@@ -22,7 +23,8 @@ use crate::{
     components::threads_risk::threads_risk_callout,
     controller::{
         DownloadsCommand, DownloadsPort, DownloadsResult, LAST_DOWNLOAD_TARGET_PREF,
-        LAST_SAVE_DIR_PREF, REMEMBER_LAST_SAVE_DIR_PREF,
+        LAST_SAVE_DIR_PREF, REMEMBER_LAST_SAVE_DIR_PREF, SAVE_DIR_HISTORY_ENABLED_PREF,
+        SAVE_DIR_HISTORY_PREF,
     },
     model::{
         devices::{DeviceEntry, DeviceKind, DispatchTarget, other_devices, resolve_target},
@@ -34,6 +36,7 @@ use crate::{
             compose_request, custom_segments, detect_ua_preset, manual_proxy_url, parse_entries,
             parse_input, ua_preset_keys, ua_preset_value,
         },
+        save_dir_history::{read_save_dir_history, record_save_dir, save_dir_choices},
     },
     strings::NewDownloadStrings,
     submission::{
@@ -50,12 +53,13 @@ use fluxdown_ui_components::{
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, AppContext as _, Bounds, ClickEvent, Context, Div, Entity, FontWeight,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels,
+    Render, SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, deferred, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Disableable as _, Icon, Sizable as _, Size, WindowExt as _,
+    Disableable as _, Icon, Sizable as _, Size, ThemeStyled as _, WindowExt as _,
     button::{Button, ButtonVariants as _, DropdownButton},
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
@@ -74,6 +78,8 @@ const PRESET_DROPDOWN_WIDTH: f32 = 140.;
 const HEADER_NAME_WIDTH: f32 = 168.;
 /// 链接停止变化多久后才查询站点凭据（逐键输入时不逐字符发 RPC）。
 const SITE_AUTH_LOOKUP_DEBOUNCE: Duration = Duration::from_millis(250);
+/// 保存目录历史下拉的最大高度（超出滚动）。
+const SAVE_DIR_MENU_MAX_HEIGHT: f32 = 320.;
 
 /// 队列下拉候选（显示名由表单按内置队列本地化）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +93,8 @@ pub struct NewDownloadQueue {
 pub struct NewDownloadContext {
     /// 保存目录初值（沿用上次 / 全局默认）。
     pub save_dir: String,
+    /// 保存目录历史（最新在前）；`None` = 偏好关闭，不列出也不记录。
+    pub save_dir_history: Option<Vec<String>>,
     /// 「开始下载」默认落入的队列。
     pub queue_id: String,
     /// 线程数初值；0 = 自动。
@@ -174,6 +182,11 @@ pub(crate) fn build_new_download_context(
     } else {
         config_str("default_segments").parse::<i32>().unwrap_or(0)
     };
+    let save_dir_history = preferences
+        .get(SAVE_DIR_HISTORY_ENABLED_PREF)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+        .then(|| read_save_dir_history(preferences.get(SAVE_DIR_HISTORY_PREF)));
     let target = preferences
         .get(LAST_DOWNLOAD_TARGET_PREF)
         .and_then(serde_json::Value::as_str)
@@ -183,6 +196,7 @@ pub(crate) fn build_new_download_context(
         .unwrap_or_default();
     NewDownloadContext {
         save_dir: save_dir.to_owned(),
+        save_dir_history,
         queue_id: queue_id.to_owned(),
         segments,
         queues: queues
@@ -275,6 +289,10 @@ pub struct NewDownloadView {
     /// 远端保存目录（与本机 `save_dir` 各自保留，来回切换目标不互相覆盖）；
     /// 空 = 使用目标设备默认目录。
     remote_save_dir: Entity<InputState>,
+    /// 保存目录历史下拉是否展开（按下输入框展开，点外部 / 选中 / 打开目录选择器收起）。
+    save_dir_menu_open: bool,
+    /// 保存目录组合框上一帧的窗口坐标，用于判定外部点击是否落在输入框上。
+    save_dir_bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl NewDownloadView {
@@ -371,6 +389,8 @@ impl NewDownloadView {
             picking: false,
             target,
             remote_save_dir,
+            save_dir_menu_open: false,
+            save_dir_bounds: Rc::default(),
         };
         this.refresh_entries(window, cx);
         this.subscribe_inputs(&translator, window, cx);
@@ -803,6 +823,7 @@ impl NewDownloadView {
     ) {
         let NewDownloadContext {
             save_dir,
+            save_dir_history,
             queue_id,
             segments,
             queues,
@@ -830,11 +851,39 @@ impl NewDownloadView {
             self.proxy_choice = ProxyChoice::FollowGlobal;
         }
         self.context.save_dir = save_dir;
+        self.context.save_dir_history = save_dir_history;
         self.context.queue_id = queue_id;
         self.context.segments = segments;
         self.context.queues = queues;
         self.context.manual_proxy_url = manual_proxy_url;
         cx.notify();
+    }
+
+    /// 把一次本机提交的保存目录记入历史（偏好关闭时不记）；尽力而为，失败只做诊断记录。
+    fn record_save_dir_history(&mut self, dir: &str, cx: &mut Context<Self>) {
+        let Some(history) = self.context.save_dir_history.as_mut() else {
+            return;
+        };
+        let Some(next) = record_save_dir(history, dir) else {
+            return;
+        };
+        let value = serde_json::Value::from(next.clone());
+        *history = next;
+        let write = self.port.execute(DownloadsCommand::SetLocalPreference {
+            key: SAVE_DIR_HISTORY_PREF,
+            value,
+        });
+        // 表单随后关窗：写入在后台执行器上跑完，不随视图释放而取消。
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = write.await {
+                    eprintln!(
+                        "save dir history write failed: {:?} ({:?})",
+                        error.code, error.reason
+                    );
+                }
+            })
+            .detach();
     }
 
     fn segments(&self, cx: &App) -> i32 {
@@ -938,6 +987,7 @@ impl NewDownloadView {
                 None => tasks.push(item),
             }
         }
+        self.record_save_dir_history(&common.save_dir, cx);
         (self.on_submit)(
             NewDownloadSubmission::Tasks {
                 common: Box::new(common),
@@ -1117,6 +1167,7 @@ impl NewDownloadView {
         if self.picking || self.is_remote() {
             return;
         }
+        self.save_dir_menu_open = false;
         self.picking = true;
         cx.notify();
         let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -1502,7 +1553,7 @@ impl NewDownloadView {
         form_field(
             self.strings.save_dir.clone(),
             input_with_action(
-                Input::new(&self.save_dir).control(cx).w_full(),
+                self.render_save_dir_combo(cx),
                 Button::new("new-download-browse")
                     .outline()
                     .icon(FluxIcon::FolderOpen)
@@ -1517,6 +1568,112 @@ impl NewDownloadView {
             None,
             cx,
         )
+    }
+
+    /// 保存目录历史（偏好关闭时为空）中除当前输入以外的目录。
+    fn save_dir_choices(&self, cx: &App) -> Vec<SharedString> {
+        let Some(history) = self.context.save_dir_history.as_deref() else {
+            return Vec::new();
+        };
+        save_dir_choices(history, &self.save_dir.read(cx).value())
+            .into_iter()
+            .map(|dir| SharedString::from(dir.to_owned()))
+            .collect()
+    }
+
+    /// 保存目录输入 + 历史下拉（迅雷式组合框）：输入框照常手输，按下输入框即在其正下方
+    /// 展开与输入框等宽的最近目录列表；点外部或选中一项收起。没有可选目录时只是普通输入框。
+    fn render_save_dir_combo(&self, cx: &mut Context<Self>) -> AnyElement {
+        let choices = self.save_dir_choices(cx);
+        let mut input = Input::new(&self.save_dir).control(cx).w_full();
+        if choices.is_empty() {
+            return input.into_any_element();
+        }
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
+        input = input.suffix(
+            Icon::new(FluxIcon::ChevronDown)
+                .size(extended.icon.sm)
+                .text_color(tokens.colors.muted_foreground),
+        );
+        let bounds = self.save_dir_bounds.clone();
+        let open = self.save_dir_menu_open && !self.picking;
+        div()
+            .relative()
+            .w_full()
+            .child({
+                let bounds = bounds.clone();
+                // 记录组合框窗口坐标（无命中区域，不拦截鼠标）。
+                canvas(move |rect, _, _| bounds.set(rect), |_, (), _, _| {})
+                    .absolute()
+                    .size_full()
+            })
+            // 捕获阶段：输入框自身会消费按下事件，冒泡阶段收不到。
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                if event.button == MouseButton::Left && !this.save_dir_menu_open {
+                    this.save_dir_menu_open = true;
+                    cx.notify();
+                }
+            }))
+            .child(input)
+            .when(open, |this| {
+                let hover = extended.colors.row_hover;
+                let rows: Vec<_> = choices
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, dir)| {
+                        let label = dir.clone();
+                        div()
+                            .id(("new-download-save-dir-choice", index))
+                            .w_full()
+                            .px(tokens.spacing.sm)
+                            .py(tokens.spacing.xs)
+                            .rounded(tokens.radius.md)
+                            .cursor_pointer()
+                            .truncate()
+                            .hover(move |style| style.bg(hover))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                let value = dir.clone();
+                                this.save_dir
+                                    .update(cx, |input, cx| input.set_value(value, window, cx));
+                                this.save_dir_menu_open = false;
+                                cx.notify();
+                            }))
+                            .child(label)
+                    })
+                    .collect();
+                this.child(
+                    deferred(
+                        v_flex()
+                            .id("new-download-save-dir-choices")
+                            .occlude()
+                            .absolute()
+                            .top_full()
+                            .left_0()
+                            .w_full()
+                            .mt(tokens.spacing.xxs)
+                            .p(tokens.spacing.xxs)
+                            .max_h(px(SAVE_DIR_MENU_MAX_HEIGHT))
+                            .overflow_y_scroll()
+                            .popover_style(cx)
+                            .text_size(tokens.typography.sm.size)
+                            .line_height(tokens.typography.sm.line_height)
+                            .children(rows)
+                            .on_mouse_down_out(cx.listener(
+                                move |this, event: &MouseDownEvent, _, cx| {
+                                    // 按在输入框上由捕获处理保持展开，其余位置收起。
+                                    if !bounds.get().contains(&event.position) {
+                                        this.save_dir_menu_open = false;
+                                        cx.notify();
+                                    }
+                                },
+                            )),
+                    )
+                    .with_priority(1),
+                )
+            })
+            .into_any_element()
     }
 
     /// 线程数：下拉铺满字段；选「自定义」时下拉收窄定宽，右侧数字输入吃满剩余宽度。

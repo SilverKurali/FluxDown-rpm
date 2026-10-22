@@ -23,6 +23,10 @@ use crate::model::{
 pub const LAST_SAVE_DIR_PREF: &str = "download.last_save_dir";
 /// 偏好：新建下载默认沿用上次保存目录。
 pub const REMEMBER_LAST_SAVE_DIR_PREF: &str = "download.remember_last_save_dir";
+/// 本机偏好：新建下载保存目录历史（字符串数组，最新在前；设备本地，不进云同步）。
+pub const SAVE_DIR_HISTORY_PREF: &str = "download.save_dir_history";
+/// 本机偏好：是否记录并在新建下载中列出保存目录历史（缺省开启；设备本地）。
+pub const SAVE_DIR_HISTORY_ENABLED_PREF: &str = "download.save_dir_history_enabled";
 /// 本机偏好：新建下载「下载到」上次选择的目标（`local` / `cloud:<id>` / `link:<fp>`），
 /// 设备本地，不进云同步。
 pub const LAST_DOWNLOAD_TARGET_PREF: &str = "download.last_target";

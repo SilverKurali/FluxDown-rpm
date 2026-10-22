@@ -14,7 +14,7 @@ import { LATER_QUEUE_ID, MAIN_QUEUE_ID, METHOD, RpcError, call, rpc, rpcStore, u
 import { cloudPresenceKnown } from '../../../lib/cloud-presence'
 import { describeUploadError } from '../../../lib/rpcErrorText'
 import { ThreadsRiskCallout } from '../../../lib/ThreadsRiskCallout'
-import type { AgentSnapshot, CloudDevice, LinkDeviceInfo, PendingCaptureDto, QueueDto, ResolvePreviewResponse } from '../../../lib/rpc'
+import type { AgentSnapshot, CloudDevice, JsonValue, LinkDeviceInfo, PendingCaptureDto, QueueDto, ResolvePreviewResponse } from '../../../lib/rpc'
 import { Button, Dialog, DialogFooter, FieldError, FieldHint, FieldLabel, Form, FormField, FormRow, Icon, Input, InputWithAction, OptionGroup, OptionRow, Select, Spinner, Switch, Textarea, toast } from '../../../ui'
 import type { MenuEntry } from '../../../ui'
 import { FsPickerDialog } from './FsPickerDialog'
@@ -31,6 +31,8 @@ import { SplitButton } from './SplitButton'
 import { capturesShown, closeNewDownload } from './store'
 import type { NewDownloadSession } from './store'
 import { isTorrentFile, submitTorrentFiles } from './torrents'
+import { SaveDirCombo } from './SaveDirCombo'
+import { SAVE_DIR_HISTORY_ENABLED_PREF, SAVE_DIR_HISTORY_PREF, readSaveDirHistory, recordSaveDir, saveDirChoices } from '../../../lib/saveDirHistory'
 import { accountErrorKey } from '../../settings/sections/account/errorText'
 import { buildRemoteTargets, checkRemoteSaveDir, dispatchRoute, LOCAL_TARGET, linkDispatchParams, pathExample, remoteDispatchParams, resolveTargetValue, summarizeDispatch } from './target'
 import type { RemoteTarget } from './target'
@@ -93,6 +95,9 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
   // 目标设备消失（登出 / 解除配对）时回落到本服务器。
   const target: RemoteTarget | null = resolveTargetValue(targetValue, remoteTargets)
   const [remoteSaveDir, setRemoteSaveDir] = useState('')
+  const historyEnabled = useAgent((snapshot) => snapshot.preferences.values[SAVE_DIR_HISTORY_ENABLED_PREF] !== false, true)
+  const historyValue = useAgent((snapshot) => snapshot.preferences.values[SAVE_DIR_HISTORY_PREF], undefined)
+  const saveDirHistory = useMemo(() => (historyEnabled ? readSaveDirHistory(historyValue) : null), [historyEnabled, historyValue])
 
   const [text, setText] = useState(() => session.initialUrls.join('\n'))
   const [captures, setCaptures] = useState<PendingCaptureDto[]>([])
@@ -284,6 +289,9 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
     return map
   }
 
+  // 保存目录历史（偏好关闭时为空）中除当前输入以外的目录，交给组合框下拉。
+  const saveDirOptions = saveDirHistory ? saveDirChoices(saveDirHistory, saveDir) : []
+
   const draftOptions = (later: boolean, queueOverride: string | undefined): DraftOptions => ({
     saveDir: saveDir.trim(),
     segments,
@@ -303,7 +311,14 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
 
   const rememberSaveDir = (dir: string) => {
     // 尽力而为：失败不影响建任务；无条件记录，「记住上次目录」开关开启后立即生效。
-    void rpc.agent.preferences.patch({ values: { 'download.last_save_dir': dir }, sync: false }).catch(() => undefined)
+    const values: Record<string, JsonValue> = { 'download.last_save_dir': dir }
+    // 历史（偏好关闭时不记）按提交时的最新快照计算，与 GPUI `record_save_dir_history` 同规则。
+    const prefs = rpcStore.peek().snapshot?.preferences.values ?? {}
+    if (prefs[SAVE_DIR_HISTORY_ENABLED_PREF] !== false) {
+      const next = recordSaveDir(readSaveDirHistory(prefs[SAVE_DIR_HISTORY_PREF]), dir)
+      if (next) values[SAVE_DIR_HISTORY_PREF] = next
+    }
+    void rpc.agent.preferences.patch({ values, sync: false }).catch(() => undefined)
   }
 
   /** 逐条下发到云账号设备 / 已配对设备；成功的从文本框移除，失败的保留并逐条显示原因。 */
@@ -750,7 +765,16 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
           ) : (
             <FormField label={t('saveDir')} htmlFor="new-download-save-dir">
               <InputWithAction
-                input={<Input id="new-download-save-dir" value={saveDir} placeholder={t('selectSaveDir')} spellCheck={false} onChange={(event) => setSaveDir(event.target.value)} />}
+                input={
+                  <SaveDirCombo
+                    id="new-download-save-dir"
+                    value={saveDir}
+                    placeholder={t('selectSaveDir')}
+                    choices={saveDirOptions}
+                    label={t('saveDirRecent')}
+                    onChange={setSaveDir}
+                  />
+                }
                 action={
                   <Button icon={FolderOpen} onClick={() => setPickerOpen(true)}>
                     {t('browse')}

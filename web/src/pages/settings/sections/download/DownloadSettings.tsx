@@ -24,8 +24,11 @@ import {
   useDaemonValue,
   useDaemonBool,
   usePrefBoolean,
+  usePrefRaw,
+  setPref,
   useSettingsReadOnly,
 } from '../../kit'
+import { SAVE_DIR_HISTORY_ENABLED_PREF, SAVE_DIR_HISTORY_PREF, readSaveDirHistory } from '../../../../lib/saveDirHistory'
 import { RateLimitRow } from './RateLimitField'
 import { DirPickerDialog } from './DirPickerDialog'
 import { UserAgentRow } from './UserAgentField'
@@ -68,7 +71,23 @@ function SaveLocationSection() {
       </SettingsRow>
       <DirPickerDialog open={picking} onOpenChange={setPicking} initialPath={dir} onPick={(path) => setDaemon('default_save_dir', path)} />
       <PrefSwitchRow prefKey="download.remember_last_save_dir" fallback={false} titleKey="rememberLastSaveDir" descKey="rememberLastSaveDirDesc" />
+      <PrefSwitchRow prefKey={SAVE_DIR_HISTORY_ENABLED_PREF} fallback titleKey="saveDirHistory" descKey="saveDirHistoryDesc" />
+      <ClearSaveDirHistoryRow />
     </SettingsSection>
+  )
+}
+
+/** 清空新建下载的保存目录历史（设备本地偏好，写 null 移除）；没有记录时按钮置灰。 */
+function ClearSaveDirHistoryRow() {
+  const t = useT()
+  const readOnly = useSettingsReadOnly()
+  const empty = readSaveDirHistory(usePrefRaw(SAVE_DIR_HISTORY_PREF)).length === 0
+  return (
+    <SettingsRow title={t('clearSaveDirHistory')} description={optionalText(t, 'clearSaveDirHistoryDesc')}>
+      <Button variant="outline" className="shrink-0" disabled={readOnly || empty} onClick={() => setPref(SAVE_DIR_HISTORY_PREF, null)}>
+        {t('clearSaveDirHistoryAction')}
+      </Button>
+    </SettingsRow>
   )
 }
 
