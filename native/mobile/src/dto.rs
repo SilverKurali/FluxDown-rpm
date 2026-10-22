@@ -891,6 +891,14 @@ pub struct CreateTaskRequestDto {
     pub http_user: String,
     pub http_password: String,
     pub save_site_auth: bool,
+    /// 免打扰（静默）提交：引擎需要选择时不向 UI 请求而取默认。仅 `create_task` 使用；
+    /// 批量导入忽略。
+    pub unattended: bool,
+    /// 新建下载表单 / 外部捕获的表单初始保存目录（任何分类预填之前的目录：跟随上次保存位置，
+    /// 否则默认下载目录，否则主机运行时目录）。`None` = 永不按分类路由；`Some` 时由 Rust 按
+    /// 已连接主机当前 `custom_categories` 偏好决定：`save_dir` 仍是系统给出的（空 / 初始目录 /
+    /// 任一分类目录）则以初始目录为基准目录交给 daemon 按分类路由，用户改选了别的目录则不路由。
+    pub offered_save_dir: Option<String>,
 }
 
 impl From<CreateTaskRequestDto> for proto::CreateTaskRequest {

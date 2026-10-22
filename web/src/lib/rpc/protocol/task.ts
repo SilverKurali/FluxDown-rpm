@@ -1,4 +1,5 @@
 // 任务相关 DTO（daemon.rs TaskDto / CreateTaskRequest、task_activity.rs）。
+import type { CategoryRouteDto } from './agent';
 import type { RpcErrorData } from './error';
 
 /** `TaskDto.status` 取值。 */
@@ -220,6 +221,8 @@ export interface DaemonCreateTaskParams {
   hintFileSize?: number | null;
   /** 参照文件名（浏览器捕获的原始名）：显式名缺扩展名时借它的扩展名补全。 */
   nameHint?: string | null;
+  /** 分类目录路由：`request.saveDir` 为未命中时的基准目录，引擎按初始名与完成时的最终文件名定落点。 */
+  categoryRoute?: CategoryRouteDto | null;
 }
 
 /** `daemon.task.create` 结果。 */
@@ -260,6 +263,8 @@ export interface DaemonCreateTasksParams {
   common: CreateTaskRequest;
   /** 1..={@link CREATE_TASKS_MAX_ITEMS} 条。 */
   items: CreateTaskItem[];
+  /** 分类目录路由：应用于整块每一条；`common.saveDir` 为未命中时的基准目录。 */
+  categoryRoute?: CategoryRouteDto | null;
 }
 
 /** `daemon.task.createMany` 的单条链接。 */

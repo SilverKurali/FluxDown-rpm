@@ -34,6 +34,27 @@ pub fn request_body_to_engine(body: RequestBody) -> CapturedRequestBody {
     }
 }
 
+/// 将分类目录路由转换为引擎路由（`base_dir` 由引擎建任务时填为解析出的保存目录）。
+#[must_use]
+pub fn category_route_to_engine(
+    route: fluxdown_protocol::CategoryRouteDto,
+) -> fluxdown_engine::category_route::CategoryRoute {
+    fluxdown_engine::category_route::CategoryRoute {
+        base_dir: String::new(),
+        rules: route
+            .rules
+            .into_iter()
+            .map(|rule| fluxdown_engine::category_route::CategoryRule {
+                match_mode: rule.match_mode,
+                extensions: rule.extensions,
+                regex_pattern: rule.regex_pattern,
+                save_dir: rule.save_dir,
+            })
+            .collect(),
+        other_dir: route.other_dir,
+    }
+}
+
 /// 将加速来源累计字节转换为 wire DTO。
 #[must_use]
 pub fn source_bytes_to_dto(bytes: SourceBytes) -> fluxdown_protocol::TaskSourceBytesDto {

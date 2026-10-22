@@ -483,6 +483,24 @@ export interface CustomCategoryDto {
   saveDir: string;
 }
 
+/** 分类目录路由（`CategoryRouteDto`）：外部捕获未指定保存目录时随 `daemon.task.create` 交给 daemon。 */
+export interface CategoryRouteDto {
+  /** 可见普通分类（按 `position`），只保留影响落点的条目。 */
+  rules: CategoryRuleDto[];
+  /** 「其他」分类的目录；缺省 = 不兜底。 */
+  otherDir?: string;
+}
+
+/** `CategoryRouteDto.rules` 的单条普通分类。 */
+export interface CategoryRuleDto {
+  /** `extension` | `regex`。 */
+  matchMode: string;
+  extensions?: string[];
+  regexPattern?: string;
+  /** 缺省 = 不改变落点，只阻止「其他」兜底。 */
+  saveDir?: string;
+}
+
 // ── 外部捕获 ──
 
 /** 等待官方 UI 确认的外部捕获（不含 cookie/header 原文，仅摘要）。 */

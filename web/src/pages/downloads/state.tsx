@@ -37,7 +37,7 @@ import { buildVisibleRows, dirCollapseKey, dominantCategory, groupFullySelected,
 import type { BucketInfo, GroupFolderRow, VisibleRow, VisibleRowsInput } from './model/groupRows'
 import { makeAggregate } from './model/groupTree'
 import type { GroupAggregate, GroupCounts } from './model/groupTree'
-import { buildRemoteView, canResumeSeeding, isLocalKey, isSeeding, sourceSite, STATE_RANK } from './model/task'
+import { buildRemoteView, canPause, canResumeSeeding, isLocalKey, sourceSite, STATE_RANK } from './model/task'
 import type { DownloadTaskView, RowKey } from './model/task'
 import { useRowEngine } from './model/useRowEngine'
 import { queueLabelById } from './dialogs/utils'
@@ -666,7 +666,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
     let allDownloadable = selectedViews.length > 0
     for (const view of selectedViews) {
       anyLocal ||= view.source === 'local'
-      if (view.state === 'downloading' || view.state === 'pending' || isSeeding(view)) anyActive ||= remoteCan(view, 'pause')
+      if (canPause(view)) anyActive ||= remoteCan(view, 'pause')
       if (view.state === 'paused' || view.state === 'failed' || canResumeSeeding(view)) anyResumable ||= remoteCan(view, 'resume')
       if (!isDownloadable(view)) allDownloadable = false
     }

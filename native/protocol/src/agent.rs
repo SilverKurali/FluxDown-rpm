@@ -1451,6 +1451,175 @@ impl CustomCategoryDto {
     }
 }
 
+/// 分类保存目录路由：外部捕获未指定保存目录时，agent 把 `custom_categories` 中与落点
+/// 有关的规则随 `daemon.task.create` 交给 daemon；引擎建任务时按初始名定初始目录，
+/// 下载完成、最终文件名确定后（插件改名、按响应推断的名字、HLS 转封装后的 `.mp4`）
+/// 再按同一规则复核并把产物移入命中分类的目录。任务组成员与 BT / eD2K 任务不参与。
+///
+/// 匹配语义（唯一事实源为 agent `category_dir.rs` 与引擎 `category_route.rs`，两端共用
+/// 夹具 `native/engine/src/fixtures/category_route_cases.json`）：按顺序取首个配置了目录
+/// 且命中的普通分类；所有普通分类都不命中时取「其他」的目录。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryRouteDto {
+    /// 可见普通分类（按 `position`），只保留会影响落点的条目。
+    #[serde(default)]
+    pub rules: Vec<CategoryRuleDto>,
+    /// 「其他」分类的目录；空 = 不兜底。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub other_dir: String,
+}
+
+/// [`CategoryRouteDto`] 的单条普通分类规则。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryRuleDto {
+    /// `extension` | `regex`。
+    #[serde(default = "default_category_match_mode")]
+    pub match_mode: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub regex_pattern: String,
+    /// 空 = 该分类不改变落点，只用于阻止「其他」兜底。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub save_dir: String,
+}
+
+impl CategoryRouteDto {
+    /// 由分类列表（已按 `position` 排序）构建路由；没有任何分类配置目录时为 `None`。
+    /// 「其他」无目录时，未配置目录的普通分类不影响结果，直接省略。
+    #[must_use]
+    pub fn from_categories(categories: &[CustomCategoryDto]) -> Option<Self> {
+        let visible = || categories.iter().filter(|category| category.visible);
+        let other_dir = visible()
+            .find(|category| category.builtin_type.as_deref() == Some("other"))
+            .map(|other| other.save_dir.trim().to_owned())
+            .unwrap_or_default();
+        let rules = visible()
+            .filter(|category| {
+                !matches!(category.builtin_type.as_deref(), Some("all" | "other"))
+                    && (!other_dir.is_empty() || !category.save_dir.trim().is_empty())
+            })
+            .map(|category| CategoryRuleDto {
+                match_mode: category.match_mode.clone(),
+                extensions: category.extensions.clone(),
+                regex_pattern: category.regex_pattern.clone(),
+                save_dir: category.save_dir.trim().to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let routes = !other_dir.is_empty() || rules.iter().any(|rule| !rule.save_dir.is_empty());
+        routes.then_some(Self { rules, other_dir })
+    }
+
+    /// 由 `custom_categories` 偏好值（[`CUSTOM_CATEGORIES_PREF_KEY`] 对应的 JSON）构建路由；
+    /// 偏好缺失 / 无法解析 / 没有任何分类配置目录时为 `None`。
+    #[must_use]
+    pub fn from_preference(value: Option<&serde_json::Value>) -> Option<Self> {
+        Self::from_categories(&CustomCategoryDto::from_preference(value))
+    }
+
+    /// 表单提交的保存目录 `submitted` 是否仍是系统给出的、应继续按分类路由：为空、等于
+    /// 非空的表单初始目录 `offered`（预填分类之前显示的目录），或等于「其他」 / 任一分类
+    /// 规则的目录。用户改选了别的目录即返回 `false`，以用户选择为准。认任一分类目录而不只
+    /// 是命中的那个：多条链接并入同一张表单时目录框只预填第一条命中的分类目录。
+    ///
+    /// 两端都先去首尾空白再比较。
+    #[must_use]
+    pub fn follows(&self, submitted: &str, offered: &str) -> bool {
+        let submitted = submitted.trim();
+        if submitted.is_empty() {
+            return true;
+        }
+        let offered = offered.trim();
+        (!offered.is_empty() && submitted == offered) || self.is_category_dir(submitted)
+    }
+
+    /// 跟随路由时作为 `request.saveDir` 发送的基准目录（没有分类命中时的落点）：提交目录
+    /// 为空或本身是分类目录时取表单初始目录 `offered`，否则（等于 `offered` 或用户
+    /// 填的其他目录）取提交目录。结果已去首尾空白。
+    #[must_use]
+    pub fn base_dir(&self, submitted: &str, offered: &str) -> String {
+        let submitted = submitted.trim();
+        if submitted.is_empty() || self.is_category_dir(submitted) {
+            offered.trim().to_owned()
+        } else {
+            submitted.to_owned()
+        }
+    }
+
+    /// `dir`（已去空白）是否是「其他」或某条规则配置的分类目录；空串恒为 `false`。
+    #[must_use]
+    pub fn is_category_dir(&self, dir: &str) -> bool {
+        !dir.is_empty()
+            && (self.other_dir == dir || self.rules.iter().any(|rule| rule.save_dir == dir))
+    }
+}
+
+#[cfg(test)]
+mod category_route_helper_tests {
+    use serde_json::json;
+
+    use super::{CategoryRouteDto, CategoryRuleDto, CustomCategoryDto};
+
+    fn route() -> CategoryRouteDto {
+        CategoryRouteDto {
+            rules: vec![CategoryRuleDto {
+                match_mode: "extension".to_owned(),
+                extensions: vec!["jpg".to_owned()],
+                regex_pattern: String::new(),
+                save_dir: "/pictures".to_owned(),
+            }],
+            other_dir: "/other".to_owned(),
+        }
+    }
+
+    #[test]
+    fn category_follows_accepts_system_given_dirs_only() {
+        let route = route();
+        assert!(route.follows("", "/default"));
+        assert!(route.follows("  ", ""));
+        assert!(route.follows(" /default ", " /default "));
+        assert!(route.follows("/pictures", "/default"));
+        assert!(route.follows("/other", ""));
+        assert!(!route.follows("/elsewhere", "/default"));
+        // 空的 offered 不等同于空提交之外的任何目录。
+        assert!(!route.follows("/default", ""));
+    }
+
+    #[test]
+    fn category_base_dir_falls_back_to_offered_unless_user_chose() {
+        let route = route();
+        assert_eq!(route.base_dir("", " /default "), "/default");
+        assert_eq!(route.base_dir("/pictures", "/default"), "/default");
+        assert_eq!(route.base_dir("/other", "/default"), "/default");
+        assert_eq!(route.base_dir(" /default ", "/default"), "/default");
+        assert_eq!(route.base_dir("/elsewhere", "/default"), "/elsewhere");
+        assert_eq!(route.base_dir("", ""), "");
+    }
+
+    #[test]
+    fn category_from_preference_reads_custom_categories_value() {
+        assert_eq!(CategoryRouteDto::from_preference(None), None);
+        let mut categories = CustomCategoryDto::builtin_defaults();
+        for category in &mut categories {
+            if category.builtin_type.as_deref() == Some("other") {
+                category.save_dir = "/other".to_owned();
+            }
+        }
+        let value = serde_json::to_value(&categories).expect("serialize categories");
+        let route = CategoryRouteDto::from_preference(Some(&value)).expect("route");
+        assert_eq!(route.other_dir, "/other");
+        let as_text = json!(value.to_string());
+        assert_eq!(
+            CategoryRouteDto::from_preference(Some(&as_text)),
+            Some(route)
+        );
+    }
+}
+
 #[cfg(test)]
 mod capture_dto_tests {
     use serde_json::json;

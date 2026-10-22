@@ -35,6 +35,8 @@ pub enum ActorOperation {
         /// 参照文件名（浏览器捕获的原始名），见 `DaemonCreateTaskParams::name_hint`。
         name_hint: String,
         unattended: bool,
+        /// 分类目录路由，见 `DaemonCreateTaskParams::category_route`。
+        category_route: Option<fluxdown_protocol::CategoryRouteDto>,
     },
     /// 批量建任务（`daemon.task.createMany`）：保存目录与队列只解析一次，
     /// 整块一个事务落库，按 `batch_id` 幂等。
@@ -43,6 +45,8 @@ pub enum ActorOperation {
         /// 整块共享的选项（`url` / `fileName` / `checksum` 已由服务层校验为空）。
         common: Box<CreateTaskRequest>,
         items: Vec<CreateTaskItem>,
+        /// 分类目录路由，对每一条生效，见 `DaemonCreateTasksParams::category_route`。
+        category_route: Option<fluxdown_protocol::CategoryRouteDto>,
     },
     PauseTask {
         task_id: String,
@@ -867,6 +871,7 @@ async fn execute_operation(
             hint_file_size,
             name_hint,
             unattended,
+            category_route,
         } => {
             let request = *request;
             if torrent_file_bytes.is_empty() {
@@ -915,6 +920,8 @@ async fn execute_operation(
                     http_password: request.http_password,
                     save_site_auth: request.save_site_auth,
                     unattended_selection: unattended,
+                    category_route: category_route
+                        .map(fluxdown_engine_protocol::category_route_to_engine),
                     ..Default::default()
                 })
                 .await
@@ -925,11 +932,14 @@ async fn execute_operation(
             batch_id,
             common,
             items,
+            category_route,
         } => {
             let common = *common;
             let save_dir = resolve_save_dir(&engine.db, common.save_dir).await?;
             let queue_id = resolve_queue_id(&engine.db, common.queue_id).await?;
             let extra_headers = common.headers.unwrap_or_default();
+            let engine_route =
+                category_route.map(fluxdown_engine_protocol::category_route_to_engine);
             let specs = items
                 .into_iter()
                 .map(|item| NewTaskSpec {
@@ -949,6 +959,7 @@ async fn execute_operation(
                     http_user: common.http_user.clone(),
                     http_password: common.http_password.clone(),
                     save_site_auth: common.save_site_auth,
+                    category_route: engine_route.clone(),
                     ..Default::default()
                 })
                 .collect();
@@ -1005,12 +1016,13 @@ async fn execute_operation(
             engine.manager.send_tasks_snapshot().await;
         }
         ActorOperation::PauseAll => {
-            let ids = pause_all_task_ids(&engine.db).await?;
+            let mut ids = pause_all_task_ids(&engine.db).await?;
+            ids.extend(engine.manager.retry_pending_task_ids());
             engine.manager.batch_pause_all(&ids).await;
         }
         ActorOperation::PauseTasks { task_ids } => {
             let ids = existing_task_ids(&engine.db, task_ids).await?;
-            engine.manager.batch_pause(&ids).await;
+            engine.manager.pause_selected(&ids).await;
         }
         ActorOperation::ResumeTasks { task_ids } => {
             let ids = existing_task_ids(&engine.db, task_ids).await?;
@@ -2164,7 +2176,8 @@ async fn existing_task_ids(
 }
 
 /// 「全部暂停」的作用对象（对齐 qBittorrent Stop all）：下载中 / 排队 / 准备中，
-/// 以及做种中 / 排队做种的已完成 BT 任务（暂停 = 停止做种）。
+/// 以及做种中 / 排队做种的已完成 BT 任务（暂停 = 停止做种）。等待自动重试的失败任务
+/// 由调用方经 `retry_pending_task_ids` 追加（那是引擎内存态，库里看不出）。
 async fn pause_all_task_ids(db: &fluxdown_engine::db::Db) -> Result<Vec<String>, ActorError> {
     use fluxdown_engine::bt_seeding::{SEEDING_STATUS_ACTIVE, SEEDING_STATUS_QUEUED};
     Ok(db
@@ -2522,6 +2535,7 @@ mod tests {
             hint_file_size: 0,
             name_hint: String::new(),
             unattended: false,
+            category_route: None,
         };
         let reason = |result: Result<super::ActorResult, ActorError>| match result {
             Err(ActorError::InvalidArgument(message)) => message,
@@ -2846,6 +2860,7 @@ mod tests {
                 item("http://127.0.0.1:1/b.bin", "md5=zz"),
                 item("http://127.0.0.1:1/c.bin", ""),
             ],
+            category_route: None,
         };
         async fn run(
             engine: &mut fluxdown_engine::Engine,
@@ -2895,6 +2910,107 @@ mod tests {
         drop(engine);
         if let Err(error) = tokio::fs::remove_dir_all(dir).await {
             eprintln!("createMany test directory removal failed: {error}");
+        }
+    }
+
+    /// `daemon.task.createMany` 携带分类路由：按条目初始名命中分类的条目落进分类目录，
+    /// 未命中的条目留在基准目录（`common.saveDir`）。
+    #[tokio::test]
+    async fn create_many_applies_category_route_per_item() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_daemon_create_many_route_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let base = dir.join("base");
+        let images = dir.join("images");
+        for path in [&base, &images] {
+            tokio::fs::create_dir_all(path)
+                .await
+                .expect("create createMany route test dir");
+        }
+        let dir_text = dir.to_string_lossy().into_owned();
+        let base_text = base.to_string_lossy().into_owned();
+        let images_text = images.to_string_lossy().into_owned();
+        let mut engine = fluxdown_engine::Engine::new(
+            fluxdown_engine::EngineConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: dir_text.clone(),
+                app_data_dir: dir_text.clone(),
+                bt_config: fluxdown_engine::bt_config::BtConfig::default(),
+                proxy_config: fluxdown_engine::proxy_config::ProxyConfig::default(),
+                user_agent: String::new(),
+                data_dir_override: Some(dir.clone()),
+                database_url: None,
+            },
+            std::sync::Arc::new(fluxdown_engine::NoopSink),
+            std::sync::Arc::new(fluxdown_engine::NoopSelection),
+        )
+        .await
+        .expect("construct engine");
+        let events =
+            crate::event_hub::DaemonEventHub::new(fluxdown_protocol::DaemonSnapshot::default(), 32);
+        let item = |url: &str| fluxdown_protocol::CreateTaskItem {
+            url: url.to_owned(),
+            file_name: String::new(),
+            checksum: String::new(),
+        };
+        let operation = ActorOperation::CreateTasks {
+            batch_id: "route-batch".to_owned(),
+            common: Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "url": "",
+                    "startPaused": true,
+                    "saveDir": base_text,
+                }))
+                .expect("common request"),
+            ),
+            items: vec![
+                item("http://127.0.0.1:1/photo.jpg"),
+                item("http://127.0.0.1:1/notes.txt"),
+            ],
+            category_route: Some(fluxdown_protocol::CategoryRouteDto {
+                rules: vec![fluxdown_protocol::CategoryRuleDto {
+                    match_mode: "extension".to_owned(),
+                    extensions: vec!["jpg".to_owned()],
+                    regex_pattern: String::new(),
+                    save_dir: images_text.clone(),
+                }],
+                other_dir: String::new(),
+            }),
+        };
+        let results = match execute_operation(operation, &mut engine, &events).await {
+            Ok(super::ActorResult::CreatedMany(results)) => results,
+            Ok(_) => panic!("unexpected actor result"),
+            Err(error) => panic!("createMany failed: {error}"),
+        };
+        assert!(
+            results
+                .iter()
+                .all(|r| r.task_id.is_some() && r.error.is_none())
+        );
+        let stored = engine.db.load_all_tasks().await.expect("load tasks");
+        assert_eq!(stored.len(), 2);
+        let save_dir_of = |url_tail: &str| {
+            stored
+                .iter()
+                .find(|task| task.url.ends_with(url_tail))
+                .map(|task| task.save_dir.clone())
+        };
+        assert_eq!(
+            save_dir_of("photo.jpg").as_deref(),
+            Some(images_text.as_str())
+        );
+        assert_eq!(
+            save_dir_of("notes.txt").as_deref(),
+            Some(base_text.as_str())
+        );
+
+        drop(engine);
+        if let Err(error) = tokio::fs::remove_dir_all(dir).await {
+            eprintln!("createMany route test directory removal failed: {error}");
         }
     }
 

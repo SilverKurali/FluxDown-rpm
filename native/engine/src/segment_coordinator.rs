@@ -5671,6 +5671,11 @@ async fn do_segment(
     let mut used = spec.current();
     let mut refreshed = false;
     let resp = loop {
+        // 单 GET 探测保留的首响应（一次性 URL 的唯一一次请求）：首连接直接消费它，不再发请求。
+        // 只有零进度的 plain 首连接会取；重试 / 其余分段照常发 Range 请求。
+        if plain_first && let Some(held) = spec.take_held_response() {
+            break held;
+        }
         // 仅任务 URL 经凭据刷新改写；重定向终点 `direct` 保持不变。
         let routed = if direct.is_none() {
             spec.route_url(url)

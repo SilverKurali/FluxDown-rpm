@@ -33,6 +33,9 @@ const SESSION_END_BUDGET: Duration = Duration::from_millis(4500);
 /// 菜单位置：显示窗口、分隔线、全部暂停、全部恢复之后插入「取消完成后关机」。
 const CANCEL_SHUTDOWN_POSITION: usize = 4;
 const DEFAULT_TOOLTIP: &str = "FluxDown";
+/// 托盘固定标识。Linux 上 tray-icon 把它拼成 SNI `Id`（`tray-icon tray app fluxdown`），
+/// GNOME 顶栏整理类扩展按 `Id` 记住托盘项位置；缺省的 `<pid>-<序号>` 每次启动都会变（#269）。
+const TRAY_ID: &str = "fluxdown";
 
 #[cfg(target_os = "macos")]
 const ICON_BYTES: &[u8] = include_bytes!("../../../../assets/logo/tray_iconTemplate.png");
@@ -369,7 +372,10 @@ impl MenuIds {
 }
 
 struct TrayUi {
+    /// 字段按声明顺序析构：托盘（删除图标文件）必须先于 `_icon_dir`（删除目录）释放。
     icon: TrayIcon,
+    #[cfg(target_os = "linux")]
+    _icon_dir: linux::IconDir,
     menu: Menu,
     show: MenuItem,
     settings: MenuItem,
@@ -498,7 +504,11 @@ impl TrayUi {
         };
         #[cfg(not(windows))]
         let bytes = ICON_BYTES;
-        let builder = TrayIconBuilder::new();
+        let builder = TrayIconBuilder::new().with_id(TRAY_ID);
+        #[cfg(target_os = "linux")]
+        let icon_dir = linux::IconDir::for_process();
+        #[cfg(target_os = "linux")]
+        let builder = builder.with_temp_dir_path(icon_dir.path());
         // macOS 不在状态栏项上常挂菜单，见 [`TrayUi::pop_up_menu`]。
         #[cfg(not(target_os = "macos"))]
         let builder = builder.with_menu(Box::new(menu.clone()));
@@ -513,6 +523,8 @@ impl TrayUi {
         icon.set_visible(false).map_err(|error| error.to_string())?;
         Ok(Self {
             icon,
+            #[cfg(target_os = "linux")]
+            _icon_dir: icon_dir,
             menu,
             show,
             settings,
@@ -615,9 +627,46 @@ mod windows_theme {
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use std::path::{Path, PathBuf};
+
     use gtk::gio;
     use gtk::glib;
     use gtk::glib::prelude::ToVariant;
+
+    /// 本进程托盘图标的临时目录，随托盘释放删除。
+    ///
+    /// tray-icon 按托盘 id 给图标文件命名并在析构时删除；id 固定后，并存的另一个 agent
+    /// （拿 `agent.lock` 失败退出前已建过托盘的重复启动、开发版与正式版并行）会写同一个
+    /// 文件，先退出的一方删掉另一方仍在引用的图标。按 PID 分目录让文件只归本进程。
+    pub struct IconDir(PathBuf);
+
+    impl IconDir {
+        /// `$XDG_RUNTIME_DIR/fluxdown-tray-<pid>`，无运行时目录时落在系统临时目录（同 tray-icon）。
+        pub fn for_process() -> Self {
+            let base = directories::BaseDirs::new()
+                .and_then(|dirs| dirs.runtime_dir().map(Path::to_path_buf))
+                .unwrap_or_else(std::env::temp_dir);
+            Self(base.join(format!("fluxdown-tray-{}", std::process::id())))
+        }
+
+        pub fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for IconDir {
+        fn drop(&mut self) {
+            match std::fs::remove_dir_all(&self.0) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(
+                    path = %self.0.display(),
+                    %error,
+                    "could not remove tray icon directory"
+                ),
+            }
+        }
+    }
 
     /// 会话总线上是否有 StatusNotifier 宿主（KDE、带 AppIndicator 扩展的 GNOME 等）；
     /// 没有时 appindicator 图标不可见，关闭窗口会让应用「消失」。

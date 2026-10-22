@@ -14,6 +14,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -108,7 +109,8 @@ internal fun GeneralPage() {
     val gate = rememberFlowInGate()
     var editing by remember { mutableStateOf<CategoryTarget?>(null) }
     var reordering by rememberSaveable { mutableStateOf(false) }
-    val store = remember(ctx, overlays, context) { CategoryStore(ctx, overlays, context) }
+    val scope = rememberCoroutineScope()
+    val store = remember(ctx, overlays, context, scope) { CategoryStore(ctx, overlays, context, scope) }
     val list = store.list
     val hasBase = store.defaultSaveDir.isNotEmpty()
 

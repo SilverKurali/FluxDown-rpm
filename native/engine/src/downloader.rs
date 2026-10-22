@@ -489,6 +489,10 @@ pub struct PreprobedInfo {
     pub info: FileInfo,
     /// 探测靠请求头自适应才通过时的适配后 spec；序幕已落库，下载器只需沿用。
     pub adapted: Option<RequestSpec>,
+    /// 单 GET 探测（[`resolve_file_info_held_get`]）保留下来的响应：已读完响应头、
+    /// body 未动，随后成为第一条数据连接（见 [`DownloadSpec::take_held_response`]）。
+    /// `None` = 探测走的是 HEAD ∥ Range 路径或响应已不可用。
+    pub held: Option<reqwest::Response>,
 }
 
 /// 将浏览器扩展捕获的额外 HTTP 头应用到请求构建器上。
@@ -1659,6 +1663,9 @@ pub struct DownloadSpec {
     refresh_gate: tokio::sync::Mutex<RefreshLedger>,
     /// 已取得成功响应的最新身份代际 + 1（0 = 尚无）。见 [`Self::confirm`]。
     confirmed_generation: std::sync::atomic::AtomicU64,
+    /// 单 GET 探测保留的首响应（一次性 URL 的唯一一次请求）；取一次即空，
+    /// 随 spec 一并释放（取消 / 跳过 / 失败时连接随之关闭）。
+    held_response: std::sync::Mutex<Option<reqwest::Response>>,
 }
 
 #[derive(Debug)]
@@ -1697,7 +1704,33 @@ impl DownloadSpec {
             refresher: None,
             refresh_gate: tokio::sync::Mutex::new(RefreshLedger::default()),
             confirmed_generation: std::sync::atomic::AtomicU64::new(0),
+            held_response: std::sync::Mutex::new(None),
         }
+    }
+
+    /// 挂上单 GET 探测保留的首响应（`None` = 无）。
+    pub(crate) fn with_held_response(self, resp: Option<reqwest::Response>) -> Self {
+        *self
+            .held_response
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = resp;
+        self
+    }
+
+    /// 是否仍持有未被消费的首响应。
+    pub(crate) fn has_held_response(&self) -> bool {
+        self.held_response
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// 取走首响应（至多一次）：首个无 Range 的数据请求直接消费它，不再发新请求。
+    pub(crate) fn take_held_response(&self) -> Option<reqwest::Response> {
+        self.held_response
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// 设置连接数硬上限；`cap <= 0` 表示不限。
@@ -1981,6 +2014,44 @@ pub(crate) async fn resolve_file_info_with_ua_fallback(
     url: &str,
     spec: &RequestSpec,
 ) -> Result<(FileInfo, Option<RequestSpec>), DownloadError> {
+    let (info, adapted, _) =
+        adapt_probe_request(client, url, spec, ProbeKind::HeadAndRange).await?;
+    Ok((info, adapted))
+}
+
+/// 一次性 URL 友好的探测：只发【一个】与数据下载同规格的 plain GET（无 Range、无 HEAD），
+/// 响应头即文件元数据，响应本身原样保留作第一条数据连接。请求头自适应阶梯
+/// （UA / Referer / 质询）与 [`resolve_file_info_with_ua_fallback`] 相同——只有上一次被
+/// 拒绝后才会重发，被拒的请求本就没消耗下载令牌。
+pub(crate) async fn resolve_file_info_held_get(
+    client: &Client,
+    url: &str,
+    spec: &RequestSpec,
+) -> Result<(FileInfo, Option<RequestSpec>, reqwest::Response), DownloadError> {
+    match adapt_probe_request(client, url, spec, ProbeKind::HeldGet).await? {
+        (info, adapted, Some(resp)) => Ok((info, adapted, resp)),
+        (_, _, None) => Err(DownloadError::Other(
+            "single GET probe returned no response".to_string(),
+        )),
+    }
+}
+
+/// 探测请求的形态（自适应阶梯共用）。
+#[derive(Clone, Copy)]
+enum ProbeKind {
+    /// HEAD ∥ `Range: bytes=0-0`，响应只读头。
+    HeadAndRange,
+    /// 单个 plain GET，响应保留给数据下载。
+    HeldGet,
+}
+
+/// 探测重试 / 请求头自适应阶梯；`kind` 决定单轮探测怎么发。
+async fn adapt_probe_request(
+    client: &Client,
+    url: &str,
+    spec: &RequestSpec,
+    kind: ProbeKind,
+) -> Result<(FileInfo, Option<RequestSpec>, Option<reqwest::Response>), DownloadError> {
     let has_browser_ua = spec
         .extra_headers
         .keys()
@@ -1999,8 +2070,18 @@ pub(crate) async fn resolve_file_info_with_ua_fallback(
         };
 
         let final_attempt = attempt + 1 == PROBE_MAX_RETRIES;
-        match resolve_file_info_once(client, url, attempt_spec, final_attempt).await {
-            Ok(info) => return Ok((info, current_adapted)),
+        let attempted = match kind {
+            ProbeKind::HeadAndRange => {
+                resolve_file_info_once(client, url, attempt_spec, final_attempt)
+                    .await
+                    .map(|info| (info, None))
+            }
+            ProbeKind::HeldGet => resolve_file_info_held_get_once(client, url, attempt_spec)
+                .await
+                .map(|(info, resp)| (info, Some(resp))),
+        };
+        match attempted {
+            Ok((info, held)) => return Ok((info, current_adapted, held)),
             Err(e) => {
                 log_info!(
                     "[resolve] probe attempt {}/{} failed: {}",
@@ -2607,6 +2688,117 @@ async fn resolve_file_info_plain_get_fallback(
         last_modified,
         content_encoding_compressed,
     })
+}
+
+/// 单 GET 探测的一轮：发一个 plain GET，成功则从响应头派生 [`FileInfo`] 并连同【未读 body
+/// 的响应】一起返回。
+///
+/// 与 `resolve_file_info_once` 的区别：没有 HEAD、没有 `Range: bytes=0-0`——一次性签名 URL
+/// 的令牌在第一个 GET 就失效，探测请求不能先于真实数据请求消耗它。因此：
+/// - Range 能力不在此实测：仅当响应带 `Accept-Ranges: bytes`（与 coordinator 的裁决同一
+///   判据）、未压缩且长度已知时才声明支持，下载器随后按 hint 语义「单流先起、证实后升
+///   多段」；
+/// - 响应头等待用 `tokio::time::timeout` 而非 `RequestBuilder::timeout`（后者会把 body
+///   读取也算进总时限，数据连接会被 15s 截断）。
+async fn resolve_file_info_held_get_once(
+    client: &Client,
+    url: &str,
+    spec: &RequestSpec,
+) -> Result<(FileInfo, reqwest::Response), DownloadError> {
+    let sent = tokio::time::timeout(
+        PROBE_TIMEOUT,
+        build_request(client, url, reqwest::Method::GET, spec).send(),
+    )
+    .await;
+    let resp = match sent {
+        Err(_) => {
+            return Err(DownloadError::Other(format!(
+                "probes failed: plain GET=network-error: no response headers within {}s",
+                PROBE_TIMEOUT.as_secs()
+            )));
+        }
+        Ok(Err(e)) => {
+            log_info!(
+                "[resolve] plain GET network error: {}{}",
+                e,
+                format_error_chain(e.source())
+            );
+            return Err(DownloadError::Other(format!(
+                "probes failed: plain GET=network-error: {}",
+                e
+            )));
+        }
+        Ok(Ok(resp)) => resp,
+    };
+    // 对无 Range 请求回 206 不合规：响应体起点未知，无法当全量流写盘。
+    if !resp.status().is_success() || resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        let desc = probe_status_desc(&resp);
+        log_info!(
+            "[resolve] plain GET failed: status={}, url={}",
+            resp.status(),
+            crate::logger::sanitize_log_str(resp.url().as_str())
+        );
+        return Err(DownloadError::Other(format!(
+            "probes failed: plain GET={desc}"
+        )));
+    }
+
+    let info = {
+        let headers = resp.headers();
+        let total_bytes = headers
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        let header_text = |name: reqwest::header::HeaderName| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string()
+        };
+        let content_encoding_compressed = detect_content_encoding(headers).is_some();
+        let accepts_ranges = headers
+            .get(reqwest::header::ACCEPT_RANGES)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("bytes"));
+        let supports_range =
+            spec.is_get_like() && accepts_ranges && !content_encoding_compressed && total_bytes > 0;
+        let resolved = extract_filename(headers, url, resp.url().as_str());
+        log_info!(
+            "[resolve] single GET url={} → name={}, size={}, range={}, ct={}",
+            crate::logger::sanitize_log_str(url),
+            resolved.name,
+            total_bytes,
+            supports_range,
+            header_text(reqwest::header::CONTENT_TYPE)
+        );
+        FileInfo {
+            file_name: resolved.name,
+            name_source: resolved.source,
+            total_bytes,
+            supports_range,
+            content_type: header_text(reqwest::header::CONTENT_TYPE),
+            etag: header_text(reqwest::header::ETAG),
+            last_modified: header_text(reqwest::header::LAST_MODIFIED),
+            content_encoding_compressed,
+        }
+    };
+    Ok((info, resp))
+}
+
+/// 本次启动能否用单 GET 探测代替 HEAD ∥ Range 探测：仅限 fresh、非 hint、无音轨对、
+/// 不带有界 Range 窗口的 HTTP(S) GET 类任务（HLS / DASH / FTP / 非 GET / 续传 / hint 任务
+/// 照旧）。启动序幕（`download_manager`）与 [`run_download`] 共用这一判据。
+pub(crate) fn single_get_probe_applies(p: &DownloadParams) -> bool {
+    !p.is_resume
+        && p.hint_file_size == 0
+        && p.audio_url.is_none()
+        && p.spec.is_get_like()
+        && p.spec.range_window_cap().is_none()
+        && (p.url.starts_with("http://") || p.url.starts_with("https://"))
+        && !crate::hls_downloader::is_hls_url(&p.url)
+        && !crate::dash_downloader::is_dash_url(&p.url)
 }
 
 /// 文件名是否以 HTML 类扩展名结尾——用于 HTML 安全网判断"服务器返回 HTML
@@ -3277,12 +3469,26 @@ pub(crate) async fn finalize_with_interceptors(
     .map_err(DownloadError::from)
 }
 
+/// 完成前收尾（写状态 3 之前）：插件后处理（[`finalize_with_interceptors`]）→ 按最终
+/// 文件名复核分类目录（[`crate::category_route::relocate_completed`]）。返回需随完成帧
+/// 上报的 `(文件名, 大小)`——插件替换了产物，或移入分类目录时因占名改名；`None` = 不变。
+pub(crate) async fn finalize_output(
+    p: &DownloadParams,
+    protocol: crate::intercept::ProtocolKind,
+) -> Result<Option<(String, i64)>, DownloadError> {
+    let replaced = finalize_with_interceptors(p, protocol).await?;
+    Ok(match crate::category_route::relocate_completed(p).await {
+        Some(relocated) => Some(relocated),
+        None => replaced,
+    })
+}
+
 pub async fn run_download(mut params: DownloadParams) {
     let task_id_log = params.task_id.clone();
     let preprobed = params.preprobed.take();
     let result = match run_download_inner(&params, preprobed).await {
         Ok((total, renamed)) => {
-            match finalize_with_interceptors(&params, crate::intercept::ProtocolKind::Http).await {
+            match finalize_output(&params, crate::intercept::ProtocolKind::Http).await {
                 Ok(replaced) => {
                     let (total, renamed) = match replaced {
                         Some((name, size)) => (size, Some(name)),
@@ -3688,6 +3894,8 @@ async fn run_download_inner(
     //          skip probe to preserve one-time tokens
     //    0   — no hint, run normal probe
     let mut applied_spec: Option<RequestSpec> = None;
+    // 单 GET 探测保留的首响应（见 [`resolve_file_info_held_get`]），稍后交给 `DownloadSpec`。
+    let mut held_response: Option<reqwest::Response> = None;
     let mut probed_decision = crate::intercept::drive::ProbedDecision::default();
     let info = if p.hint_file_size != 0 {
         // fresh hint 任务：持久化 Range 验证状态。浏览器扩展 hint → 0（未验证，
@@ -3756,16 +3964,31 @@ async fn run_download_inner(
             content_encoding_compressed: false,
         }
     } else {
-        let info = if let Some(preprobed) = preprobed {
+        let (info, held) = if let Some(preprobed) = preprobed {
             // 启动序幕已用同一 client / spec 跑过完整探测并落库自适应请求头，
-            // 这里不再发第二轮 HEAD ∥ Range 探测。
-            let PreprobedInfo { info, adapted } = preprobed?;
+            // 这里不再发第二轮探测；单 GET 探测保留的首响应一并接手。
+            let PreprobedInfo {
+                info,
+                adapted,
+                held,
+            } = preprobed?;
             log_info!(
                 "[download] task {} reusing prelude probe result (probe skipped)",
                 p.task_id
             );
             applied_spec = adapted;
-            info
+            (info, held)
+        } else if single_get_probe_applies(p) {
+            log_info!(
+                "[download] task {} resolving file info via a single GET...",
+                p.task_id
+            );
+            let (info, adapted, resp) = resolve_file_info_held_get(client, &p.url, &p.spec).await?;
+            if let Some(adapted_spec) = adapted {
+                persist_adapted_spec(&p.db, &p.task_id, &adapted_spec).await;
+                applied_spec = Some(adapted_spec);
+            }
+            (info, Some(resp))
         } else {
             log_info!("[download] task {} resolving file info...", p.task_id);
             let (info, adapted) =
@@ -3777,8 +4000,9 @@ async fn run_download_inner(
                 persist_adapted_spec(&p.db, &p.task_id, &adapted_spec).await;
                 applied_spec = Some(adapted_spec);
             }
-            info
+            (info, None)
         };
+        held_response = held;
         log_info!(
             "[download] task {} resolved: name={}, size={}, range={}",
             p.task_id,
@@ -3834,6 +4058,7 @@ async fn run_download_inner(
     let spec_ref = std::sync::Arc::new(
         DownloadSpec::new(applied_spec.unwrap_or_else(|| p.spec.clone()))
             .with_connection_cap(connection_cap)
+            .with_held_response(held_response)
             .with_refresher(crate::intercept::Refresher::for_params(
                 p,
                 crate::intercept::ProtocolKind::Http,
@@ -4070,7 +4295,10 @@ async fn run_download_inner(
     // false 的情形：probe 路径、已验证任务的 resume、以及 resolver 插件担保
     // rangeSupported 的 hint 任务（大小来自平台 API，Range 能力有插件背书）——
     // 按 SUPPORTED 起步、正常多段规划，保留 CDN 漂移容差。
-    let size_is_estimate = p.hint_file_size > 0 && !p.range_verified;
+    // 单 GET 探测路径同属「Range 未验证」：总大小来自 Content-Length（可能是压缩 /
+    // 动态长度），Range 能力待首响应裁决，同样以 plain GET 单流起飞再升级。
+    let size_is_estimate =
+        (p.hint_file_size > 0 && !p.range_verified) || spec_ref.has_held_response();
 
     // On resume, load any segment rows left over from a previous run once —
     // reused below both for the "auto" segment-count reuse and to decide
@@ -5177,8 +5405,11 @@ async fn download_single_once(
 
     // Resume only when the original method is GET-like. POST + Range is not a
     // portable contract and most servers ignore it, which would corrupt an append.
+    // 单 GET 探测保留了首响应的 fresh 任务：直接从 0 消费该响应，不发 Range（一次性 URL）。
+    let use_held = !is_resume && spec.has_held_response();
     let want_resume = spec.current().is_get_like()
         && supports_range
+        && !use_held
         && physical_existing_len > 0
         && (total_bytes == 0 || physical_existing_len < total_bytes);
     // 紧接着上一个有界窗口干净 EOF 的续传点无需回退到检查点：数据已完整落盘。
@@ -5248,7 +5479,10 @@ async fn download_single_once(
     };
     let mut used = spec.current();
     let mut refetched_full = false;
-    let mut resp = send_cancellable(build(&used), cancel_token).await?;
+    let mut resp = match use_held.then(|| spec.take_held_response()).flatten() {
+        Some(held) => held,
+        None => send_cancellable(build(&used), cancel_token).await?,
+    };
     // hint 模式跳过了探测：反机器人质询只能在这里首次暴露，换中性 UA 重发同一请求。
     if let Some(neutral) = spec.escape_bot_challenge(&used, &resp, db, task_id).await {
         drop(resp);
@@ -9196,6 +9430,444 @@ mod single_resume_tests {
         assert_eq!(error_ids, ids.into_iter().collect());
         engine.manager.shutdown().await;
         injector.close().await;
+        drop(engine);
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "test directory cleanup failed");
+        }
+        Ok(())
+    }
+
+    /// 外部捕获的分类路由：名字已知时建任务即落进分类目录；URL 末段没有扩展名（扩展名
+    /// 在查询参数里）时先留在基准目录，完成前按响应推断出的最终文件名把产物移入命中分类
+    /// 的目录，任务记录随之指向新位置。
+    #[tokio::test]
+    async fn category_route_follows_initial_and_final_file_names()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const BODY: &[u8] = b"\xFF\xD8\xFF\xE0category-route-jpeg";
+        let dir =
+            std::env::temp_dir().join(format!("fluxdown_category_route_{}", uuid::Uuid::new_v4()));
+        let base = dir.join("base");
+        let pictures = dir.join("pictures");
+        tokio::fs::create_dir_all(&base).await?;
+        let base_dir = base.to_string_lossy().into_owned();
+        let pictures_dir = pictures.to_string_lossy().into_owned();
+        let port = spawn_http(|_| response("200 OK", "Content-Type: image/jpeg\r\n", BODY)).await;
+        let mut engine = crate::Engine::new(
+            crate::EngineConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: base_dir.clone(),
+                app_data_dir: dir.to_string_lossy().into_owned(),
+                bt_config: crate::bt_config::BtConfig::default(),
+                proxy_config: crate::proxy_config::ProxyConfig::default(),
+                user_agent: String::new(),
+                data_dir_override: Some(dir.clone()),
+                database_url: Some(format!(
+                    "sqlite://{}?mode=rwc",
+                    dir.join("route.db").display()
+                )),
+            },
+            Arc::new(NoopSink),
+            Arc::new(crate::NoopSelection),
+        )
+        .await?;
+        let mut done_rx = engine.manager.take_done_rx().expect("done receiver");
+        let route = crate::category_route::CategoryRoute {
+            rules: vec![crate::category_route::CategoryRule {
+                match_mode: "extension".to_owned(),
+                extensions: vec!["jpg".to_owned()],
+                save_dir: pictures_dir.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let known = engine
+            .manager
+            .create_task(crate::download_manager::NewTaskSpec {
+                url: format!("http://127.0.0.1:{port}/photo.JPG"),
+                save_dir: base_dir.clone(),
+                start_paused: true,
+                category_route: Some(route.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("create named task");
+        let known = engine
+            .db
+            .load_task_by_id(&known)
+            .await?
+            .expect("named task");
+        assert_eq!(known.save_dir, pictures_dir);
+
+        // 无 hint：开始下载前的探测拿到 `image/jpeg`，写盘前即改选分类目录；
+        // 有 hint（扩展给了大小）：不探测，完成时按实际响应精修出 `.jpg` 后移入。
+        for (name, hint) in [("abc", 0), ("def", BODY.len() as i64)] {
+            let id = engine
+                .manager
+                .create_task(crate::download_manager::NewTaskSpec {
+                    url: format!("http://127.0.0.1:{port}/media/{name}?format=jpg&name=orig"),
+                    save_dir: base_dir.clone(),
+                    segments: 1,
+                    hint_file_size: hint,
+                    category_route: Some(route.clone()),
+                    ..Default::default()
+                })
+                .await
+                .expect("create unnamed task");
+            let created = engine.db.load_task_by_id(&id).await?.expect("unnamed task");
+            assert_eq!(created.save_dir, base_dir);
+            let done = tokio::time::timeout(std::time::Duration::from_secs(10), done_rx.recv())
+                .await?
+                .expect("worker reports completion");
+            assert_eq!(done.task_id, id);
+            engine.manager.on_task_done(&done).await;
+            let task = engine.db.load_task_by_id(&id).await?.expect("task remains");
+            assert_eq!(task.status, 3, "{name}: {}", task.error_message);
+            assert_eq!(task.save_dir, pictures_dir, "{name}");
+            assert_eq!(task.file_name, format!("{name}.jpg"));
+            assert_eq!(tokio::fs::read(pictures.join(&task.file_name)).await?, BODY);
+            assert!(!tokio::fs::try_exists(base.join(&task.file_name)).await?);
+        }
+
+        engine.manager.shutdown().await;
+        drop(engine);
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "test directory cleanup failed");
+        }
+        Ok(())
+    }
+
+    /// `(method, Range 头)`。
+    type RequestRecord = (String, Option<String>);
+
+    /// 记录每个请求 `(method, Range)` 的测试服务器。`one_time` 时只有第一个请求（任意
+    /// method）能拿到文件，之后一律 403；否则是正常的 Range 服务器（HEAD / 206 / 200）。
+    /// 响应体按块限速写出，让首条连接在升级多段前不会瞬间跑完。
+    struct LoggingServer {
+        port: u16,
+        log: Arc<std::sync::Mutex<Vec<RequestRecord>>>,
+    }
+
+    impl LoggingServer {
+        fn requests(&self) -> Vec<RequestRecord> {
+            self.log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    async fn spawn_logging_server(
+        body: Arc<Vec<u8>>,
+        one_time: bool,
+        extra_headers: &'static str,
+    ) -> LoggingServer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let served_log = log.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let body = body.clone();
+                let log = served_log.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = stream.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let method = text.split_whitespace().next().unwrap_or("").to_owned();
+                    let range = text.lines().find_map(|l| {
+                        let (name, value) = l.split_once(':')?;
+                        name.eq_ignore_ascii_case("range")
+                            .then(|| value.trim().to_owned())
+                    });
+                    let first = {
+                        let mut log = log
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        log.push((method.clone(), range.clone()));
+                        log.len() == 1
+                    };
+                    let head = if one_time && !first {
+                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_vec()
+                    } else if let Some((start, end)) = range.as_deref().and_then(|r| {
+                        let (s, e) = r.strip_prefix("bytes=")?.split_once('-')?;
+                        let start = s.parse::<usize>().ok()?;
+                        let end = e
+                            .parse::<usize>()
+                            .map_or(body.len() - 1, |end| end.min(body.len() - 1));
+                        Some((start, end))
+                    }) {
+                        let payload = &body[start..=end];
+                        let mut out = format!(
+                            "HTTP/1.1 206 Partial Content\r\n{extra_headers}Accept-Ranges: bytes\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len(),
+                            payload.len()
+                        )
+                        .into_bytes();
+                        out.extend_from_slice(payload);
+                        out
+                    } else {
+                        let mut out = format!(
+                            "HTTP/1.1 200 OK\r\n{extra_headers}Accept-Ranges: bytes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes();
+                        if method != "HEAD" {
+                            out.extend_from_slice(&body);
+                        }
+                        out
+                    };
+                    // 头部（到第一个空行）立即发出，其后的 body 分块限速。
+                    let split = head
+                        .windows(4)
+                        .position(|w| w == b"\r\n\r\n")
+                        .map_or(head.len(), |p| p + 4);
+                    if stream.write_all(&head[..split]).await.is_err() {
+                        return;
+                    }
+                    for chunk in head[split..].chunks(256 * 1024) {
+                        if stream.write_all(chunk).await.is_err() {
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                    if let Err(error) = stream.shutdown().await {
+                        tracing::debug!(%error, "test HTTP client closed connection");
+                    }
+                });
+            }
+        });
+        LoggingServer { port, log }
+    }
+
+    async fn route_test_engine(
+        dir: &std::path::Path,
+        default_dir: &str,
+    ) -> Result<crate::Engine, Box<dyn std::error::Error>> {
+        Ok(crate::Engine::new(
+            crate::EngineConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: default_dir.to_owned(),
+                app_data_dir: dir.to_string_lossy().into_owned(),
+                bt_config: crate::bt_config::BtConfig::default(),
+                proxy_config: crate::proxy_config::ProxyConfig::default(),
+                user_agent: String::new(),
+                data_dir_override: Some(dir.to_path_buf()),
+                database_url: Some(format!(
+                    "sqlite://{}?mode=rwc",
+                    dir.join("held.db").display()
+                )),
+            },
+            Arc::new(NoopSink),
+            Arc::new(crate::NoopSelection),
+        )
+        .await?)
+    }
+
+    /// 一次性 URL（只有第一个请求有效）：fresh、无 hint 的任务只发一个 GET，其响应既给出
+    /// 文件名（Content-Disposition）又成为数据连接——单流与多段（升级被拒后）都要下完整。
+    #[tokio::test]
+    async fn one_time_url_is_downloaded_from_the_single_probe_get()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let body = Arc::new(data(3 * MIB));
+        for segments in [1, 4] {
+            let dir =
+                std::env::temp_dir().join(format!("fluxdown_one_time_{}", uuid::Uuid::new_v4()));
+            let base = dir.join("base");
+            tokio::fs::create_dir_all(&base).await?;
+            let base_dir = base.to_string_lossy().into_owned();
+            let server = spawn_logging_server(
+                body.clone(),
+                true,
+                "Content-Disposition: attachment; filename=\"bundle.zip\"\r\nContent-Type: application/zip\r\n",
+            )
+            .await;
+            let mut engine = route_test_engine(&dir, &base_dir).await?;
+            let mut done_rx = engine.manager.take_done_rx().expect("done receiver");
+            let id = engine
+                .manager
+                .create_task(crate::download_manager::NewTaskSpec {
+                    url: format!("http://127.0.0.1:{}/dl?token=once", server.port),
+                    save_dir: base_dir.clone(),
+                    segments,
+                    ..Default::default()
+                })
+                .await
+                .expect("create one-time task");
+            let done = tokio::time::timeout(std::time::Duration::from_secs(30), done_rx.recv())
+                .await?
+                .expect("worker reports completion");
+            assert_eq!(done.task_id, id);
+            engine.manager.on_task_done(&done).await;
+            let task = engine.db.load_task_by_id(&id).await?.expect("task remains");
+            assert_eq!(
+                task.status, 3,
+                "segments={segments}: {}",
+                task.error_message
+            );
+            assert_eq!(task.file_name, "bundle.zip", "segments={segments}");
+            assert_eq!(
+                tokio::fs::read(base.join("bundle.zip")).await?,
+                *body,
+                "segments={segments}"
+            );
+            let requests = server.requests();
+            assert_eq!(
+                requests.first(),
+                Some(&("GET".to_owned(), None)),
+                "segments={segments}: the first request must be the plain data GET: {requests:?}"
+            );
+            assert!(
+                requests.iter().all(|(method, _)| method == "GET"),
+                "segments={segments}: no HEAD may be sent: {requests:?}"
+            );
+            if segments == 1 {
+                assert_eq!(requests.len(), 1, "single stream sends exactly one request");
+            }
+            engine.manager.shutdown().await;
+            drop(engine);
+            if let Err(error) = tokio::fs::remove_dir_all(&dir).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(%error, "test directory cleanup failed");
+            }
+        }
+        Ok(())
+    }
+
+    /// 一次性 URL + 分类路由：分类按首响应的 Content-Disposition 扩展名命中，任务一开始就
+    /// 落进分类目录，且整个过程只发了那一个 GET。
+    #[tokio::test]
+    async fn one_time_url_routes_by_content_disposition_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let body = Arc::new(data(2 * MIB));
+        let dir = std::env::temp_dir().join(format!("fluxdown_one_time_{}", uuid::Uuid::new_v4()));
+        let base = dir.join("base");
+        let archives = dir.join("archives");
+        tokio::fs::create_dir_all(&base).await?;
+        let base_dir = base.to_string_lossy().into_owned();
+        let archives_dir = archives.to_string_lossy().into_owned();
+        let server = spawn_logging_server(
+            body.clone(),
+            true,
+            "Content-Disposition: attachment; filename=\"bundle.zip\"\r\nContent-Type: application/octet-stream\r\n",
+        )
+        .await;
+        let mut engine = route_test_engine(&dir, &base_dir).await?;
+        let mut done_rx = engine.manager.take_done_rx().expect("done receiver");
+        let id = engine
+            .manager
+            .create_task(crate::download_manager::NewTaskSpec {
+                url: format!("http://127.0.0.1:{}/dl?token=once", server.port),
+                save_dir: base_dir.clone(),
+                segments: 1,
+                category_route: Some(crate::category_route::CategoryRoute {
+                    rules: vec![crate::category_route::CategoryRule {
+                        match_mode: "extension".to_owned(),
+                        extensions: vec!["zip".to_owned()],
+                        save_dir: archives_dir.clone(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("create one-time routed task");
+        let done = tokio::time::timeout(std::time::Duration::from_secs(30), done_rx.recv())
+            .await?
+            .expect("worker reports completion");
+        assert_eq!(done.task_id, id);
+        engine.manager.on_task_done(&done).await;
+        let task = engine.db.load_task_by_id(&id).await?.expect("task remains");
+        assert_eq!(task.status, 3, "{}", task.error_message);
+        assert_eq!(task.save_dir, archives_dir);
+        assert_eq!(task.file_name, "bundle.zip");
+        assert_eq!(tokio::fs::read(archives.join("bundle.zip")).await?, *body);
+        assert!(!tokio::fs::try_exists(base.join("bundle.zip")).await?);
+        assert_eq!(server.requests(), vec![("GET".to_owned(), None)]);
+        engine.manager.shutdown().await;
+        drop(engine);
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "test directory cleanup failed");
+        }
+        Ok(())
+    }
+
+    /// 正常 Range 服务器：fresh hint-0 任务仍升级为多段——恰好一个无 Range 的 GET 起步，
+    /// 随后出现 `bytes=N-…` 的并发 Range 请求；全程没有 HEAD 与 `bytes=0-0`。
+    #[tokio::test]
+    async fn range_server_upgrades_single_probe_get_to_multi_segment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let body = Arc::new(data(16 * MIB));
+        let dir = std::env::temp_dir().join(format!("fluxdown_upgrade_{}", uuid::Uuid::new_v4()));
+        let base = dir.join("base");
+        tokio::fs::create_dir_all(&base).await?;
+        let base_dir = base.to_string_lossy().into_owned();
+        let server = spawn_logging_server(body.clone(), false, "").await;
+        let mut engine = route_test_engine(&dir, &base_dir).await?;
+        let mut done_rx = engine.manager.take_done_rx().expect("done receiver");
+        let id = engine
+            .manager
+            .create_task(crate::download_manager::NewTaskSpec {
+                url: format!("http://127.0.0.1:{}/big.bin", server.port),
+                save_dir: base_dir.clone(),
+                segments: 4,
+                ..Default::default()
+            })
+            .await
+            .expect("create task");
+        let done = tokio::time::timeout(std::time::Duration::from_secs(60), done_rx.recv())
+            .await?
+            .expect("worker reports completion");
+        assert_eq!(done.task_id, id);
+        engine.manager.on_task_done(&done).await;
+        let task = engine.db.load_task_by_id(&id).await?.expect("task remains");
+        assert_eq!(task.status, 3, "{}", task.error_message);
+        assert_eq!(tokio::fs::read(base.join("big.bin")).await?, *body);
+        let requests = server.requests();
+        assert!(
+            requests.iter().all(|(method, _)| method == "GET"),
+            "no HEAD may be sent: {requests:?}"
+        );
+        assert_eq!(
+            requests.iter().filter(|(_, range)| range.is_none()).count(),
+            1,
+            "exactly one plain GET: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(_, range)| range.as_deref() != Some("bytes=0-0")),
+            "no bytes=0-0 probe: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .filter(|(_, range)| range.as_deref().is_some_and(|r| !r.starts_with("bytes=0-")))
+                .count()
+                >= 1,
+            "expected upgraded Range requests: {requests:?}"
+        );
+        engine.manager.shutdown().await;
         drop(engine);
         if let Err(error) = tokio::fs::remove_dir_all(&dir).await
             && error.kind() != std::io::ErrorKind::NotFound

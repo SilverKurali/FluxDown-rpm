@@ -340,6 +340,8 @@ fn create_request(url: String) -> CreateTaskRequestDto {
         http_user: String::new(),
         http_password: String::new(),
         save_site_auth: false,
+        unattended: false,
+        offered_save_dir: None,
     }
 }
 

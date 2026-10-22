@@ -105,6 +105,8 @@ pub struct NewDownloadContext {
     pub manual_proxy_url: String,
     /// 预填链接（拖放）。
     pub initial_urls: Vec<String>,
+    /// 分类目录路由（偏好 `custom_categories`）；`None` = 没有分类配置目录。
+    pub category_route: Option<fluxdown_protocol::CategoryRouteDto>,
     /// 「下载到」候选：账号其他设备 + 已配对设备（本机始终可选，不在其中）；空 = 不显示选择器。
     pub targets: Vec<DeviceEntry>,
     /// 「下载到」初值：设备本地偏好里上次的目标（目标已不存在则为本机）。
@@ -207,6 +209,9 @@ pub(crate) fn build_new_download_context(
             })
             .collect(),
         manual_proxy_url: manual_proxy_url(config),
+        category_route: fluxdown_protocol::CategoryRouteDto::from_preference(
+            preferences.get(fluxdown_protocol::CUSTOM_CATEGORIES_PREF_KEY),
+        ),
         initial_urls: Vec::new(),
         targets,
         target,
@@ -827,6 +832,7 @@ impl NewDownloadView {
             queue_id,
             segments,
             queues,
+            category_route,
             manual_proxy_url,
             ..
         } = context;
@@ -855,6 +861,7 @@ impl NewDownloadView {
         self.context.queue_id = queue_id;
         self.context.segments = segments;
         self.context.queues = queues;
+        self.context.category_route = category_route;
         self.context.manual_proxy_url = manual_proxy_url;
         cx.notify();
     }
@@ -988,11 +995,14 @@ impl NewDownloadView {
             }
         }
         self.record_save_dir_history(&common.save_dir, cx);
+        let offered_save_dir = self.context.save_dir.clone();
         (self.on_submit)(
             NewDownloadSubmission::Tasks {
                 common: Box::new(common),
                 items: tasks,
                 captures,
+                category_route: self.context.category_route.clone(),
+                offered_save_dir,
             },
             window,
             cx,

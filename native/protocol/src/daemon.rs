@@ -251,6 +251,11 @@ pub struct DaemonCreateTaskParams {
     /// 主名不变；缺省 / 空串 = 无参照。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hint: Option<String>,
+    /// 分类目录路由：调用方未替用户选定保存目录时（外部捕获）携带，引擎据此按初始名与
+    /// 下载完成时的最终文件名把产物放进命中分类的目录；`request.saveDir` 为路由未命中时
+    /// 的基准目录（空 = daemon 默认）。缺省 = 保存目录即最终目录。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_route: Option<crate::agent::CategoryRouteDto>,
 }
 
 /// `daemon.task.createMany` 单次调用的条目上限；客户端须按块拆分更大的导入。
@@ -273,6 +278,10 @@ pub struct DaemonCreateTasksParams {
     pub common: CreateTaskRequest,
     /// 1..=[`CREATE_TASKS_MAX_ITEMS`] 条。
     pub items: Vec<CreateTaskItem>,
+    /// 分类目录路由，对整块每一条生效，语义同 [`DaemonCreateTaskParams::category_route`]；
+    /// 缺省 = 保存目录即最终目录。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_route: Option<crate::agent::CategoryRouteDto>,
 }
 
 /// `daemon.task.createMany` 的单条链接。

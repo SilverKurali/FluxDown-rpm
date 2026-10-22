@@ -447,6 +447,8 @@ internal fun CreateTaskRequest.toDto() = CreateTaskRequestDto(
     httpUser = httpUser,
     httpPassword = httpPassword,
     saveSiteAuth = saveSiteAuth,
+    offeredSaveDir = offeredSaveDir,
+    unattended = unattended,
 )
 
 internal fun ImportBatch.toDto() = ImportBatchDto(

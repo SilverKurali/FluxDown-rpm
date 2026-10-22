@@ -10,7 +10,8 @@ import { ChevronDown, ChevronRight, FileText, FolderOpen, Plus, X } from 'lucide
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { useT } from '../../../i18n'
-import { LATER_QUEUE_ID, MAIN_QUEUE_ID, METHOD, RpcError, call, rpc, rpcStore, useAgent, useConfigValues, useConnection, useDaemon } from '../../../lib/rpc'
+import { CUSTOM_CATEGORIES_PREF_KEY, LATER_QUEUE_ID, MAIN_QUEUE_ID, METHOD, RpcError, call, rpc, rpcStore, useAgent, useConfigValues, useConnection, useDaemon } from '../../../lib/rpc'
+import { routeBaseDir, routeFollows, routeFromPreference } from '../../../lib/categoryRoute'
 import { cloudPresenceKnown } from '../../../lib/cloud-presence'
 import { describeUploadError } from '../../../lib/rpcErrorText'
 import { ThreadsRiskCallout } from '../../../lib/ThreadsRiskCallout'
@@ -432,11 +433,17 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
 
     let noticeText: string | null = null
     if (plain.length > 0) {
-      const { common, items } = buildBatch(
+      const batch = buildBatch(
         plain.map((index) => entries[index]),
         options,
         entries.length === 1,
       )
+      const { items } = batch
+      let { common } = batch
+      // 分类路由：只对本机提交生效；目录仍是表单初始值 / 分类目录时交给引擎按文件名定落点。
+      const route = routeFromPreference(rpcStore.peek().snapshot?.preferences.values[CUSTOM_CATEGORIES_PREF_KEY])
+      const followed = route !== null && routeFollows(route, options.saveDir, context.saveDir) ? route : null
+      if (followed) common = { ...common, saveDir: routeBaseDir(followed, options.saveDir, context.saveDir) }
       const controller = new AbortController()
       importAbort.current = controller
       setCancelling(false)
@@ -445,6 +452,7 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
       const report = await runImport({
         common,
         items,
+        categoryRoute: followed,
         call: rpc.daemon.task.createMany,
         sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
         signal: controller.signal,

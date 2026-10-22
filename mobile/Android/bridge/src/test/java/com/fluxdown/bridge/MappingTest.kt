@@ -223,9 +223,11 @@ class MappingTest {
 
     @Test
     fun importBatchMapsCommonAndItemsToTheWire() {
-        val common = CreateTaskRequest(url = "", saveDir = "/d", segments = 4, queueId = "q", startPaused = true, headers = mapOf("X" to "1"))
+        val common = CreateTaskRequest(url = "", saveDir = "/d", segments = 4, queueId = "q", startPaused = true, headers = mapOf("X" to "1"), offeredSaveDir = "/o", unattended = true)
         val dto = ImportBatch(common, listOf(ImportItem("https://a/1", "one.bin", "sha256=ab"), ImportItem("https://a/2"))).toDto()
         assertEquals("/d", dto.common.saveDir)
+        assertEquals("/o", dto.common.offeredSaveDir)
+        assertTrue(dto.common.unattended)
         assertEquals(4, dto.common.segments)
         assertEquals("q", dto.common.queueId)
         assertTrue(dto.common.startPaused)

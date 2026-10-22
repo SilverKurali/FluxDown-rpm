@@ -55,7 +55,7 @@ import {
 } from '../model/actions'
 import { remoteCan } from '../model/batchPlan'
 import { canChangeSegments, canChangeUrl, canVerifyIntegrity } from '../model/taskEdit'
-import { canResumeSeeding, isSeeding } from '../model/task'
+import { canPause, canResumeSeeding } from '../model/task'
 import type { DownloadTaskView } from '../model/task'
 import { anyActive, anyResumable } from '../model/groupTree'
 import type { GroupCounts } from '../model/groupTree'
@@ -110,7 +110,7 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail, selecti
   if (views.some((view) => (view.state !== 'completed' ? view.state !== 'downloading' : canResumeSeeding(view)) && remoteCan(view, 'resume'))) {
     entries.push({ type: 'item', key: 'resume', label: t('resume'), icon: Play, onSelect: () => void resumeViews(views) })
   }
-  if (views.some((view) => (view.state === 'downloading' || view.state === 'pending' || isSeeding(view)) && remoteCan(view, 'pause'))) {
+  if (views.some((view) => canPause(view) && remoteCan(view, 'pause'))) {
     entries.push({ type: 'item', key: 'pause', label: t('pause'), icon: Pause, onSelect: () => void pauseViews(views) })
   }
   if (only) {

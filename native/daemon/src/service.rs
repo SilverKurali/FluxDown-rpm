@@ -1483,6 +1483,7 @@ impl DaemonService {
                 hint_file_size: params.hint_file_size.filter(|size| *size > 0).unwrap_or(0),
                 name_hint: params.name_hint.unwrap_or_default(),
                 unattended: params.unattended,
+                category_route: params.category_route,
             })
             .await;
         match result {
@@ -1513,6 +1514,7 @@ impl DaemonService {
             batch_id,
             common,
             items,
+            category_route,
         } = params;
         match self
             .actor
@@ -1520,6 +1522,7 @@ impl DaemonService {
                 batch_id,
                 common: Box::new(common),
                 items,
+                category_route,
             })
             .await
         {

@@ -541,10 +541,12 @@ pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> 
     }) {
         items.push(MenuEntry::Resume);
     }
+    // 失败的本机任务也可暂停：撤销已排程的自动重试，任务落为已暂停（#947）。
     if selection.iter().any(|task| {
         task.controllable
             && (task.is_seeding
-                || matches!(task.state, TaskState::Downloading | TaskState::Pending))
+                || matches!(task.state, TaskState::Downloading | TaskState::Pending)
+                || (task.is_local && task.state == TaskState::Failed))
     }) {
         items.push(MenuEntry::Pause);
     }
@@ -1910,7 +1912,9 @@ impl DownloadTableDelegate {
                 TaskState::Paused | TaskState::Failed => summary.any_resumable = true,
                 TaskState::Completed => {}
             }
-            summary.any_active |= row.is_seeding();
+            // 失败的本机任务可暂停（撤销等待中的自动重试，#947）。
+            summary.any_active |=
+                row.is_seeding() || (key.is_local() && row.state == TaskState::Failed);
             summary.any_resumable |= row.can_resume_seeding();
         }
         summary.all_openable = summary.any && !any_unopenable;
@@ -5524,6 +5528,17 @@ mod context_menu_tests {
     }
 
     #[test]
+    fn failed_local_task_offers_both_resume_and_pause() {
+        // #947：失败任务可能正等待自动重试，暂停用于撤销重试。
+        let items = context_menu_items(&[task(true, TaskState::Failed)]);
+        assert!(items.contains(&MenuEntry::Resume));
+        assert!(items.contains(&MenuEntry::Pause));
+        // 远程任务没有对应的云端暂停命令。
+        let items = context_menu_items(&[task(false, TaskState::Failed)]);
+        assert!(!items.contains(&MenuEntry::Pause));
+    }
+
+    #[test]
     fn uncontrollable_remote_task_offers_no_control_entries() {
         let mut unknown = task(false, TaskState::Pending);
         unknown.controllable = false;
@@ -5588,14 +5603,6 @@ mod context_menu_tests {
                 MenuEntry::ShowDetail,
             ]
         );
-    }
-
-    #[test]
-    fn multi_select_paused_and_failed_shows_resume_but_not_pause() {
-        let selection = [task(true, TaskState::Paused), task(true, TaskState::Failed)];
-        let items = context_menu_items(&selection);
-        assert!(items.contains(&MenuEntry::Resume));
-        assert!(!items.contains(&MenuEntry::Pause));
     }
 
     #[test]
@@ -5752,6 +5759,7 @@ mod context_menu_tests {
             context_menu_items(&[task(true, TaskState::Failed)]),
             vec![
                 MenuEntry::Resume,
+                MenuEntry::Pause,
                 MenuEntry::Boost,
                 MenuEntry::OpenFolder,
                 MenuEntry::Rename,

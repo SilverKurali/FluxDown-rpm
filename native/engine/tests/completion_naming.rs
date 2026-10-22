@@ -406,10 +406,16 @@ async fn spawn_range_server(
                         &body[..],
                     )
                 };
-                if stream.write_all(head_bytes.as_bytes()).await.is_err()
-                    || stream.write_all(payload).await.is_err()
-                {
+                if stream.write_all(head_bytes.as_bytes()).await.is_err() {
                     return;
+                }
+                // 分块限速：首条 plain GET 连接要活到升级出的 Range 连接接手之后，
+                // loopback 上整块瞬间写完会让多段升级无从发生。
+                for chunk in payload.chunks(512 * 1024) {
+                    if stream.write_all(chunk).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
                 if let Err(error) = stream.shutdown().await {
                     eprintln!("test HTTP client closed connection: {error}");
@@ -429,13 +435,14 @@ fn patterned_body(len: usize) -> Arc<Vec<u8>> {
     Arc::new((0..len).map(|i| (i % 251) as u8).collect())
 }
 
-/// 断言启动序幕与下载器合计只发了一轮探测（1 个 HEAD + 1 个 `bytes=0-0`），
-/// 且真实下载走了多段（至少 2 条非探测 Range GET）。
-fn assert_single_probe_round_and_multi_segment(server: &RangeServer) {
-    assert_eq!(server.head.load(Ordering::SeqCst), 1, "HEAD probes");
+/// 断言 fresh 无 hint 任务的启动只发了【一个】plain GET：没有 HEAD、没有 `bytes=0-0`
+/// 探测（一次性 URL 的令牌不被探测消耗），且该 GET 响应起飞后升级为多段（至少 2 条
+/// Range GET）。
+fn assert_single_get_start_and_multi_segment(server: &RangeServer) {
+    assert_eq!(server.head.load(Ordering::SeqCst), 0, "HEAD probes");
     assert_eq!(
         server.probe_range.load(Ordering::SeqCst),
-        1,
+        0,
         "Range 0-0 probes"
     );
     assert!(
@@ -457,7 +464,7 @@ async fn nameless_task_probes_once_and_names_from_content_disposition() {
     let (name, content) = download_with_segments(server.port, "/dl?id=1", "", "", 0, 4).await;
     assert_eq!(name, "real-name.bin");
     assert!(content == *body, "downloaded content must match the body");
-    assert_single_probe_round_and_multi_segment(&server);
+    assert_single_get_start_and_multi_segment(&server);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -468,7 +475,7 @@ async fn nameless_task_probes_once_and_names_from_url() {
         download_with_segments(server.port, "/files/blob.bin", "", "", 0, 4).await;
     assert_eq!(name, "blob.bin");
     assert!(content == *body, "downloaded content must match the body");
-    assert_single_probe_round_and_multi_segment(&server);
+    assert_single_get_start_and_multi_segment(&server);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -479,13 +486,13 @@ async fn extensionless_explicit_name_probes_once_and_takes_url_extension() {
         download_with_segments(server.port, "/files/blob.bin", "renamed", "", 0, 4).await;
     assert_eq!(name, "renamed.bin");
     assert!(content == *body, "downloaded content must match the body");
-    assert_single_probe_round_and_multi_segment(&server);
+    assert_single_get_start_and_multi_segment(&server);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hung_head_does_not_burn_the_prelude_timeout() {
-    // HEAD 永不应答、`Range: bytes=0-0` 1s 内应答：序幕不再单独跑 8s 超时的裸 HEAD，
-    // 而是共用下载器的 HEAD ∥ Range 探测（conclusive 206 后 HEAD 只再给 1s 宽限）。
+    // HEAD 永不应答：fresh 无 hint 任务已不再发 HEAD（单 GET 起步），挂起的 HEAD 与启动
+    // 序幕无关——不能被 8s HEAD 超时拖慢，也不会被探测。
     let body = patterned_body(16 * 1024 * 1024);
     let server = spawn_range_server(body.clone(), "attachment; filename=\"hang.bin\"", true).await;
     let started = std::time::Instant::now();
@@ -497,7 +504,7 @@ async fn hung_head_does_not_burn_the_prelude_timeout() {
         "download took {:?}; prelude must not wait out the 8s HEAD timeout",
         started.elapsed()
     );
-    assert_single_probe_round_and_multi_segment(&server);
+    assert_single_get_start_and_multi_segment(&server);
 }
 
 /// 只建任务（稍后下载，不起跑）并读回落库名：验证建任务即定名，不依赖任何网络请求。

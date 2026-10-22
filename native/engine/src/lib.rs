@@ -24,6 +24,8 @@ pub mod bt_sparse;
 /// 已完成 BT 任务的完整性校验（按 piece 表重哈希落盘数据）。
 #[cfg(feature = "bt")]
 pub mod bt_verify;
+/// 外部捕获的分类保存目录路由：建任务时选初始目录，完成前按最终文件名复核落点。
+pub mod category_route;
 pub mod cdn;
 pub mod components;
 pub mod dash_downloader;

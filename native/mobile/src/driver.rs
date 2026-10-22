@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use fluxdown_protocol::method::{SYSTEM_SNAPSHOT, SYSTEM_TASK_PAGE};
 use fluxdown_protocol::{
-    EventFrame, PROTOCOL_VERSION, RpcRequest, ServiceRole, Snapshot, TablePage, TableSync,
+    CategoryRouteDto, EventFrame, PROTOCOL_VERSION, RpcRequest, ServiceRole, Snapshot, TablePage,
+    TableSync,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep, sleep_until, timeout};
@@ -143,6 +144,8 @@ pub(crate) struct Driver {
     /// 首次同步结果；`open_*` 等待它以便把鉴权 / 网络错误同步返回给调用方。
     pub first: Option<oneshot::Sender<Result<(), FluxError>>>,
     pub timing: Timing,
+    /// 主机当前偏好 `custom_categories` 构建的分类路由，供 `HostSession::create_task` 读取。
+    pub routes: watch::Sender<Option<CategoryRouteDto>>,
 }
 
 /// 驱动的可变运行状态。
@@ -343,6 +346,7 @@ impl Driver {
                 }
                 continue;
             };
+            self.publish_route(&projection);
 
             let snapshot_signal = HostSignalDto::Snapshot {
                 snapshot: projection.snapshot_dto(),
@@ -550,6 +554,7 @@ impl Driver {
                 Err(LiveEnd::Resync)
             }
             FrameOutcome::Applied(signals) => {
+                self.publish_route(projection);
                 for signal in signals {
                     self.emit(signal)
                         .await
@@ -558,6 +563,18 @@ impl Driver {
                 Ok(projection.table_sync())
             }
         }
+    }
+
+    /// 把投影里当前的分类路由发布给会话（建任务时据此路由）；未变化不通知。
+    fn publish_route(&self, projection: &Projection) {
+        let route = projection.category_route();
+        self.routes.send_if_modified(|current| {
+            let changed = *current != route;
+            if changed {
+                *current = route;
+            }
+            changed
+        });
     }
 
     /// 经 `system.taskPage` 翻完所有待载入的表，装入投影并下发完整快照，返回期间缓冲的帧。

@@ -1,8 +1,7 @@
 /**
  * runtime.onMessage 路由（C6）。
  *
- * 消息分三族：`type` 族（任务面板 nmh-*、诊断）、`action` 族（C6 MessageMap）、
- * 以及兼容保留的 `appConfirmedUp`。
+ * 消息分两族：`type` 族（任务面板 nmh-*、诊断）与 `action` 族（C6 MessageMap）。
  *
  * Firefox：直接返回 Promise。
  * Chromium：Chrome 148 之前 onMessage 监听器不能返回 Promise，必须 "return true + sendResponse"。
@@ -11,7 +10,7 @@ import { browser } from "wxt/browser";
 import type { Browser } from "wxt/browser";
 import { hostOf } from "@/rules/url";
 import { installConnectionDiagnostics } from "@/utils/connection-diagnostics-background";
-import { checkFluxDownAvailable, effectiveRemoteMode } from "@/utils/download-dispatch";
+import { checkRemoteAvailable, effectiveRemoteMode } from "@/utils/download-dispatch";
 import {
   nmhOpenFile,
   nmhRevealFile,
@@ -31,7 +30,7 @@ import {
   downloadUrls,
   handoffPage,
 } from "./downloads";
-import { getCapabilities, invalidateCapabilities } from "./host";
+import { getCapabilities } from "./host";
 import { markPreempted } from "./intercept";
 import { rememberServiceWorkerScope } from "./sw-scopes";
 import { scopeBelongsTo } from "@/utils/download-source";
@@ -452,11 +451,16 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
 
   async getHostStatus() {
     const capabilities = await getCapabilities(true);
+    const remoteMode = await effectiveRemoteMode();
     // ping 成功 → 本机 App 已恢复：立即解除熔断，让「接管」与显示的「已连接」一致。
     // 远程 always 模式下 connected 是远程探测结果，不代表本机 App 在线。
-    if (capabilities.connected && (await effectiveRemoteMode()) !== "always") markAppUp();
+    if (capabilities.connected && remoteMode !== "always") markAppUp();
+    // fallback：本机不可达时下载改投远程，远程可达同样算已连接（与下载路由一致）。
+    const connected =
+      capabilities.connected ||
+      (remoteMode === "fallback" && (await checkRemoteAvailable().catch(() => false)));
     const status: HostStatus = {
-      connected: capabilities.connected,
+      connected,
       protocol: capabilities.protocol,
       capabilities,
       ruleSync: await getRuleSyncStatus(),
@@ -602,12 +606,6 @@ export function installMessages(): void {
     const typed = await handleTypeMessage(message);
     if (typed !== undefined) return typed;
 
-    // Popup 直连 ping NMH 成功后的熔断恢复信号（fire-and-forget）。
-    if (message.action === "appConfirmedUp") {
-      markAppUp();
-      invalidateCapabilities();
-      return { success: true };
-    }
     if (isMessageAction(message.action)) {
       // 按 action 分发；各 handler 的 req 形状由 MessageMap 约定，发送方经 sendAction 类型化。
       const handler = handlers[message.action] as (req: unknown, s: Sender) => Promise<unknown>;

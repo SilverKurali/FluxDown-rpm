@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     resp_name TEXT NOT NULL DEFAULT '',
     resp_mime TEXT NOT NULL DEFAULT '',
     source_changed INTEGER NOT NULL DEFAULT 0,
+    category_route TEXT NOT NULL DEFAULT '',
     queue_order INTEGER NOT NULL DEFAULT 0,
     uploaded_bytes BIGINT NOT NULL DEFAULT 0,
     uploaded_at_completion BIGINT NOT NULL DEFAULT 0,
@@ -360,6 +361,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     resp_name TEXT NOT NULL DEFAULT '',
     resp_mime TEXT NOT NULL DEFAULT '',
     source_changed INTEGER NOT NULL DEFAULT 0,
+    category_route TEXT NOT NULL DEFAULT '',
     queue_order INTEGER NOT NULL DEFAULT 0,
     uploaded_bytes BIGINT NOT NULL DEFAULT 0,
     uploaded_at_completion BIGINT NOT NULL DEFAULT 0,
@@ -766,6 +768,8 @@ pub struct NewTaskRow<'a> {
     pub unattended: bool,
     /// `bt_selected_files` 列的编码值（`""` / `"all"` / `"0,2,5"`）。
     pub bt_selected_files: &'a str,
+    /// 分类目录路由列值（`CategoryRoute` JSON；空串 = 不路由）。
+    pub category_route: &'a str,
     /// `.torrent` 字节；非空时同事务写入 `torrent_files`。
     pub torrent_file_bytes: &'a [u8],
 }
@@ -1507,6 +1511,9 @@ impl Db {
         // 按零容差比对新旧大小（不一致即清空进度）并清回 0。
         self.add_column_if_missing("tasks", "source_changed", "INTEGER NOT NULL DEFAULT 0")
             .await?;
+        // 外部捕获的分类目录路由（JSON，见 `category_route.rs`；空 = 保存目录即最终目录）。
+        self.add_column_if_missing("tasks", "category_route", "TEXT NOT NULL DEFAULT ''")
+            .await?;
         Ok(())
     }
 
@@ -1680,9 +1687,9 @@ impl Db {
                 "INSERT INTO tasks (id, url, file_name, name_inferred, save_dir, segments, status, error_message, \
                  created_at, proxy_url, queue_id, checksum, ignore_tls_errors, queue_order, cookies, referrer, \
                  extra_headers, origin_url, audio_url, resolver_plugin_id, group_id, resolver_item, unattended, \
-                 bt_selected_files, resolver_choice_pending) \
+                 bt_selected_files, resolver_choice_pending, category_route) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, \
-                 $20, $21, $22, $23, $24, $25)",
+                 $20, $21, $22, $23, $24, $25, $26)",
             )
             .bind(row.id)
             .bind(row.url)
@@ -1709,6 +1716,7 @@ impl Db {
             .bind(i32::from(row.unattended))
             .bind(row.bt_selected_files)
             .bind(i32::from(row.resolver_choice_pending))
+            .bind(row.category_route)
             .execute(&mut *tx)
             .await?;
             if !row.torrent_file_bytes.is_empty() {
@@ -4543,24 +4551,53 @@ impl Db {
     }
 
     /// 单条目清单原地改写任务的落盘目标（外部无 UI 入口的自动裂变单条目
-    /// 分支，D6）：不建组，仅覆盖 `save_dir`/`file_name`/`total_bytes`，
-    /// `checksum` 清空（旧值针对改写前的下载目标，保留必致校验失败）。
+    /// 分支，D6）：不建组，仅覆盖 `save_dir`/`file_name`/`total_bytes`/
+    /// `category_route`，`checksum` 清空（旧值针对改写前的下载目标，保留必致校验失败）。
     pub async fn rewrite_task_for_item(
         &self,
         id: &str,
         save_dir: &str,
         file_name: &str,
         total_bytes: i64,
+        category_route: &str,
     ) -> Result<(), DbError> {
         sqlx::query(
-            "UPDATE tasks SET save_dir = $1, file_name = $2, total_bytes = $3, checksum = '' WHERE id = $4",
+            "UPDATE tasks SET save_dir = $1, file_name = $2, total_bytes = $3, checksum = '', \
+             category_route = $4 WHERE id = $5",
         )
         .bind(save_dir)
         .bind(file_name)
         .bind(total_bytes)
+        .bind(category_route)
         .bind(id)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// 任务的分类目录路由列值（空串 = 不路由 / 任务不存在）。
+    pub async fn load_task_category_route(&self, id: &str) -> Result<String, DbError> {
+        let route: Option<String> =
+            sqlx::query_scalar("SELECT category_route FROM tasks WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(route.unwrap_or_default())
+    }
+
+    /// 产物移入分类目录后同步任务位置（单条 UPDATE，目录与文件名不会分离）。
+    pub async fn set_task_location(
+        &self,
+        id: &str,
+        save_dir: &str,
+        file_name: &str,
+    ) -> Result<(), DbError> {
+        sqlx::query("UPDATE tasks SET save_dir = $1, file_name = $2 WHERE id = $3")
+            .bind(save_dir)
+            .bind(file_name)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -4601,9 +4638,10 @@ impl Db {
         .execute(&mut *tx)
         .await?;
 
+        // 母任务成为组成员：组以基准目录为根、成员保持组内结构，不再按分类路由。
         sqlx::query(
             "UPDATE tasks SET group_id = $1, resolver_item = $2, file_name = $3, save_dir = $4, \
-             total_bytes = $5, checksum = '', status = $6 WHERE id = $7",
+             total_bytes = $5, checksum = '', status = $6, category_route = '' WHERE id = $7",
         )
         .bind(&spec.group_id)
         .bind(&spec.mother_resolver_item)
@@ -6339,7 +6377,7 @@ mod tests {
         .await
         .expect("insert task");
 
-        db.rewrite_task_for_item("t1", "/tmp/group/sub", "item.mp4", 12345)
+        db.rewrite_task_for_item("t1", "/tmp/group/sub", "item.mp4", 12345, "")
             .await
             .expect("rewrite");
 
@@ -8605,6 +8643,7 @@ mod tests {
             unattended: false,
             resolver_choice_pending: false,
             bt_selected_files: "",
+            category_route: "",
             torrent_file_bytes: &[],
         }
     }

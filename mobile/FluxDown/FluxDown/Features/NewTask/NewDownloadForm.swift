@@ -208,7 +208,8 @@ final class NewDownloadForm {
                 headers: headers,
                 httpUser: authOk ? adv.httpUser.trimmingCharacters(in: .whitespacesAndNewlines) : "",
                 httpPassword: authOk ? adv.httpPassword : "",
-                saveSiteAuth: authOk && adv.saveSiteAuth
+                saveSiteAuth: authOk && adv.saveSiteAuth,
+                offeredSaveDir: initialSaveDir
             )
         }
     }

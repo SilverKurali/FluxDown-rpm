@@ -98,6 +98,9 @@ public struct CreateTaskRequest: Sendable, Hashable {
     public var httpUser: String
     public var httpPassword: String
     public var saveSiteAuth: Bool
+    /// 新建下载表单 / 外部捕获给出的「分类前默认目录」；nil = 不做分类路由，
+    /// 非 nil 时由 Rust 按当前主机的分类规则决定最终目录。
+    public var offeredSaveDir: String?
 
     public init(
         url: String,
@@ -115,7 +118,8 @@ public struct CreateTaskRequest: Sendable, Hashable {
         headers: [String: String] = [:],
         httpUser: String = "",
         httpPassword: String = "",
-        saveSiteAuth: Bool = false
+        saveSiteAuth: Bool = false,
+        offeredSaveDir: String? = nil
     ) {
         self.url = url
         self.fileName = fileName
@@ -133,6 +137,7 @@ public struct CreateTaskRequest: Sendable, Hashable {
         self.httpUser = httpUser
         self.httpPassword = httpPassword
         self.saveSiteAuth = saveSiteAuth
+        self.offeredSaveDir = offeredSaveDir
     }
 }
 

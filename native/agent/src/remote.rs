@@ -1225,6 +1225,7 @@ impl RemoteTaskService {
                     unattended: true,
                     hint_file_size: None,
                     name_hint: None,
+                    category_route: None,
                 }),
             )
             .await

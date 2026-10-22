@@ -89,6 +89,10 @@ data class CreateTaskRequest(
     val httpUser: String = "",
     val httpPassword: String = "",
     val saveSiteAuth: Boolean = false,
+    /** null = 不按分类路由；非 null = 新建表单 / 外部唤起给出的默认目录，Rust 按分类规则决定是否路由。 */
+    val offeredSaveDir: String? = null,
+    /** 免打扰外部捕获：跳过 BT 文件 / 画质 / 变体二次选择（同 `daemon.task.create.unattended`）。 */
+    val unattended: Boolean = false,
 )
 
 /** 主机推送给 UI 仓库的信号（对应 UniFFI `HostSignal`）。 */

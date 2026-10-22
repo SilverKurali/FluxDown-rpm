@@ -215,6 +215,7 @@ fn create_command(name: &str) -> DownloadsCommand {
         unattended: false,
         hint_file_size: None,
         name_hint: None,
+        category_route: None,
     }))
 }
 
@@ -451,6 +452,7 @@ fn overlapping_resume_success_then_failure_keeps_successful_resume() {
 fn many_params(count: usize, batch_id: &str) -> Box<fluxdown_protocol::DaemonCreateTasksParams> {
     Box::new(fluxdown_protocol::DaemonCreateTasksParams {
         batch_id: batch_id.to_owned(),
+        category_route: None,
         common: serde_json::from_value(json!({"url": ""})).expect("common request"),
         items: (0..count)
             .map(|index| fluxdown_protocol::CreateTaskItem {
@@ -507,6 +509,8 @@ fn create_many_resends_same_batch_after_disconnect_without_pausing_the_gate() {
                         })
                         .collect(),
                     captures: Vec::new(),
+                    category_route: None,
+                    offered_save_dir: String::new(),
                 },
                 move |command| submit_port.execute(command),
                 SubmissionHooks::new(|_| tokio::time::sleep(Duration::from_millis(1))),

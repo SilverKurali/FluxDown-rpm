@@ -85,6 +85,8 @@ internal class AdvancedState {
 internal class NewDownloadState(
     prefill: String,
     defaultSaveDir: String,
+    /** 表单首次给出的、未经分类预填的保存目录；随新建请求提交，由 Rust 按分类规则决定是否路由。 */
+    private val offeredSaveDir: String,
     defaultQueueId: String,
     defaultSegments: Int,
 ) {
@@ -249,6 +251,7 @@ internal class NewDownloadState(
                 httpUser = if (authOk) adv.httpUser.trim() else "",
                 httpPassword = if (authOk) adv.httpPassword else "",
                 saveSiteAuth = authOk && adv.saveSiteAuth,
+                offeredSaveDir = offeredSaveDir,
             )
         }
     }
@@ -260,14 +263,16 @@ internal class NewDownloadState(
         private const val USER_AGENT = "User-Agent"
 
         /**
-         * [external] 非空 = 外部唤起：链接与请求上下文按 [addExternal] 规则预填；保存目录先取命中分类配置的目录
-         * （同 agent 捕获确认弹层与免打扰路径），否则用主机默认目录。
+         * [external] 非空 = 外部唤起：链接与请求上下文按 [addExternal] 规则预填；保存目录先显示命中分类配置的目录
+         * （同 agent 捕获确认弹层），否则用主机默认目录；提交时始终以不含分类的默认目录作 offeredSaveDir，交给 Rust 路由。
          */
         fun create(prefill: String, state: HostState, external: ExternalDownload? = null): NewDownloadState {
             val cfg = state.config
+            val offered = cfg["default_save_dir"].orEmpty().trim()
             return NewDownloadState(
                 prefill = prefill.trim(),
-                defaultSaveDir = external?.categorySaveDir(state) ?: cfg["default_save_dir"].orEmpty().trim(),
+                defaultSaveDir = external?.categorySaveDir(state) ?: offered,
+                offeredSaveDir = offered,
                 defaultQueueId = state.defaultQueueId(),
                 defaultSegments = cfg["default_segments"]?.toIntOrNull() ?: 0,
             ).also { form -> external?.let(form::addExternal) }

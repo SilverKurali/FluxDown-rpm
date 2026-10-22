@@ -150,6 +150,16 @@ export function isSeeding(view: Pick<SeedingFacts, 'source' | 'state' | 'seeding
   return view.source === 'local' && view.state === 'completed' && (view.seedingStatus === 1 || view.seedingStatus === 8)
 }
 
+/** 「暂停」适用：下载中 / 排队 / 做种中，以及本地失败任务（撤销等待中的自动重试，#947）。 */
+export function canPause(view: Pick<SeedingFacts, 'source' | 'state' | 'seedingStatus'>): boolean {
+  return (
+    view.state === 'downloading' ||
+    view.state === 'pending' ||
+    isSeeding(view) ||
+    (view.source === 'local' && view.state === 'failed')
+  )
+}
+
 /** 本地已完成任务因停止原因（seeding_status 2..=7）未在做种且文件仍在：可恢复做种。其余完成态任务不可继续（#935）。 */
 export function canResumeSeeding(view: SeedingFacts): boolean {
   return (

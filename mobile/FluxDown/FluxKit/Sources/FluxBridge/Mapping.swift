@@ -405,7 +405,9 @@ extension CreateTaskRequest {
             headers: headers,
             httpUser: httpUser,
             httpPassword: httpPassword,
-            saveSiteAuth: saveSiteAuth
+            saveSiteAuth: saveSiteAuth,
+            unattended: false,
+            offeredSaveDir: offeredSaveDir
         )
     }
 }

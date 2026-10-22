@@ -7,8 +7,9 @@
 use std::collections::HashMap;
 
 use fluxdown_protocol::{
-    AgentEvent, AgentSnapshot, DaemonEvent, EventFrame, FrameVerdict, ServiceEvent, Snapshot,
-    SnapshotBody, TableSync, WsServerMsg, accepted_runtime_status, apply_agent_event, judge_frame,
+    AgentEvent, AgentSnapshot, CUSTOM_CATEGORIES_PREF_KEY, CategoryRouteDto, DaemonEvent,
+    EventFrame, FrameVerdict, ServiceEvent, Snapshot, SnapshotBody, TableSync, WsServerMsg,
+    accepted_runtime_status, apply_agent_event, judge_frame,
 };
 
 use crate::dto::{
@@ -79,6 +80,16 @@ impl Projection {
 
     pub(crate) fn epoch(&self) -> &str {
         &self.epoch
+    }
+
+    /// 当前偏好 `custom_categories` 构建的分类路由；没有任何分类配置目录时为 `None`。
+    pub(crate) fn category_route(&self) -> Option<CategoryRouteDto> {
+        CategoryRouteDto::from_preference(
+            self.snapshot
+                .preferences
+                .values
+                .get(CUSTOM_CATEGORIES_PREF_KEY),
+        )
     }
 
     #[cfg(test)]
