@@ -53,11 +53,11 @@ def parse_rule(path):
     as_list = lambda v: v if isinstance(v, list) else ([v] if v else [])
     scope = meta.get("scope") or "tool:edit,tool:write"
     tools = {TOOLS[s.strip()[5:]] for s in scope.split(",") if s.strip()[5:] in TOOLS}
-    ast = meta.get("astCondition")
+    ast = as_list(meta.get("astCondition"))
     return {
         "name": path.stem, "description": meta.get("description", ""), "body": m.group(2).strip(),
         "conditions": as_list(meta.get("condition")), "globs": as_list(meta.get("globs")),
-        "ast": ast if isinstance(ast, str) else "", "tools": tools,
+        "ast": [ast_re(p) for p in ast], "tools": tools,
         # astCondition 只能降级为正则近似（分不清测试代码），因此只提醒不拦截。
         "interrupt": meta.get("interruptMode") != "never" and not ast
         and bool(as_list(meta.get("condition"))),
@@ -89,6 +89,13 @@ def glob_re(g):
     return re.compile(out)
 
 
+def ast_re(pattern):
+    """ast-grep 模式降级为正则近似：元变量（$E / $$$ARGS）匹配任意片段。"""
+    out = re.escape(pattern)
+    out = re.sub(r"(?:\\\$){3}[A-Z_]*|\\\$[A-Z_]+", ".*?", out)
+    return re.compile(out)
+
+
 def is_glob(s):
     return not re.search(r"[\\()\[\]^$|+?]", s) and ("*" in s or "/" in s)
 
@@ -116,8 +123,7 @@ def matches(rule, tool, path, content):
     if any(r.search(content) or (path and r.search(path)) for r in regexes):
         return True
     if rule["ast"]:
-        pat = re.escape(rule["ast"].replace("$E", "")).replace(r"unwrap", r"(?:unwrap|expect)")
-        return bool(re.search(pat, content)) and not is_test_code(path, content)
+        return any(r.search(content) for r in rule["ast"]) and not is_test_code(path, content)
     return False
 
 

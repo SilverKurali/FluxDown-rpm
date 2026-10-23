@@ -586,7 +586,7 @@ globalThis.resolve = async (ctx) => {
 
 | 入口 | 墙钟 | CPU 预算 | 内存 |
 |---|---|---|---|
-| `resolve` | 默认 10 秒；`resolvers[0].timeoutMs` 会替换它，**硬上限 30 秒** | 同一数值，≤ 30 秒 | 64 MB |
+| `resolve` | 默认 10 秒；`resolvers[0].timeoutMs` 会替换它，**硬上限 30 秒** | 同一数值，≤ 30 秒 | 默认 64 MB；`resolvers[0].memoryLimitMb` 会替换它，上限 512 MB |
 | `subscribe` | 默认 10 秒；`subscriptions[0].timeoutMs` 会替换它，上限 30 秒 | 相同 | 64 MB |
 | `authenticate` | 默认 30 秒；`auth.timeoutMs` 会替换它，上限 30 秒 | 相同 | 64 MB |
 | 钩子 | 5 秒 | 5 秒 | 32 MB |

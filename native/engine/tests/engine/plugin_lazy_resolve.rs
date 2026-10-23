@@ -266,6 +266,89 @@ async fn disabled_plugin_passes_through() {
     }
 }
 
+/// 回归：resolver 用 `audioUrl: ""` 显式声明「无音轨」（YouTube 仅音频档、变体切换时
+/// 清掉上一档音轨）时，任务必须按普通单文件下载，不能被当成轨对交给 DASH 下载器
+/// （后者会把直链当 MPD 清单拉取解析而失败）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_empty_audio_url_downloads_single_file() {
+    let work = std::env::temp_dir().join(format!("fluxdown-plugin-noaudio-{}", uuid_like()));
+    tokio::fs::create_dir_all(&work).await.expect("mkdir work");
+    let (port, _srv) = spawn_server();
+    let real_url = format!("http://127.0.0.1:{port}/audio.m4a");
+
+    let plugin_src = work.join("plugin_src");
+    tokio::fs::create_dir_all(&plugin_src)
+        .await
+        .expect("mkdir plugin");
+    tokio::fs::write(
+        plugin_src.join("manifest.json"),
+        r#"{
+      "identity": "test@noaudio",
+      "name": "No Audio Track",
+      "version": "1.0.0",
+      "resolvers": [{ "match": { "urls": ["*://origin.test/*"] }, "entry": "resolve.js" }]
+    }"#,
+    )
+    .await
+    .expect("write manifest");
+    tokio::fs::write(
+        plugin_src.join("resolve.js"),
+        format!(r#"globalThis.resolve = async () => ({{ url: "{real_url}", audioUrl: "" }});"#),
+    )
+    .await
+    .expect("write resolve.js");
+
+    let mut engine = Engine::new(
+        engine_config(&work),
+        Arc::new(NoopSink),
+        Arc::new(NoopSelection),
+    )
+    .await
+    .expect("engine");
+    let pm = engine.manager.plugin_manager().expect("pm installed");
+    pm.install_from_dir(&plugin_src).await.expect("install");
+
+    let mut resolve_rx = engine.manager.take_resolve_rx().expect("resolve_rx");
+    let mut done_rx = engine.manager.take_done_rx().expect("done_rx");
+    let save = work.to_string_lossy().into_owned();
+    let tid = create(
+        &mut engine,
+        "http://origin.test/watch?v=abc",
+        &save,
+        "out.m4a",
+    )
+    .await;
+
+    let done = loop {
+        tokio::select! {
+            Some(out) = resolve_rx.recv() => engine.manager.on_resolve_ready(out).await,
+            Some(done) = done_rx.recv() => break done,
+            _ = tokio::time::sleep(Duration::from_secs(15)) => panic!("timeout waiting for download"),
+        }
+    };
+    engine.manager.on_task_done(&done).await;
+
+    let task = engine
+        .db
+        .load_task_by_id(&tid)
+        .await
+        .expect("load task")
+        .expect("task exists");
+    assert_eq!(
+        task.status, 3,
+        "task must complete, got error {:?}",
+        task.error_message
+    );
+    let bytes = tokio::fs::read(work.join("out.m4a")).await.expect("read");
+    assert_eq!(bytes, FILE_BODY);
+
+    if let Err(error) = tokio::fs::remove_dir_all(&work).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("best-effort test directory cleanup: {error}");
+    }
+}
+
 /// 回归（reviewer blocker）：resume 一个带 resolver 且处于 error(4) 的任务，必须**重新
 /// resolve 并完成**——不得因 DB status==4 被 on_resolve_ready 误判为「窗口内已取消」而放弃。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

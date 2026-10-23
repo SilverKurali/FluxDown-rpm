@@ -166,8 +166,20 @@ if [ "$UPLOAD" = 0 ]; then
   exit 0
 fi
 
-echo "==> altool --upload-app"
-xcrun altool --upload-app -f "$IPA" -t ios "${ALTOOL_AUTH[@]}"
+# App Store Connect 偶发服务端错误（v0.6.0：-19241 "A server error occurred"）/ 断连：只对这类瞬时错误
+# 退避重试；其余错误（重复构建号、签名问题等）立即失败，避免掩盖真实问题。
+UPLOAD_LOG="$WORK/altool-upload.log"
+for attempt in 1 2 3 4; do
+  echo "==> altool --upload-app (attempt $attempt/4)"
+  if xcrun altool --upload-app -f "$IPA" -t ios "${ALTOOL_AUTH[@]}" 2>&1 | tee "$UPLOAD_LOG"; then
+    break
+  fi
+  if [ "$attempt" -ge 4 ] || ! grep -Eq -- '-19241|-1005|-1009|-1001|server error occurred|HTTP 5[0-9][0-9]|timed out' "$UPLOAD_LOG"; then
+    exit 1
+  fi
+  echo "!! transient App Store Connect error, retrying in $((attempt * 30))s" >&2
+  sleep $((attempt * 30))
+done
 
 DIST_ARGS=(distribute --bundle-id "$BUNDLE_ID" --version "$VERSION" --build "$BUILD")
 for group in ${TF_GROUPS[@]+"${TF_GROUPS[@]}"}; do DIST_ARGS+=(--group "$group"); done

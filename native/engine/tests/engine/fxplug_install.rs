@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! FLUXDOWN_TEST_FXPLUG=.../echo-rewriter-1.0.0.fxplug \
-//!   cargo test -p fluxdown_engine --features plugins --test fxplug_install
+//!   cargo test -p fluxdown_engine --features plugins --test engine fxplug_install
 //! ```
 //! 未设置该环境变量时跳过（不阻塞常规 CI）。
 

@@ -61,7 +61,16 @@ pub(crate) fn start(
     (Some(sender), tokio::spawn(run(events, receiver, cancel)))
 }
 
-async fn run(events: AgentEventHub, mut receiver: SoundReceiver, cancel: CancellationToken) {
+async fn run(events: AgentEventHub, receiver: SoundReceiver, cancel: CancellationToken) {
+    serve(events, receiver, cancel).await;
+    // 外部播放器子进程不随 agent 退出：长音频会在退出后继续播放，必须显式终止。
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Err(error) = tokio::task::spawn_blocking(backend::stop_all).await {
+        tracing::warn!(error = %error, "could not stop sound players on shutdown");
+    }
+}
+
+async fn serve(events: AgentEventHub, mut receiver: SoundReceiver, cancel: CancellationToken) {
     let mut arbiter = Arbiter::default();
     loop {
         let first = tokio::select! {

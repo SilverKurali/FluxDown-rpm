@@ -199,7 +199,7 @@ resolver 失败时，任务会进入**下载失败**，信息以 `[插件] <iden
 | `插件运行时错误: 入口 resolve 未定义` | 脚本跑了，但没有在 `globalThis.resolve` 上放函数——漏了 `defineResolver(...)`、函数名写错，或者用了 ES 的 `export` 而不是全局函数。 | 定义 `resolve`。hook 的名字是 `onStart`/`onError`/`onDone`/`onMetaProbed`/`onCancel`；auth 是 `authenticate`；订阅是 `subscribe`。 |
 | `脚本编译失败: …` | 脚本有语法错误。 | 修正。 |
 | `脚本执行超时` | 调用没有在预算内完成（默认 10 秒，最多 30 秒）。计入熔断。 | 提速或减少请求数；确实有慢站点时把 `timeoutMs` 调到最多 30000。 |
-| `脚本超出内存上限` | 使用超过 64 MB。计入熔断。 | 不要持有大响应；谨慎对待被 `truncated` 截断的响应体。 |
+| `脚本超出内存上限` | 使用超过内存预算（默认 64 MB）。计入熔断。 | 不要持有大响应；谨慎对待被 `truncated` 截断的响应体。确实需要更多内存的 resolver 可声明 `memoryLimitMb`（最多 512）。 |
 | `插件运行时过载（并发已满）` | 同时的解析太多；等待空闲名额超过 3 秒。 | 重试任务。 |
 | `插件输出非法: resolve 返回值非法: …` | 返回的对象字段类型不对，比如 `totalBytes` 不是数字。 | 按 [API 参考](/docs/zh/plugins/api-reference/)返回正确的结构。 |
 | `插件输出非法: url scheme 不允许: …`、`url 超过 8KB`、`file_name 非法: …`、`variants 过多: N > 50`、`manifest 与 url/variants/audioUrl 互斥` | 返回结果违反了某条规则：不支持的 URL 协议、URL 过长、不安全的文件名、变体太多，或同时返回 `manifest` 和 `url`。 | 修正返回字段。 |

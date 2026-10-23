@@ -159,6 +159,14 @@ const en: Record<MessageKey, string> = {
   "notify.fallbackBrowser": "Fell back to browser download",
   "notify.fallbackBrowserDetail":
     "Could not send to FluxDown, fell back to browser: {url}",
+  "notify.browserDownloadStartedTitle": "Browser Is Downloading",
+  "notify.browserDownloadStartedDetail":
+    "{name} is being downloaded by the browser (FluxDown hides the browser download bar). You'll be notified when it finishes",
+  "notify.browserDownloadDoneTitle": "Downloaded by Browser",
+  "notify.browserDownloadDoneDetail":
+    "{name} was saved by the browser (FluxDown hides the browser download bar). Click to show in folder",
+  "browserNotice.hint": "Downloaded by the browser (FluxDown hides the browser download bar)",
+  "browserNotice.showInFolder": "Show in folder",
   "notify.videoSourceUnavailableTitle": "Cannot Download This Video/Audio",
   "notify.videoSourceUnavailableDetail":
     "This source can't be downloaded directly (likely blob:/MSE stream); use the resource sniffer panel instead",

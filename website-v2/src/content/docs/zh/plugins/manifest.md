@@ -104,6 +104,7 @@ resolver 把一个页面 URL 解析成一个或多个可下载文件。
 | `match.urls` | 是 | 非空的 URL pattern 列表（规则见 [URL pattern 规则](#url-pattern-规则)）。 |
 | `entry` | 是 | 脚本文件，安全相对路径。必须定义 `globalThis.resolve`。 |
 | `timeoutMs` | 否 | 单次调用超时（毫秒），不能是 `0`。它替换默认的 10 秒，但无论写多大都被 30 秒硬顶封住。 |
+| `memoryLimitMb` | 否 | 单次调用的 QuickJS 堆上限（MiB），不能是 `0`。它替换默认的 64 MiB，超过 512 MiB 按 512 MiB 封顶。只给确实要在脚本里处理大体量数据的 resolver 用（例如把几 MB 的站点脚本解析成语法树）；上限只是天花板，不会预先占用内存。 |
 | `multi` | 否 | 布尔值，默认 `false`。`true` 声明该 resolver 可能返回多文件清单，并参与**前置预解析**（创建任务之前先列出文件清单的预览）。`false` 时，单文件 resolver 不会为了预览被白白提前执行一次；如果它在任务开始时返回了多文件清单，引擎仍会把它拆成多个任务，所以 `multi` 只是前置预解析的声明，不是返回清单的前提。 |
 
 `resolve(ctx)` 的契约与返回结构见 [API 参考](/docs/zh/plugins/api-reference/)。
@@ -447,7 +448,7 @@ manifest 在安装时和每次加载时都会校验。校验失败的插件不�
 
 ### 检查顺序
 
-identity 格式 → `name` 非空 → `version` 格式 → `minAppVersion` 格式 → `icon` 路径安全 → resolver 至多一个 → resolver 的 `entry` 路径、`match.urls` 非空、`timeoutMs ≠ 0` → subscription 至多一个 → `providerId` 格式且不是 `rss`、`entry` 路径、`timeoutMs ≠ 0` → hooks 的 `entry` 路径、`events` 非空且合法、`match.urls`（如有）非空 → auth 的 `entry` 路径、含 `auth` 权限、`timeoutMs ≠ 0` → `main`（路径、`.js`、`events` 合法、`background` 权限）→ `contributes`（视图与命令的数量上限和 id、`settings` 位置至多一个、`portable` 只能与 `desktop` 同时声明、可移植视图与命令要求 `main`、desktop 的入口 / 尺寸 / 主机规则、`desktop` 权限、视图 `icon` 的路径 / `.svg` 扩展名、`sniffRules` 的路径 / 扩展名 / `browserRules` 权限，然后是 `pageScripts`：至多 16 条 → `pageScripts` 权限 → 逐条脚本：`id` 格式与唯一性、`title` 长度、`matches` 数量与模式、`excludeMatches` 数量与模式、`js` 数量、安全的 `.js` 路径、不重复）→ `settings`（key 唯一、逐字段规则与 widget × type 矩阵）→ `permissions` 全为已知值。
+identity 格式 → `name` 非空 → `version` 格式 → `minAppVersion` 格式 → `icon` 路径安全 → resolver 至多一个 → resolver 的 `entry` 路径、`match.urls` 非空、`timeoutMs ≠ 0`、`memoryLimitMb ≠ 0` → subscription 至多一个 → `providerId` 格式且不是 `rss`、`entry` 路径、`timeoutMs ≠ 0` → hooks 的 `entry` 路径、`events` 非空且合法、`match.urls`（如有）非空 → auth 的 `entry` 路径、含 `auth` 权限、`timeoutMs ≠ 0` → `main`（路径、`.js`、`events` 合法、`background` 权限）→ `contributes`（视图与命令的数量上限和 id、`settings` 位置至多一个、`portable` 只能与 `desktop` 同时声明、可移植视图与命令要求 `main`、desktop 的入口 / 尺寸 / 主机规则、`desktop` 权限、视图 `icon` 的路径 / `.svg` 扩展名、`sniffRules` 的路径 / 扩展名 / `browserRules` 权限，然后是 `pageScripts`：至多 16 条 → `pageScripts` 权限 → 逐条脚本：`id` 格式与唯一性、`title` 长度、`matches` 数量与模式、`excludeMatches` 数量与模式、`js` 数量、安全的 `.js` 路径、不重复）→ `settings`（key 唯一、逐字段规则与 widget × type 矩阵）→ `permissions` 全为已知值。
 
 ### 必须存在的文件
 

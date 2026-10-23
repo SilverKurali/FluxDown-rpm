@@ -148,6 +148,14 @@ const zhCN = {
   "notify.fallbackBrowser": "已回退到浏览器下载",
   "notify.fallbackBrowserDetail":
     "无法发送到 FluxDown，已交由浏览器继续下载: {url}",
+  "notify.browserDownloadStartedTitle": "浏览器正在下载",
+  "notify.browserDownloadStartedDetail":
+    "{name} 由浏览器下载中（FluxDown 隐藏了浏览器下载栏），完成后会再次提示",
+  "notify.browserDownloadDoneTitle": "浏览器已完成下载",
+  "notify.browserDownloadDoneDetail":
+    "{name} 已由浏览器保存（FluxDown 隐藏了浏览器下载栏），点击在文件夹中显示",
+  "browserNotice.hint": "此文件由浏览器下载（FluxDown 隐藏了浏览器下载栏）",
+  "browserNotice.showInFolder": "在文件夹中显示",
   "notify.videoSourceUnavailableTitle": "无法下载此视频/音频",
   "notify.videoSourceUnavailableDetail":
     "该来源无法直接下载（可能是 blob:/MSE 流），请改用资源嗅探面板",

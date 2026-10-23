@@ -73,4 +73,4 @@
 
 ## 不覆盖的能力
 
-`ffmpeg` / `ytdlp` / `auth` 权限与订阅 provider 依赖受管组件或站点账号，本插件不声明，以免授权与风险判定被它们干扰；它们由现有插件覆盖：`ytdlp`、多文件清单与 `dom` 规则见同目录的 `youtube-down`，其余见索引仓中的 yt-dlp 插件。
+`ffmpeg` / `ytdlp` / `auth` 权限与订阅 provider 依赖受管组件或站点账号，本插件不声明，以免授权与风险判定被它们干扰；它们由现有插件覆盖：多文件清单、`dom` 规则与 `memoryLimitMb` 见同目录的 `youtube-down`，`ytdlp` 等见索引仓中的 yt-dlp 插件。

@@ -10,7 +10,7 @@
  */
 import { browser } from "wxt/browser";
 import { defineContentScript } from "wxt/utils/define-content-script";
-import type { ContentMessage, HooksInfo, ProbeReply } from "@/background/protocol";
+import type { BrowserDownloadNotice, ContentMessage, HooksInfo, ProbeReply } from "@/background/protocol";
 import {
   EV_CONFIG,
   EV_MEDIA,
@@ -35,6 +35,7 @@ import {
 import { MediaTracker } from "@/page/media-tracker";
 import { compileBundled, createClassifier } from "@/rules/engine";
 import { createFloatButton, type FloatButtonController } from "@/ui/features/FloatButton";
+import { createDownloadNotice } from "@/ui/features/DownloadNotice";
 import { normalizeDashManifest, parseDashManifestText } from "@/utils/dash-manifest";
 import { isHttpUrl } from "@/utils/media-sniff";
 import { sendAction } from "@/utils/messaging";
@@ -375,6 +376,8 @@ export default defineContentScript({
 
     // ===== PageConfig：拉取并下发给 MAIN =====
     let float: FloatButtonController | null = null;
+    // 浏览器下载提示卡（仅顶层帧会收到消息，首次提示才挂载）
+    const downloadNotice = createDownloadNotice(ctx);
 
     function applyConfig(next: PageConfig): void {
       config = next;
@@ -555,6 +558,16 @@ export default defineContentScript({
           tracker.resendAll();
           return true;
         }
+        case "browserDownload": {
+          // 只有顶层帧显示；background 也只发 frameId 0
+          if (!top) return undefined;
+          const notice = message as BrowserDownloadNotice;
+          downloadNotice
+            .handle(notice)
+            .then((ok) => sendResponse({ ok }))
+            .catch(() => sendResponse({ ok: false }));
+          return true;
+        }
         default:
           return undefined;
       }
@@ -602,6 +615,7 @@ export default defineContentScript({
       browser.runtime.onMessage.removeListener(onMessage);
       domSniff.stop();
       tracker.stop();
+      downloadNotice.destroy();
       float?.destroy();
       window.clearTimeout(flushTimer);
       window.clearTimeout(hooksTimer);

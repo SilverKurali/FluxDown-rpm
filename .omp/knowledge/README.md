@@ -26,6 +26,7 @@
 | `clients.md` | GPUI 桌面、原生 Android/iOS、旧数据与主题兼容、扩展、用户脚本、Web SPA、官网 |
 | `ops.md` | 日志系统、发布与 CI、设计文档实现状态 |
 | `extension-points.md` | 「要加 X 改哪里」全表 |
+| `pitfalls.md` | 踩坑清单：按领域分节的已验证约束（现象 + 代码坐标 / 回归测试）；改某领域前先读对应小节 |
 
 ---
 

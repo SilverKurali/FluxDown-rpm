@@ -4,7 +4,7 @@ use fluxdown_protocol::{ViewNode, ViewOp, apply_view_ops, diff_view};
 use serde::Deserialize;
 use serde_json::Value;
 
-const FIXTURE: &str = include_str!("fixtures/plugin_view_apply.json");
+const FIXTURE: &str = include_str!("../fixtures/plugin_view_apply.json");
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

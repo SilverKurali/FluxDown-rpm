@@ -50,8 +50,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "gen": "bun scripts/gen-view-types.ts && bun scripts/gen-theme-types.ts",
-    "gen:check": "bun scripts/gen-view-types.ts --check && bun scripts/gen-theme-types.ts --check",
+    "gen": "bun scripts/gen-view-types.ts && bun scripts/gen-theme-types.ts && bun examples/youtube-down/build.ts",
+    "gen:check": "bun scripts/gen-view-types.ts --check && bun scripts/gen-theme-types.ts --check && bun examples/youtube-down/build.ts --check",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test",
     "build": "bun scripts/build.ts"

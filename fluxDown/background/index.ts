@@ -12,6 +12,7 @@ import { initI18n, t } from "@/utils/i18n";
 import { loadSettings, persistSettings } from "@/utils/settings";
 import type { ContentMessage } from "./protocol";
 import { restoreBreakerState } from "./breaker";
+import { installBrowserDownloadNotices } from "./browser-downloads";
 import { installCaptureTracker } from "./capture-tracker";
 import {
   installIntercept,
@@ -80,6 +81,7 @@ export function startBackground(): void {
   installMenus();
   installLinkCapture();
   installTaskListeners();
+  installBrowserDownloadNotices();
   installCaptureTracker();
   installMessages();
   // 页面脚本管理器：onUserScriptMessage / onInstalled 等监听器必须在顶层同步注册。

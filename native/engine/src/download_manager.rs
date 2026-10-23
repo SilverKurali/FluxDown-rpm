@@ -3488,8 +3488,10 @@ fn apply_resolve_to_queued(queued: &mut QueuedTask, res: crate::plugin::ResolveR
         };
         queued.resolver_patch = Some((queued.resolver_plugin_id.clone(), patch));
     }
-    if res.audio_url.is_some() {
-        queued.audio_url = res.audio_url;
+    // 显式空串 = 本次结果没有音轨（插件按档位切换到「仅音频」或单文件时以此清掉
+    // 上一次的音轨），不能让 `Some("")` 把任务当成轨对交给 DASH 下载器。
+    if let Some(audio) = res.audio_url {
+        queued.audio_url = (!audio.is_empty()).then_some(audio);
     }
     // ephemeral（一次性/签名直链）→ 跳过 probe：知大小走 hint，未知走 -1；
     // 否则正常 probe。

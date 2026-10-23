@@ -373,6 +373,8 @@ export interface MessageMap {
   pageScriptsRevoke: { req: { identity: string }; res: PageScriptsActionResult };
   /** 「查看源码」：按需从桌面端拉取并校验 sha256，只读展示，不落 storage。 */
   pageScriptsSource: { req: { identity: string; id: string }; res: PageScriptSourceResult };
+  /** 页面内「浏览器下载」提示卡的「在文件夹中显示」；只放行该标签页收到过提示的下载。 */
+  showBrowserDownload: { req: { downloadId: number }; res: { ok: boolean } };
 }
 
 export type MessageAction = keyof MessageMap;
@@ -386,7 +388,20 @@ export type ContentMessage =
   | { action: "getPageCharset" }
   | { action: "collectLinks" }
   /** 探测顶层帧 sensor 是否存活；应答 {@link ProbeReply} 并随后全量重发元素状态。 */
-  | { action: "probe" };
+  | { action: "probe" }
+  | BrowserDownloadNotice;
+
+/**
+ * 浏览器自己下载的文件的页内提示（下载 UI 被本扩展隐藏时）：started → done / failed。
+ * 只发给顶层帧；应答 `{ ok: true }` 表示已显示，否则 background 退回系统通知。
+ */
+export interface BrowserDownloadNotice {
+  action: "browserDownload";
+  phase: "started" | "done" | "failed";
+  downloadId: number;
+  /** 文件名（failed 时为空）。 */
+  name: string;
+}
 
 export interface ProbeReply {
   sid: string;

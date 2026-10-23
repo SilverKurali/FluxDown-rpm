@@ -5,7 +5,7 @@
 //!   被当作新大小，分段越过新文件 EOF 持续 416 卡死，或拼成新旧混合文件）。
 //! - 换成**同一文件**的新链接（CDN 签名过期场景）：沿用进度续传，成品等于原文件。
 //!
-//! 运行：`cargo test -p fluxdown_engine --test change_url_resume -- --ignored`
+//! 运行：`cargo test -p fluxdown_engine --test engine change_url_resume -- --ignored`
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

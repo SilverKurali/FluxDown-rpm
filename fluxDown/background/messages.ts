@@ -30,6 +30,7 @@ import {
   downloadUrls,
   handoffPage,
 } from "./downloads";
+import { showBrowserDownload } from "./browser-downloads";
 import { getCapabilities } from "./host";
 import { markPreempted } from "./intercept";
 import { rememberServiceWorkerScope } from "./sw-scopes";
@@ -420,6 +421,11 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
     } catch {
       return { ok: false };
     }
+  },
+
+  async showBrowserDownload(req, sender) {
+    if (typeof req.downloadId !== "number") return { ok: false };
+    return { ok: showBrowserDownload(req.downloadId, senderTabId(sender)) };
   },
 
   async rulesTest(req) {

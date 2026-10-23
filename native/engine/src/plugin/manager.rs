@@ -47,6 +47,8 @@ const DEFAULT_RESOLVE_BUDGET: ExecutionBudget = ExecutionBudget {
     timeout: Duration::from_secs(10),
     memory_limit_bytes: 64 * 1024 * 1024,
 };
+/// resolver 可经 manifest `memoryLimitMb` 声明的 QuickJS 堆硬顶。
+pub const RESOLVE_MEMORY_CEILING: usize = 512 * 1024 * 1024;
 /// 默认 hook 预算。
 const DEFAULT_HOOK_BUDGET: ExecutionBudget = ExecutionBudget {
     timeout: Duration::from_secs(5),
@@ -1151,18 +1153,23 @@ impl PluginManager {
         }
     }
 
-    /// resolve 预算：manifest timeoutMs 可下调，30s 硬顶。
+    /// resolve 预算：manifest `timeoutMs` 可下调，30s 硬顶；`memoryLimitMb` 替换默认
+    /// 堆上限，[`RESOLVE_MEMORY_CEILING`] 硬顶。
     fn resolve_budget_for(&self, manifest: &PluginManifest) -> ExecutionBudget {
-        let timeout = manifest
-            .resolvers
-            .first()
+        let resolver = manifest.resolvers.first();
+        let timeout = resolver
             .and_then(|r| r.timeout_ms)
             .map(Duration::from_millis)
             .unwrap_or(self.resolve_budget.timeout)
             .min(HARD_TIMEOUT_CEILING);
+        let memory_limit_bytes = resolver
+            .and_then(|r| r.memory_limit_mb)
+            .map(|mb| usize::try_from(mb).map_or(usize::MAX, |mb| mb.saturating_mul(1024 * 1024)))
+            .unwrap_or(self.resolve_budget.memory_limit_bytes)
+            .min(RESOLVE_MEMORY_CEILING);
         ExecutionBudget {
             timeout,
-            memory_limit_bytes: self.resolve_budget.memory_limit_bytes,
+            memory_limit_bytes,
         }
     }
 

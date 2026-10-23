@@ -10,7 +10,7 @@
 //!      非零起点的 Range 请求。
 //!
 //! 用法（绑定本地端口，默认 ignore）：
-//!   cargo nextest run -p fluxdown_engine --test dash_track_pair_resume --run-ignored all
+//!   cargo nextest run -p fluxdown_engine --test engine dash_track_pair_resume --run-ignored all
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;

@@ -4,7 +4,7 @@
 //! 两者的修改时间必须各自等于本轨探测响应的 `Last-Modified`；关闭开关时保持本地时间。
 //!
 //! 用法（绑定本地端口，默认 ignore）：
-//!   cargo test -p fluxdown_engine --test dash_track_pair_server_time -- --ignored
+//!   cargo test -p fluxdown_engine --test engine dash_track_pair_server_time -- --ignored
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};

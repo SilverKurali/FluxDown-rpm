@@ -171,7 +171,7 @@ async fn fs_rejects_unsafe_names() {
 }
 
 /// 端到端安装冒烟（需网络，默认忽略）：
-/// `cargo test -p fluxdown_engine --features plugins,components --test plugin_ytdlp -- --ignored ytdlp_install_smoke`
+/// `cargo test -p fluxdown_engine --features plugins,components --test engine plugin_ytdlp -- --ignored ytdlp_install_smoke`
 /// 从 GitHub 下载当前平台官方 yt-dlp 二进制 → 校验托管状态 → 经 bridge 跑 `--version`。
 #[cfg(feature = "components")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -217,7 +217,7 @@ async fn ytdlp_install_smoke() {
 }
 
 /// 快速网络冒烟（需网络，默认忽略）：拉取 yt-dlp Release 列表并解析版本 tag。
-/// `cargo test -p fluxdown_engine --features plugins,components --test plugin_ytdlp -- --ignored ytdlp_list_versions_smoke`
+/// `cargo test -p fluxdown_engine --features plugins,components --test engine plugin_ytdlp -- --ignored ytdlp_list_versions_smoke`
 #[cfg(feature = "components")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]

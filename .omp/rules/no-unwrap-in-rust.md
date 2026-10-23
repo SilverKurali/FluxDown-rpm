@@ -1,7 +1,9 @@
 ---
 description: 非测试 Rust 代码禁止 unwrap/expect（clippy deny 级）
-astCondition: $E.unwrap()
-globs: native/**/*.rs
+astCondition:
+  - $E.unwrap()
+  - $E.expect($$$)
+globs: "{native,crates}/**/*.rs"
 repeatMode: after-gap
 repeatGap: 3
 ---

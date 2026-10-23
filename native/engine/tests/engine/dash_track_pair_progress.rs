@@ -6,7 +6,7 @@
 //!   2. 进度事件的 total_bytes 必须为两轨 Content-Length 之和（Range 0-0 探测）。
 //!
 //! 用法（绑定本地端口，默认 ignore）：
-//!   cargo test -p fluxdown_engine --test dash_track_pair_progress -- --ignored
+//!   cargo test -p fluxdown_engine --test engine dash_track_pair_progress -- --ignored
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;

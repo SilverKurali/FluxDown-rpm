@@ -64,24 +64,90 @@ pub(crate) fn play(path: &Path, watch: bool) -> Result<(), PlaybackError> {
     imp::play(path, watch)
 }
 
+/// 停止所有仍在播放的外部播放器进程（agent 退出时调用）。
+///
+/// macOS / Linux 的播放器是独立子进程，不随 agent 退出而结束，必须显式终止；
+/// Windows 的 `MediaPlayer` 在进程内，随进程退出一并释放。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn stop_all() {
+    imp::stop_all();
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod imp {
+    use std::collections::BTreeMap;
     use std::ffi::OsStr;
     use std::path::Path;
-    use std::process::{Command, Stdio};
-    use std::sync::mpsc;
-    use std::time::Duration;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
+    use std::time::{Duration, Instant};
 
     use super::PlaybackError;
 
     /// 试听时等待播放器早退（文件损坏 / 格式不支持）的时间。
     const EARLY_EXIT_WINDOW: Duration = Duration::from_millis(600);
+    /// 播放器的最长存活时间：超过则终止（与 Windows 后端一致；提示音通常只有几秒）。
+    const MAX_PLAYBACK: Duration = Duration::from_secs(60);
+    /// 回收线程检查子进程状态的间隔。
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+    /// 正在播放的子进程；由回收线程轮询回收，agent 退出时由 [`stop_all`] 统一终止。
+    static ACTIVE: Mutex<BTreeMap<u64, Child>> = Mutex::new(BTreeMap::new());
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn active() -> MutexGuard<'static, BTreeMap<u64, Child>> {
+        // 表内只有子进程句柄，持锁线程 panic 不会留下不一致状态。
+        ACTIVE.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     enum Launch {
         /// 可执行文件不存在，换下一个播放器。
         NotInstalled,
         Failed(String),
         Started,
+    }
+
+    /// 终止并回收一个播放器进程。
+    fn terminate(program: &str, mut child: Child) {
+        if let Err(error) = child.kill() {
+            tracing::debug!(player = %program, error = %error, "could not kill sound player");
+        }
+        if let Err(error) = child.wait() {
+            tracing::debug!(player = %program, error = %error, "could not reap sound player");
+        }
+    }
+
+    /// 轮询回收子进程：正常结束返回退出是否成功；超时被终止或被 [`stop_all`] 取走返回 `None`。
+    fn reap(id: u64, program: &str) -> Option<bool> {
+        let started = Instant::now();
+        loop {
+            let mut players = active();
+            let child = players.get_mut(&id)?;
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    players.remove(&id);
+                    return Some(status.success());
+                }
+                Ok(None) if started.elapsed() >= MAX_PLAYBACK => {
+                    let child = players.remove(&id)?;
+                    drop(players);
+                    tracing::debug!(player = %program, "sound playback timed out; stopping the player");
+                    terminate(program, child);
+                    return None;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let child = players.remove(&id)?;
+                    drop(players);
+                    tracing::debug!(player = %program, error = %error, "could not poll sound player");
+                    terminate(program, child);
+                    return Some(false);
+                }
+            }
+            drop(players);
+            std::thread::sleep(POLL_INTERVAL);
+        }
     }
 
     fn launch(program: &str, path: &Path, watch: bool) -> Launch {
@@ -91,31 +157,31 @@ mod imp {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut child = match command.spawn() {
+        let child = match command.spawn() {
             Ok(child) => child,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Launch::NotInstalled;
             }
             Err(error) => return Launch::Failed(format!("{program}: {error}")),
         };
-        // 由专用线程回收子进程（避免僵尸进程），并把退出状态交给等待方。
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        active().insert(id, child);
+        // 由专用线程回收子进程（避免僵尸进程、限制最长播放时间），并把退出状态交给等待方。
         let (sender, receiver) = mpsc::channel();
         let name = program.to_owned();
         let reaper = std::thread::Builder::new()
             .name("fluxdown-sound-reaper".into())
             .spawn(move || {
-                let success = match child.wait() {
-                    Ok(status) => status.success(),
-                    Err(error) => {
-                        tracing::debug!(player = %name, error = %error, "could not wait for sound player");
-                        false
-                    }
-                };
-                if sender.send(success).is_err() {
+                if let Some(success) = reap(id, &name)
+                    && sender.send(success).is_err()
+                {
                     tracing::trace!(player = %name, "sound player status receiver is gone");
                 }
             });
         if let Err(error) = reaper {
+            if let Some(child) = active().remove(&id) {
+                terminate(program, child);
+            }
             return Launch::Failed(format!("{program}: could not start reaper thread: {error}"));
         }
         if !watch {
@@ -125,6 +191,13 @@ mod imp {
             Ok(false) => Launch::Failed(format!("{program} exited with a failure status")),
             // 极短的音频在窗口内正常播完，或仍在播放。
             Ok(true) | Err(_) => Launch::Started,
+        }
+    }
+
+    pub(super) fn stop_all() {
+        let players = std::mem::take(&mut *active());
+        for (_, child) in players {
+            terminate("sound player", child);
         }
     }
 
@@ -145,6 +218,36 @@ mod imp {
         Err(PlaybackError::Failed(last_error.unwrap_or_else(|| {
             format!("no audio player found ({})", PLAYERS.join(", "))
         })))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{Launch, active, launch, stop_all};
+        use std::path::Path;
+        use std::process::Command;
+
+        fn alive(pid: u32) -> bool {
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .expect("run kill -0")
+                .success()
+        }
+
+        #[test]
+        fn stop_all_terminates_a_still_playing_player() {
+            // `sleep 30` 充当一首长音乐：发出即返回后仍在运行。
+            assert!(matches!(
+                launch("sleep", Path::new("30"), false),
+                Launch::Started
+            ));
+            let pids: Vec<u32> = active().values().map(std::process::Child::id).collect();
+            assert!(!pids.is_empty());
+            assert!(pids.iter().all(|pid| alive(*pid)));
+            stop_all();
+            assert!(active().is_empty());
+            assert!(pids.iter().all(|pid| !alive(*pid)));
+        }
     }
 }
 

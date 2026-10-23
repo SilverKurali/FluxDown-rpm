@@ -7,7 +7,7 @@
 //! 场景矩阵：显式段数 / auto(0) / 浏览器扩展 hint 模式，各含多轮暂停恢复。
 //!
 //! 运行：
-//!   cargo test -p fluxdown_engine --test pause_resume_repro -- --ignored --nocapture
+//!   cargo test -p fluxdown_engine --test engine pause_resume_repro -- --ignored --nocapture
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

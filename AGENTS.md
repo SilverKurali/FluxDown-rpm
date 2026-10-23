@@ -18,6 +18,7 @@
 | GPUI、原生 Android（`mobile/Android`）与 iOS（`mobile/FluxDown`）、主题兼容、云同步、扩展、用户脚本、Web SPA、官网 | `.omp/knowledge/clients.md` |
 | 日志系统细节、发布流水线矩阵、仓库维护自动化（ZerxLabBot 服务器侧：分诊 / 审查 / 自动合并门 / 修复，及与 `ci.yml` 的同步点）、设计文档实现状态（已实现 vs 仅设计，含命名歧义澄清） | `.omp/knowledge/ops.md` |
 | **「要加 X 改哪里」全表 —— 动手前先查这张** | `.omp/knowledge/extension-points.md` |
+| 按领域收拢的已验证踩坑（引擎 / BT / 插件 / 本机服务 / GPUI / 扩展 / 移动端 / 构建发布 / Windows）——**改某领域前先读对应小节**，修复新坑时同回合补一条（带坐标） | `.omp/knowledge/pitfalls.md` |
 
 维护约定：
 - 只有**架构 / 契约 / 不变式**变化才改本文件；改一个普通文件不必回来更新它。
@@ -30,9 +31,10 @@
 |---|---|
 | 架构缝 / 不变式（§3–§5） | `.omp/knowledge/*` 对应附录；需要执行期拦截的再加 `.omp/rules/*.md` |
 | 任何 `.omp/{RULES.md,WATCHDOG.md,rules,agents,skills}` | 运行 `python3 .augment/sync_from_omp.py` 重新生成 `.augment/{rules,agents,skills}`（Auggie 用；`--check` 校验漂移）；`.augment/hooks/ttsr.sh` 运行时直接读 `.omp/rules`，无需同步。`rule://<名>` 即 `.omp/rules/<名>.md` |
-| 红线 / 授权 / 禁用命令（§6–§7） | `.omp/RULES.md`（粘性红线）、`.omp/rules/forbidden-commands.md`、`.omp/WATCHDOG.md`（严重级映射） |
+| 红线 / 授权 / 禁用命令（§6–§7） | `.omp/RULES.md`（粘性红线）、`.omp/rules/forbidden-commands.md`（TTSR 提示，Auggie 钩子同读）、`.omp/hooks/pre/guard.ts`（执行前硬拦截：tag 推送确认、`--no-verify`、强推、测试 `--workspace`、子代理全量门禁）、`.omp/WATCHDOG.md`（严重级映射） |
 | 跨仓契约 / 仓库地图 | 工作区根 `../AGENTS.md`（cwd=根时自动加载的是那份） |
-| 长期结论 / 踩过的坑 | memory：`memory://root/MEMORY.md` + `memory_summary.md` |
+| 长期结论 / 踩过的坑 | 有代码坐标的进 `.omp/knowledge/pitfalls.md`；其余进 memory：`memory://root/MEMORY.md` + `memory_summary.md` |
+| CI 触发路径（`ci.yml` 的 `changes.filters`）、新增 crate / path 依赖 / `include_*!` / TS 跨目录引用 | `python3 .github/scripts/check_ci_paths.py` 必须通过（CI `ci-paths` job 同跑） |
 | 章节标题（别处会引用） | `grep "AGENTS.md"` 扫全工作区，修掉悬空引用（skills / rules / 源码注释都引过） |
 
 **单一事实源坐标**（要改契约先来这里）：
@@ -72,6 +74,7 @@
 # ── 构建 / 静态检查 ──
 cargo check -p <crate> --lib          # 验证编译按 crate（不要整 workspace）
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings   # 提交前必过；含测试目标
+git config core.hooksPath .githooks   # 每个 clone 执行一次：pre-commit 拒收未 rustfmt 的暂存 .rs（含合并提交），失败就 cargo fmt 后重新 add，禁止 --no-verify
 
 # ── 测试（按 crate/过滤，不要 --workspace）──
 cargo nextest run -p fluxdown_engine <filter>   # 引擎单测（协议/分段/DB）
@@ -81,9 +84,12 @@ cargo test -p fluxdown_cli            # CLI（退出码/尺寸解析 doctest）
 cargo test -p fluxdown_mobile         # 原生移动端核心（会话游标 / 重连 / DTO 映射 / 进程内本机主机端到端）
 PG_TEST_URL=postgres://postgres:pw@localhost/postgres cargo test -p fluxdown_engine -- --ignored pg_smoke
 # 插件相关（feature 门控）：
-cargo test -p fluxdown_engine --features plugins,components --test plugin_ffmpeg   # 真实执行经 FLUXDOWN_TEST_FFMPEG=<abs> 注入
-cargo test -p fluxdown_engine --features plugins,components --test plugin_ytdlp    # FLUXDOWN_TEST_YTDLP=<abs>
+cargo test -p fluxdown_engine --features plugins,components --test engine plugin_ffmpeg::   # 真实执行经 FLUXDOWN_TEST_FFMPEG=<abs> 注入
+cargo test -p fluxdown_engine --features plugins,components --test engine plugin_ytdlp::    # FLUXDOWN_TEST_YTDLP=<abs>
 cargo check -p fluxdown_engine        # 不带 feature：验证 mobile 关插件时主链路零变化
+python3 scripts/lint-changed.py       # 改动行严格 lint 棘轮（字符边界切片 / panic! / dbg! 阻断，裸索引 / as 截断提示；存量不动）
+python3 .github/scripts/check_ci_paths.py   # ci.yml 路径过滤覆盖自检
+# omp 会话内 `/verify [范围]` 按改动范围串行跑上述门禁并报告（.omp/commands/verify.md）
 
 # ── 各宿主/客户端运行 ──
 cargo build -p fluxdown_daemon && cargo run -p fluxdown_agent --features web-ui -- --server   # headless 服务器（fluxdownd 须与 agent 同目录；env 见 .omp/knowledge/hosts-and-api.md）
@@ -229,8 +235,8 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 - **git 写操作的门槛是「用户授权」**：用户在本会话要求过（含 `/commit`、「提交」「推一下」「发版」）→ 视为已授权，核对前置条件后**直接做完**，不再征询；用户没要求、你自己想顺手做 → 停手先问。授权按动作粒度计（提交 ≠ 推送，打 tag ≠ 发布）。
 - **分支模型**：`main` = 开发分支（超集 / 最新），`stable` = 稳定分支（子集）。日常一律在 `main`；`stable` 只经合并/cherry-pick `main` 前进；hotfix 直进 `stable` 必须**同回合**同步回 `main`。一致性判据 `git log stable --not main` **恒为空**。
 - **tag**：稳定 `vX.Y.Z` 只从 `stable`，预览 `vX.Y.Z-rc.N` 只从 `main`；CI 有分支守卫，打错分支整条流水线失败。推送 `v*` tag **立即触发全平台发布，不可逆**。
-- 主干门禁由 `.github/workflows/ci.yml` 承载：main push / pull_request 按变更触发 Rust fmt、排除冻结 server 的 workspace clippy、按 crate 分组 nextest，以及 Web SPA / 官网 / 扩展构建；不等发布 tag 才验证。
-- 发布流水线是**组件变更检测 + 统一 release** 式（`changes` job 映射路径→`app`/`extension`/`server`/`mobile`/`cli`，组件互不阻断，失败组件经 `workflow_dispatch` 补发）；发版前可手动勾选 `rehearsal` 以尚不存在的 tag 演练整条流水线（全量构建 / 签名 / 公证 / 凭据探活，不建 release、不上传、不推镜像与商店）。矩阵、补发与演练细节见 `.omp/knowledge/ops.md`。
+- 主干门禁由 `.github/workflows/ci.yml` 承载：main push / pull_request 按变更触发 Rust fmt、workspace clippy、按 crate 分组 nextest、Web SPA / 官网 / 扩展构建，以及「发布对齐」检查（release 原样的桌面构建组合 `cargo check`、Docker `server-check` 阶段、librqbit 来源）；`workflow_dispatch` 为全量运行。只在发布才走的路径必须在这里有 check 级覆盖，不等发布 tag 才暴露。路径过滤由 `ci-paths` job（`.github/scripts/check_ci_paths.py`）对照源码自检：crate path 依赖闭包、`include_*!`、`[patch]` 路径、TS 跨目录引用（共享夹具）必须被对应过滤器覆盖，漏一项即失败。
+- 发布流水线是**组件变更检测 + 统一 release** 式（`changes` job 映射路径→`app`/`extension`/`server`/`mobile`/`cli`，组件互不阻断，失败组件经 `workflow_dispatch` 补发）。**只构建一次**：稳定版先在目标提交上跑全量 CI + `rehearsal` 演练（完整构建 / 签名 / 公证，Docker 只按 digest 推送，不建 release），推 tag 时同一提交的 CI 必须绿，并直接晋升演练产物（不重新编译）；Actions artifact 只是中间产物，版本转正即清理、14 天兜底过期。细节见 `.omp/knowledge/ops.md`。
 
 ---
 
@@ -251,5 +257,8 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 - **禁止新增 dependency**，需要时先说明理由等确认；**禁止手编 `Cargo.toml` 版本号**，用 cargo 命令。
 - 改动前 `cargo check -p <crate> --lib`；提交前 `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings`；测试用 `cargo nextest run -p <crate> <filter>`，**测试禁 `--workspace`**。
 - 优先复用已有 trait/error 类型，不平行造轮子。单文件 >600 行考虑拆分，单函数 >80 行需说明。
+- **一个 crate 只有一个集成测试二进制**：`tests/<名>/main.rs` + 按领域分模块（engine 为 `tests/engine/`），不新建 `tests/*.rs`——每个测试二进制都会完整链接一遍引擎与 librqbit。feature 门控模块在文件头写 `#![cfg(feature = "…")]`。
+- 解析不可信输入（文件名 / 头部 / 种子元数据 / 协议帧）的新代码：字符串用 `get(a..b)` / `split_at_checked` / 先 `is_char_boundary`，下标用 `get`，长度转换用 `try_from`；`python3 scripts/lint-changed.py` 对改动行把关。
+- **并行子代理**：子代理只跑自己改动 crate 的精准命令（`cargo check|clippy|nextest run -p <crate>`）；全量 clippy、无 `-p` 的 cargo 构建/测试、gradlew / xcodebuild / `build-core.sh` 由主会话或 `build-verifier` 统一串行跑一次（`.omp/hooks/pre/guard.ts` 强制）。子代理在报告里写明需要跑哪些命令。
 - 查文档优先级：`cargo path <crate>` 本地源码 > docs.rs > web 搜索。
 - **命中以下任一项前先读 `rust-router` skill**：新增/改 public API/trait/error 类型、unsafe/FFI/性能关键路径、新增 crate/调 workspace、写 doc comment。仅改名/格式/加日志可跳过。

@@ -150,6 +150,14 @@ const zhTW = {
   "notify.fallbackBrowser": "已改用瀏覽器下載",
   "notify.fallbackBrowserDetail":
     "無法傳送到 FluxDown，已交由瀏覽器繼續下載：{url}",
+  "notify.browserDownloadStartedTitle": "瀏覽器正在下載",
+  "notify.browserDownloadStartedDetail":
+    "{name} 正由瀏覽器下載（FluxDown 隱藏了瀏覽器下載列），完成後會再次提示",
+  "notify.browserDownloadDoneTitle": "瀏覽器已完成下載",
+  "notify.browserDownloadDoneDetail":
+    "{name} 已由瀏覽器儲存（FluxDown 隱藏了瀏覽器下載列），點選在資料夾中顯示",
+  "browserNotice.hint": "此檔案由瀏覽器下載（FluxDown 隱藏了瀏覽器下載列）",
+  "browserNotice.showInFolder": "在資料夾中顯示",
   "notify.videoSourceUnavailableTitle": "無法下載此影片/音訊",
   "notify.videoSourceUnavailableDetail":
     "此來源無法直接下載（可能是 blob:/MSE 串流），請改用資源嗅探面板",

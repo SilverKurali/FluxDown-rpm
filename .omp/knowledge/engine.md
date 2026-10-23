@@ -183,7 +183,7 @@
 **可选、可失败的下载任务中间层**，JS 编写（rquickjs 沙箱），声明式设置项（双端自动生成表单）。两个正交能力平面 + 门控工具面：
 
 - **订阅平面**：manifest `subscriptions:[{providerId,entry,timeoutMs}]` 声明 provider，脚本导出 `globalThis.subscribe(ctx)`，通过 `flux.fetch` 自主完成平台请求/解析，返回 `{title,link,items:[{guid,title,link,enclosureUrl,resolverItem,enclosureLength,pubDate}]}`（`providerId` 不得占用内置 `rss`；单条非法跳过并记日志，全部非法才算失败；`ctx.providerConfig` 空值归一为 `{}`）；宿主自动把它挂到公共订阅调度，插件安装/启停后由动态路由读取最新快照。
-- **Resolver 平面**：`resolve(url,ctx)→{url}|{manifest}|null`。协议判定**之前**惰性执行、**off-actor**（防冻结 actor），命中后 fail-closed（失败进 status=4，绝不把 HTML 当视频存）。惰性 = 每次 start/resume 重跑，天然防直链过期。支持两段式：初段返 manifest 清单 → 引擎裂变为任务组；二段（`ctx.resolverItem`）返直链。`multi:true` 触发新建对话框前置预解析（`begin_resolve_preview` 只读）。
+- **Resolver 平面**：`resolve(url,ctx)→{url}|{manifest}|null`。协议判定**之前**惰性执行、**off-actor**（防冻结 actor），命中后 fail-closed（失败进 status=4，绝不把 HTML 当视频存）。惰性 = 每次 start/resume 重跑，天然防直链过期。支持两段式：初段返 manifest 清单 → 引擎裂变为任务组；二段（`ctx.resolverItem`）返直链。`multi:true` 触发新建对话框前置预解析（`begin_resolve_preview` 只读）。预算按 manifest `resolvers[0]`：`timeoutMs`（默认 10 s，30 s 硬顶）、`memoryLimitMb`（默认 64 MiB，`manager.rs::RESOLVE_MEMORY_CEILING` = 512 MiB 硬顶），见 `manager.rs::resolve_budget_for`；auth / subscription / 拦截器预算不读这两个字段。
 - **通知平面**：onStart/onDone/onError/onMetaProbed，全 fire-and-forget（失败仅记日志/超时/`try_acquire`，绝不影响任务状态）；仅 onError 内可 `flux.task.requestRetry`。
 - **门控工具面**（manifest `permissions` 声明才注入）：
   - `flux.auth`（`permissions:["auth"]`）：宿主持久化插件认证档案；`save/get/remove` 管理

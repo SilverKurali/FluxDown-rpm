@@ -141,6 +141,11 @@ pub struct ResolverDecl {
     /// 单次 resolve 超时（毫秒）。可下调宿主预算，不可超 30s 硬顶。
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// 单次 resolve 的 QuickJS 堆上限（MiB）。缺省取宿主默认 64 MiB；可上调，超过
+    /// [`super::manager::RESOLVE_MEMORY_CEILING`] 按硬顶裁剪；不可为 0。供要在脚本内
+    /// 处理大体量数据的 resolver 声明（如把 YouTube 播放器 JS 解析成 AST）。
+    #[serde(default)]
+    pub memory_limit_mb: Option<u64>,
     /// 声明该 resolver 支持多文件清单前置预解析（`ResolveResult::manifest`）。
     /// `false`（默认）的单文件插件不会被前置预解析无谓触发（避免解析昂贵的
     /// 单文件插件白跑一次）；未声明却在 start 阶段返回清单的插件仍由引擎
@@ -558,6 +563,13 @@ impl PluginManifest {
             {
                 return Err(PluginError::ManifestInvalid(
                     "resolver timeoutMs 不可为 0".to_string(),
+                ));
+            }
+            if let Some(m) = r.memory_limit_mb
+                && m == 0
+            {
+                return Err(PluginError::ManifestInvalid(
+                    "resolver memoryLimitMb 不可为 0".to_string(),
                 ));
             }
         }

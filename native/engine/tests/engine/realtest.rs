@@ -9,7 +9,7 @@
 //!   - 完整复用引擎真实代码（BufWriter / fallocate / 拆分协调 / 续传 / 重试）。
 //!
 //! 用法：
-//!   cargo test -p fluxdown_engine --test realtest -- --ignored --nocapture --test-threads=1
+//!   cargo test -p fluxdown_engine --test engine realtest -- --ignored --nocapture --test-threads=1
 //!
 //! 默认 `#[ignore]`（绑定端口 + 略慢），需显式 `--ignored` 运行。
 
@@ -3784,7 +3784,7 @@ async fn hint_plain_first_upgrades_to_multi_segment_on_accept_ranges() {
 /// FLUXDOWN_RT_URL="http://nas:1080/multiple-download?token=..." \
 /// FLUXDOWN_RT_SIZE=32583874 \
 /// FLUXDOWN_RT_COOKIES="fnos-token=..." \
-/// cargo test -p fluxdown_engine --test realtest manual_real_url -- --ignored --nocapture
+/// cargo test -p fluxdown_engine --test engine realtest manual_real_url -- --ignored --nocapture
 /// ```
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "manual: requires FLUXDOWN_RT_URL pointing at a live endpoint"]
