@@ -1,7 +1,7 @@
 // 新建下载：字段、顺序与提交语义对齐 GPUI `pages/new_download.rs`（纯规则见 `model.ts`）。
 //
-// - 链接文本框（一行一条，`out=` / `checksum=` 选项行）、打开 .torrent（浏览器选文件 → blob 上传）、导入 TXT（浏览器端读取）；
-// - 保存目录 + 服务端目录选择器；文件名 | 线程数；「高级」折叠区（HTTP 认证 / 代理 / UA / Cookie / 校验 / 请求头 / 忽略 TLS）；
+// - 链接文本框（一行一条，`out=` / `checksum=` 选项行；默认收起约 3 行，标签行右侧可展开，批量输入自动展开）、打开 .torrent（浏览器选文件 → blob 上传）、导入 TXT（浏览器端读取）；
+// - 保存目录 + 服务端目录选择器；文件名、线程数各占一行；「高级」折叠区（HTTP 认证 / 代理 / UA / Cookie / 校验 / 请求头 / 忽略 TLS）；
 // - 底栏：取消、「稍后下载」分体按钮（队列菜单）、主按钮「开始下载」分体按钮（队列菜单）；
 // - 单条 http(s) 链接先 `daemon.group.resolvePreview` 探测插件多文件清单，命中则进入清单选择建任务组；
 // - 外部捕获（`agent.capture.*`）作为链接行并入表单，提交时经 `agent.capture.resolve` 确认，关闭时未确认的一并忽略。
@@ -44,6 +44,8 @@ const RESOLVE_PREVIEW_TIMEOUT_MS = 90_000
 const SITE_AUTH_LOOKUP_DEBOUNCE_MS = 250
 /** 失败原因最多渲染的行数（超出的只显示计数，避免上万行 DOM）。 */
 const MAX_FAILURE_ROWS = 50
+/** 链接输入框随内容自增高的上限（行）；超出后框内滚动。与 GPUI `URLS_MAX_ROWS` 一致。 */
+const URLS_MAX_ROWS = 10
 
 const EMPTY_CAPTURES: readonly PendingCaptureDto[] = []
 const EMPTY_QUEUES: readonly QueueDto[] = []
@@ -92,7 +94,7 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
     () => buildRemoteTargets(cloudDevices, linkedDevices, { cloud: cloudReady, local: localReady }),
     [cloudDevices, linkedDevices, cloudReady, localReady],
   )
-  const [targetValue, setTargetValue] = useState(LOCAL_TARGET)
+  const [targetValue, setTargetValue] = useState(session.target ?? LOCAL_TARGET)
   // 目标设备消失（登出 / 解除配对）时回落到本服务器。
   const target: RemoteTarget | null = resolveTargetValue(targetValue, remoteTargets)
   const [remoteSaveDir, setRemoteSaveDir] = useState('')
@@ -684,11 +686,11 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
             </div>
             <Textarea
               id="new-download-urls"
-              rows={6}
+              maxAutoRows={URLS_MAX_ROWS}
               value={text}
               spellCheck={false}
               autoFocus
-              placeholder={t('batchUrlPlaceholder')}
+              placeholder={t('newDownloadUrlPlaceholder')}
               onChange={(event) => setText(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
@@ -792,36 +794,34 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
             </FormField>
           )}
 
-          {/* 文件名 | 线程数：批量隐藏文件名，全磁力隐藏线程数 */}
-          {!batch || !allMagnet ? (
+          {/* 文件名：独占一行（与保存目录同宽），批量隐藏 */}
+          {!batch ? (
+            <FormField label={t('renameOptional')} htmlFor="new-download-rename">
+              <Input id="new-download-rename" value={rename} placeholder={t('autoDetectFilename')} spellCheck={false} onChange={(event) => setRename(event.target.value)} />
+            </FormField>
+          ) : null}
+
+          {/* 线程数：独占一行，全磁力隐藏；过高时下方风险提示 */}
+          {!allMagnet ? (
             <div className="flex flex-col">
-              <FormRow>
-                {!batch ? (
-                  <FormField label={t('renameOptional')} htmlFor="new-download-rename">
-                    <Input id="new-download-rename" value={rename} placeholder={t('autoDetectFilename')} spellCheck={false} onChange={(event) => setRename(event.target.value)} />
-                  </FormField>
-                ) : null}
-                {!allMagnet ? (
-                  <FormField label={t('threads')}>
-                    <div className="flex items-center gap-2">
-                      <div className={threads === 'custom' ? 'w-26 shrink-0' : 'min-w-0 flex-1'}>
-                        <Select value={threads} options={threadOptions} aria-label={t('threads')} onValueChange={changeThreads} />
-                      </div>
-                      {threads === 'custom' ? (
-                        <Input
-                          className="min-w-0 flex-1"
-                          inputMode="numeric"
-                          value={customThreads}
-                          placeholder={t('customRangeHint', { min: 1, max: MAX_THREADS })}
-                          aria-label={t('customThreads')}
-                          onChange={(event) => setCustomThreads(event.target.value.replace(/[^0-9]/g, ''))}
-                        />
-                      ) : null}
-                    </div>
-                  </FormField>
-                ) : null}
-              </FormRow>
-              {!allMagnet ? <ThreadsRiskCallout segments={segments} /> : null}
+              <FormField label={t('threads')}>
+                <div className="flex items-center gap-2">
+                  <div className={threads === 'custom' ? 'w-26 shrink-0' : 'min-w-0 flex-1'}>
+                    <Select value={threads} options={threadOptions} aria-label={t('threads')} onValueChange={changeThreads} />
+                  </div>
+                  {threads === 'custom' ? (
+                    <Input
+                      className="min-w-0 flex-1"
+                      inputMode="numeric"
+                      value={customThreads}
+                      placeholder={t('customRangeHint', { min: 1, max: MAX_THREADS })}
+                      aria-label={t('customThreads')}
+                      onChange={(event) => setCustomThreads(event.target.value.replace(/[^0-9]/g, ''))}
+                    />
+                  ) : null}
+                </div>
+              </FormField>
+              <ThreadsRiskCallout segments={segments} />
             </div>
           ) : null}
 

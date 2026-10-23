@@ -32,6 +32,7 @@ use crate::runtime::AgentResult;
 const SESSION_END_BUDGET: Duration = Duration::from_millis(4500);
 /// 菜单位置：显示窗口、分隔线、全部暂停、全部恢复之后插入「取消完成后关机」。
 const CANCEL_SHUTDOWN_POSITION: usize = 4;
+#[cfg(not(target_os = "macos"))]
 const DEFAULT_TOOLTIP: &str = "FluxDown";
 /// 托盘固定标识。Linux 上 tray-icon 把它拼成 SNI `Id`（`tray-icon tray app fluxdown`），
 /// GNOME 顶栏整理类扩展按 `Id` 记住托盘项位置；缺省的 `<pid>-<序号>` 每次启动都会变（#269）。
@@ -512,8 +513,11 @@ impl TrayUi {
         // macOS 不在状态栏项上常挂菜单，见 [`TrayUi::pop_up_menu`]。
         #[cfg(not(target_os = "macos"))]
         let builder = builder.with_menu(Box::new(menu.clone()));
+        // macOS 不设 tooltip：macOS 27 上状态栏 tooltip 收不到移出事件会常驻（#953），
+        // 倒计时改由菜单项展示（见 `tray_model::COUNTDOWN_IN_MENU`）。
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.with_tooltip(DEFAULT_TOOLTIP);
         let icon = builder
-            .with_tooltip(DEFAULT_TOOLTIP)
             .with_menu_on_left_click(false)
             .with_icon(decode_icon(bytes)?)
             .with_icon_as_template(cfg!(target_os = "macos"))
@@ -569,6 +573,7 @@ impl TrayUi {
             },
             (None, false) => {}
         }
+        #[cfg(not(target_os = "macos"))]
         if let Err(error) = self.icon.set_tooltip(Some(&model.tooltip)) {
             tracing::debug!(error = %error, "tray tooltip unsupported");
         }

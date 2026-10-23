@@ -42,6 +42,7 @@ pub mod runtime;
 pub mod server_mode;
 pub mod shell;
 pub mod sniff_rules;
+mod sound;
 mod startup_failure;
 pub mod state;
 pub mod supervisor;

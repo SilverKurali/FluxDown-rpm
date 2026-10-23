@@ -90,6 +90,14 @@ struct AgentAPI: Sendable {
         try await session.callVoid(HostMethod.agentProfileChangePassword, params: params)
     }
 
+    func sendDeleteCode() async throws(HostError) -> TtlResult {
+        try await session.call(HostMethod.agentProfileSendDeleteCode)
+    }
+
+    func deleteAccount(_ params: DeleteAccountParams) async throws(HostError) {
+        try await session.callVoid(HostMethod.agentProfileDeleteAccount, params: params)
+    }
+
     // MARK: 服务地址（仅调试 / TestFlight 构建 `editable == true`）
 
     func cloudEndpoint() async throws(HostError) -> CloudEndpointDto {

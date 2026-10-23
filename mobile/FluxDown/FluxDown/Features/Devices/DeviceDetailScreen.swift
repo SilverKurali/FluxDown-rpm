@@ -216,13 +216,8 @@ private struct LinkDeviceDetail: View {
         let revoked = info.revoked
         let online = info.online && !revoked
         let statusText = L(online ? "deviceOnline" : "deviceOffline")
-        let sameAccount = DevicePresentation.isSameAccount(
-            LinkDevice(
-                fingerprint: info.fingerprint, name: info.name, platform: info.platform, online: info.online,
-                cloudDeviceId: info.cloudDeviceId, revoked: revoked
-            ),
-            cloud: state.cloudDevices
-        )
+        let sameAccount = DeviceRules.attachedLinkFingerprints(cloud: state.cloudDevices, link: state.linkDevices)
+            .contains(info.fingerprint)
         return List {
             Section {
                 DeviceHeader(

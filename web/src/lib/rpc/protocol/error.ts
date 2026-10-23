@@ -85,6 +85,7 @@ export type ErrorReason =
   | 'notifyChannelLimit'
   | 'notifyDisabled'
   | 'notifyTargetInvalid'
+  | 'soundUnplayable'
   | 'paymentDisabled'
   | 'paymentGatewayFailed'
   | 'planNotPurchasable'

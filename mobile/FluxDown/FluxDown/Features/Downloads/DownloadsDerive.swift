@@ -98,14 +98,14 @@ struct DownloadsDeriver {
         let remoteScoped = f.groupId == nil && f.queueId == nil
             ? input.remote.filter { query.isEmpty || Self.matches($0, query: query) }
             : []
-        var folderCounts = Array(repeating: 0, count: StatusFolder.allCases.count)
+        var folderCounts = Array(repeating: 0, count: StatusFolder.visible.count)
         for it in scoped {
-            for (i, folder) in StatusFolder.allCases.enumerated() where folder.accepts(it.task) {
+            for (i, folder) in StatusFolder.visible.enumerated() where folder.accepts(it.task) {
                 folderCounts[i] += 1
             }
         }
         for task in remoteScoped {
-            for (i, folder) in StatusFolder.allCases.enumerated() where folder.accepts(task.status) {
+            for (i, folder) in StatusFolder.visible.enumerated() where folder.accepts(task.status) {
                 folderCounts[i] += 1
             }
         }

@@ -9,6 +9,15 @@ import Foundation
 nonisolated enum StatusFolder: CaseIterable, Hashable {
     case all, active, completed, seeding, failed, paused
 
+    /// 范围条显示（也是 `Facets.folderCounts` 的索引序）的文件夹：「做种中」是 BT 专属，商店版不含 BT，隐藏。
+    static let visible: [StatusFolder] = {
+        #if FULL_P2P
+        allCases
+        #else
+        allCases.filter { $0 != .seeding }
+        #endif
+    }()
+
     /// 本机任务是否属于该文件夹：「做种中」按 `isSeeding`（1 / 8）判定，其余按状态；做种任务同时仍在「已完成」。
     func accepts(_ task: DownloadTask) -> Bool {
         self == .seeding ? task.isSeeding : accepts(task.status)
@@ -228,7 +237,7 @@ nonisolated struct QueueFacet: Equatable, Identifiable {
 
 /// 分面：文件夹计数（队列 / 搜索范围内）· 当前文件夹内的分类计数 · 各队列任务数 · 远程任务数。
 nonisolated struct Facets: Equatable {
-    /// 按 `StatusFolder.allCases` 顺序。
+    /// 按 `StatusFolder.visible` 顺序。
     let folderCounts: [Int]
     let categories: [CategoryPill]
     let queues: [QueueFacet]
@@ -238,7 +247,7 @@ nonisolated struct Facets: Equatable {
     let matching: Int
 
     static let initial = Facets(
-        folderCounts: Array(repeating: 0, count: StatusFolder.allCases.count),
+        folderCounts: Array(repeating: 0, count: StatusFolder.visible.count),
         categories: [],
         queues: [],
         remoteCount: 0,
@@ -246,7 +255,7 @@ nonisolated struct Facets: Equatable {
     )
 
     func count(_ folder: StatusFolder) -> Int {
-        guard let index = StatusFolder.allCases.firstIndex(of: folder), folderCounts.indices.contains(index) else { return 0 }
+        guard let index = StatusFolder.visible.firstIndex(of: folder), folderCounts.indices.contains(index) else { return 0 }
         return folderCounts[index]
     }
 }

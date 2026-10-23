@@ -91,15 +91,6 @@ struct GeneralRowTests {
         #expect(ids == GeneralRow.allCases.filter { FeatureFlags.webhooks || $0 != .activityWebhooks }.map(\.id))
         #expect(Set(ids).count == ids.count)
     }
-
-    @Test func readoutCountsCategoriesOnceThePreferenceIsKnown() {
-        let empty = SettingsSearchContext(form: SettingsConfigForm(), isLocalHost: true, capabilities: [])
-        #expect(GeneralPage.readout(empty) == nil)
-        var form = SettingsConfigForm()
-        form.prefs[CustomCategoryDto.preferenceKey] = CustomCategoryDto.preferenceValue(CustomCategoryDto.builtinDefaults)
-        let loaded = SettingsSearchContext(form: form, isLocalHost: true, capabilities: [])
-        #expect(GeneralPage.readout(loaded) != nil)
-    }
 }
 
 @MainActor

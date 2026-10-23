@@ -158,6 +158,8 @@ export const METHOD = {
   AGENT_PROFILE_CHANGE_NICKNAME: 'agent.profile.changeNickname',
   AGENT_PROFILE_SEND_PASSWORD_CODE: 'agent.profile.sendPasswordCode',
   AGENT_PROFILE_CHANGE_PASSWORD: 'agent.profile.changePassword',
+  AGENT_PROFILE_SEND_DELETE_CODE: 'agent.profile.sendDeleteCode',
+  AGENT_PROFILE_DELETE_ACCOUNT: 'agent.profile.deleteAccount',
 
   AGENT_GATEWAY_GET: 'agent.gateway.get',
   AGENT_GATEWAY_PATCH: 'agent.gateway.patch',
@@ -213,6 +215,7 @@ export const METHOD = {
   AGENT_PLATFORM_SET_FILE_ASSOCIATION: 'agent.platform.setFileAssociation',
   AGENT_PLATFORM_SET_URL_PROTOCOL: 'agent.platform.setUrlProtocol',
   AGENT_PLATFORM_FILE_ICON: 'agent.platform.fileIcon',
+  AGENT_SOUND_PREVIEW: 'agent.sound.preview',
   AGENT_CAPTURE_SUBMIT: 'agent.capture.submit',
   AGENT_CAPTURE_SUBMIT_TORRENT_FILE: 'agent.capture.submitTorrentFile',
   AGENT_CAPTURE_LIST: 'agent.capture.list',

@@ -26,6 +26,8 @@ pub struct BackgroundEffects {
     events: AgentEventHub,
     notifier: Arc<Notifier>,
     action_text: NoticeText,
+    /// agent 自己播放「下载完成」提示音（桌面宿主）；为真且该提示音已启用时，完成通知静音。
+    completion_sound_owned: bool,
     #[cfg(feature = "desktop")]
     translator: Option<fluxdown_ui_i18n::Translator>,
 }
@@ -50,6 +52,7 @@ impl BackgroundEffects {
             events,
             notifier,
             action_text: NoticeText::default(),
+            completion_sound_owned: false,
             #[cfg(feature = "desktop")]
             translator: match fluxdown_ui_i18n::I18nCatalog::load_embedded() {
                 Ok(catalog) => {
@@ -61,6 +64,13 @@ impl BackgroundEffects {
                 }
             },
         }
+    }
+
+    /// 声明本宿主会播放「下载完成」提示音（见 [`crate::sound`]）：用户启用后完成通知改为静音，避免双重声音。
+    #[must_use]
+    pub fn with_completion_sound(mut self, owned: bool) -> Self {
+        self.completion_sound_owned = owned;
+        self
     }
 
     pub async fn run(mut self, cancel: CancellationToken) {
@@ -171,6 +181,10 @@ impl BackgroundEffects {
         if !self.events.inspect(notify_on_complete) {
             return;
         }
+        let silent = self.completion_sound_owned
+            && self.events.inspect(|snapshot| {
+                crate::sound::setting(snapshot, crate::sound::SoundKind::TaskCompleted).is_enabled()
+            });
         let open_file = self.action_text.text("openFile", batch.locale.as_deref());
         let open_folder = self.action_text.text("openFolder", batch.locale.as_deref());
         let Some((title, body)) = self.completion_notice(&batch.file_names, batch.locale) else {
@@ -178,7 +192,14 @@ impl BackgroundEffects {
         };
         let notifier = Arc::clone(&self.notifier);
         tokio::task::spawn_blocking(move || {
-            notifier.show_completion(&title, &body, batch.last_path, open_file, open_folder);
+            notifier.show_completion(
+                &title,
+                &body,
+                batch.last_path,
+                open_file,
+                open_folder,
+                silent,
+            );
         });
     }
 

@@ -132,7 +132,7 @@ private fun NewDownloadSheetImpl(visible: Boolean, route: SheetRoute.NewDownload
     val actions = LocalTaskActions.current
     val haptics = FluxTheme.haptics
     val context = LocalContext.current
-    val form = remember { NewDownloadState.create(route.prefill, container.store.state.value, route.external) }
+    val form = remember { NewDownloadState.create(route.prefill, container.store.state.value, route.external, route.targetId) }
     LaunchedEffect(route) {
         // 打开期间的后续唤起追加进同一表单（批量协议唤起逐条到达）
         route.external?.let(form::addExternal)

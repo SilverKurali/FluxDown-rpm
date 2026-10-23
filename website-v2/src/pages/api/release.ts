@@ -27,7 +27,8 @@
  *     version: "0.1.51",
  *     tag: "v0.1.51",  // 统一 release 为 vX.Y.Z；历史拆分 release 为 server-vX.Y.Z
  *     assets: { windows_x64, windows_arm64, linux_x64, linux_arm64, macos_x64, macos_arm64,
- *               openwrt_x64, openwrt_arm64, openwrt_luci, qnap_x64, qnap_arm64,
+ *               openwrt_x64, openwrt_arm64, openwrt_luci, openwrt_apk_x64, openwrt_apk_arm64,
+ *               openwrt_apk_luci, qnap_x64, qnap_arm64,
  *               synology_dsm7_x64, synology_dsm7_arm64, synology_dsm6_x64, synology_dsm6_arm64,
  *               fnos_x64, fnos_arm64 }
  *   } | null,  // FluxDown Server（headless Web 版），无对应 release 时为 null
@@ -229,19 +230,17 @@ export const GET: APIRoute = async ({ url, request, clientAddress }) => {
     const serverLinuxArm64Asset = findServerAsset("-linux-arm64.tar.gz");
     const serverMacosX64Asset = findServerAsset("-macos-x64.tar.gz");
     const serverMacosArm64Asset = findServerAsset("-macos-arm64.tar.gz");
-    // OpenWrt ipk（命名：fluxdown-server_<ver>_<arch>.ipk / luci-app-fluxdown_<ver>_all.ipk）；
-    // aarch64 有多个子架构标签的 ipk，官网只挂 aarch64_generic，其余在 release 页可取
-    const serverOpenwrtX64Asset = serverRelease?.assets.find(
-      (a) => a.name.startsWith("fluxdown-server_") && a.name.endsWith("_x86_64.ipk"),
-    );
-    const serverOpenwrtArm64Asset = serverRelease?.assets.find(
-      (a) =>
-        a.name.startsWith("fluxdown-server_") &&
-        a.name.endsWith("_aarch64_generic.ipk"),
-    );
-    const serverOpenwrtLuciAsset = serverRelease?.assets.find(
-      (a) => a.name.startsWith("luci-app-fluxdown_") && a.name.endsWith("_all.ipk"),
-    );
+    // OpenWrt（命名：fluxdown-server_<ver>_<arch>.<ipk|apk> / luci-app-fluxdown_<ver>_all.<ipk|apk>）；
+    // ipk = 24.10 及更早（opkg），apk = 25.12 起（apk-tools v3）。
+    // aarch64 有多个子架构标签的包，官网只挂 aarch64_generic，其余在 release 页可取
+    const findOpenwrtAsset = (prefix: string, suffix: string) =>
+      serverRelease?.assets.find((a) => a.name.startsWith(prefix) && a.name.endsWith(suffix));
+    const serverOpenwrtX64Asset = findOpenwrtAsset("fluxdown-server_", "_x86_64.ipk");
+    const serverOpenwrtArm64Asset = findOpenwrtAsset("fluxdown-server_", "_aarch64_generic.ipk");
+    const serverOpenwrtLuciAsset = findOpenwrtAsset("luci-app-fluxdown_", "_all.ipk");
+    const serverOpenwrtApkX64Asset = findOpenwrtAsset("fluxdown-server_", "_x86_64.apk");
+    const serverOpenwrtApkArm64Asset = findOpenwrtAsset("fluxdown-server_", "_aarch64_generic.apk");
+    const serverOpenwrtApkLuciAsset = findOpenwrtAsset("luci-app-fluxdown_", "_all.apk");
     // QNAP qpkg（命名：FluxDown-Server-<ver>-qnap-<arch>.qpkg）
     const serverQnapX64Asset = findServerAsset("-qnap-x64.qpkg");
     const serverQnapArm64Asset = findServerAsset("-qnap-arm64.qpkg");
@@ -362,6 +361,18 @@ export const GET: APIRoute = async ({ url, request, clientAddress }) => {
               ),
               openwrt_luci: formatAsset(
                 serverOpenwrtLuciAsset,
+                serverRelease.tag_name,
+              ),
+              openwrt_apk_x64: formatAsset(
+                serverOpenwrtApkX64Asset,
+                serverRelease.tag_name,
+              ),
+              openwrt_apk_arm64: formatAsset(
+                serverOpenwrtApkArm64Asset,
+                serverRelease.tag_name,
+              ),
+              openwrt_apk_luci: formatAsset(
+                serverOpenwrtApkLuciAsset,
                 serverRelease.tag_name,
               ),
               qnap_x64: formatAsset(

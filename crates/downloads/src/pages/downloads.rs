@@ -21,7 +21,7 @@ use crate::{
             DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand,
             spawn_midnight_refresh,
         },
-        title_bar::DownloadTitleBar,
+        title_bar::{DownloadSearchBox, DownloadTitleBar, DownloadViewMenu},
     },
     controller::{DownloadsCommand, DownloadsController, DownloadsPort, ResumeTargets},
     deletion::{
@@ -129,6 +129,10 @@ pub struct DownloadHostActions {
     pub open_queue_manager: Option<PlainOpener>,
     /// 侧栏「设备」区标题上的「添加设备」入口；`None` 时不显示按钮。
     pub open_add_device: Option<PlainOpener>,
+    /// 侧栏独立直连设备右键「重命名」：参数为设备指纹。
+    pub rename_linked_device: Option<IdOpener>,
+    /// 侧栏独立直连设备右键「解除配对」（含确认）：参数为设备指纹。
+    pub unpair_linked_device: Option<IdOpener>,
     /// 任务表「待确认」角标点击：打开 / 置前聚合的「文件已存在」窗口。
     pub open_file_conflicts: Option<PlainOpener>,
     /// `Some(id)` 编辑现有分类，`None` 新建。
@@ -199,8 +203,10 @@ pub struct DownloadView {
     /// 根元素 focus handle：右键菜单 action_context 分派目标，`escape`
     /// 清空搜索框后也交回给它。
     pub(crate) focus_handle: FocusHandle,
-    /// 顶栏搜索框状态（输入框渲染在 [`DownloadTitleBar`] 插槽里）。
+    /// 顶栏搜索框状态（输入框渲染在 [`DownloadSearchBox`] 里）。
     pub(crate) search_input: Entity<InputState>,
+    /// 搜索框被布局隐藏时，经快捷键临时展开（`Esc` 收起）。
+    search_revealed: bool,
     /// 已下发给搜索框的 placeholder（语言切换后需重下发）。
     search_placeholder: SharedString,
     /// 搜索防抖代数。
@@ -350,6 +356,7 @@ impl DownloadView {
             last_error: None,
             focus_handle,
             search_input,
+            search_revealed: false,
             search_placeholder: strings_placeholder,
             search_generation: Rc::new(Cell::new(0)),
             prefs_generation: Rc::new(Cell::new(0)),
@@ -477,13 +484,26 @@ impl DownloadView {
         }
     }
 
-    /// 创建挂到 shell 统一顶栏的下载页插槽（搜索、视图选项、新建）。
+    /// 创建挂到 shell 统一顶栏的下载页插槽（「新建」按钮）。
     pub fn new_title_bar(&self, cx: &mut Context<Self>) -> Entity<DownloadTitleBar> {
+        let view = cx.weak_entity();
+        let translator = self.translator.clone();
+        cx.new(|_| DownloadTitleBar::new(view, translator))
+    }
+
+    /// 创建顶栏搜索框（chrome 布局条目，由宿主注册为 shell 控件）。
+    pub fn new_search_box(&self, cx: &mut Context<Self>) -> Entity<DownloadSearchBox> {
+        let view = cx.weak_entity();
+        let search_input = self.search_input.clone();
+        cx.new(|cx| DownloadSearchBox::new(view, search_input, cx))
+    }
+
+    /// 创建「视图」选项菜单（chrome 布局条目，由宿主注册为 shell 控件）。
+    pub fn new_view_menu(&self, cx: &mut Context<Self>) -> Entity<DownloadViewMenu> {
         let view = cx.entity();
         let translator = self.translator.clone();
-        let search_input = self.search_input.clone();
         let table_state = self.table_state.clone();
-        cx.new(|cx| DownloadTitleBar::new(&view, translator, search_input, table_state, cx))
+        cx.new(|cx| DownloadViewMenu::new(&view, translator, table_state, cx))
     }
 
     /// 「新建下载」表单的环境快照：保存目录 / 默认队列 / 线程数初值与队列候选；
@@ -522,6 +542,21 @@ impl DownloadView {
 
     pub(crate) fn open_new_download(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_new_download_with(Vec::new(), window, cx);
+    }
+
+    /// 侧栏独立直连设备：打开「新建下载」并把「下载到」预选为该设备。
+    pub(crate) fn open_new_download_to(
+        &self,
+        target: crate::model::devices::DispatchTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(opener) = self.host.open_new_download.clone() else {
+            return;
+        };
+        let mut context = self.new_download_context();
+        context.target = target;
+        opener(context, window, cx);
     }
 
     /// 按表单提交创建任务 / 确认外部捕获 / 下发到其他设备；对话框确认后由宿主调用。
@@ -955,9 +990,9 @@ impl DownloadView {
                     && id != SidebarSelection::ALL_DEVICES
                     && !self
                         .controller
-                        .sidebar_devices()
+                        .other_devices()
                         .iter()
-                        .any(|device| device.id == *id) =>
+                        .any(|device| !device.is_standalone_link() && device.id == *id) =>
             {
                 self.selected_item = SidebarSelection::Download(DownloadFilter::ALL);
             }
@@ -1510,7 +1545,15 @@ impl DownloadView {
                 cx.notify();
             }
         });
+        self.search_revealed = false;
         self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// 搜索框被布局隐藏时是否仍临时显示：快捷键唤出后、或仍有查询词时（避免筛选条件不可见）。
+    #[must_use]
+    pub fn search_revealed(&self, cx: &App) -> bool {
+        self.search_revealed || !self.search_input.read(cx).value().is_empty()
     }
 
     /// 内联重命名对话框（单选本地任务）；确认后写 `DownloadsCommand::Rename`。
@@ -2209,9 +2252,12 @@ impl DownloadView {
                 table.delegate_mut().select_all_tasks();
                 cx.notify();
             }),
-            PageCommand::FocusSearch => self
-                .search_input
-                .update(cx, |input, cx| input.focus(window, cx)),
+            PageCommand::FocusSearch => {
+                self.search_revealed = true;
+                self.search_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }
             PageCommand::CycleDensity => self.mutate_prefs(ViewPrefs::cycle_density, cx),
             PageCommand::CycleGroupBy => self.mutate_prefs(ViewPrefs::cycle_group_by, cx),
             PageCommand::CycleSort => self.mutate_prefs(ViewPrefs::cycle_sort, cx),

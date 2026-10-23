@@ -122,7 +122,7 @@ private struct SettingsHomeList: View {
         }
 
         Section(L("settingsGroupPersonal")) {
-            tile(.general, L("settingsCatGeneral"), GeneralPage.readout(ctx) ?? L("settingsCatGeneralDesc"), "gearshape.fill", .gray)
+            tile(.general, L("settingsCatGeneral"), L("settingsCatGeneralDesc"), "gearshape.fill", .gray)
             tile(.appearance, L("settingsCatAppearance"), appearanceReadout(), "paintpalette.fill", .pink)
             tile(.notify, L("settingsCatNotify"), NotifyPage.readout(ctx) ?? L("settingsCatNotifyDesc"), "bell.badge.fill", .red)
         }

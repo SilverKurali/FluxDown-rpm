@@ -80,6 +80,8 @@ const HEADER_NAME_WIDTH: f32 = 168.;
 const SITE_AUTH_LOOKUP_DEBOUNCE: Duration = Duration::from_millis(250);
 /// 保存目录历史下拉的最大高度（超出滚动）。
 const SAVE_DIR_MENU_MAX_HEIGHT: f32 = 320.;
+/// 链接输入框随内容自增高的上限（行，含软换行）；默认一行，超出后框内滚动。与 Web 同值。
+const URLS_MAX_ROWS: usize = 10;
 
 /// 队列下拉候选（显示名由表单按内置队列本地化）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -313,6 +315,7 @@ impl NewDownloadView {
         let strings = NewDownloadStrings::from_translator(translator.read(cx));
         let urls = cx.new(|cx| {
             TextareaState::new(window, cx)
+                .auto_grow(1, URLS_MAX_ROWS)
                 .default_value(context.initial_urls.join("\n"))
                 .placeholder(strings.url_placeholder.clone())
         });
@@ -876,16 +879,25 @@ impl NewDownloadView {
         };
         let value = serde_json::Value::from(next.clone());
         *history = next;
-        let write = self.port.execute(DownloadsCommand::SetLocalPreference {
-            key: SAVE_DIR_HISTORY_PREF,
-            value,
-        });
-        // 表单随后关窗：写入在后台执行器上跑完，不随视图释放而取消。
+        self.write_local_preference(SAVE_DIR_HISTORY_PREF, value, cx);
+    }
+
+    /// 设备本地偏好写入：尽力而为，失败只做诊断记录。
+    fn write_local_preference(
+        &self,
+        key: &'static str,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let write = self
+            .port
+            .execute(DownloadsCommand::SetLocalPreference { key, value });
+        // 表单随后可能关窗：写入在后台执行器上跑完，不随视图释放而取消。
         cx.background_executor()
             .spawn(async move {
                 if let Err(error) = write.await {
                     eprintln!(
-                        "save dir history write failed: {:?} ({:?})",
+                        "local preference write failed: {:?} ({:?})",
                         error.code, error.reason
                     );
                 }
@@ -1432,9 +1444,17 @@ impl NewDownloadView {
 
     /// 链接：标签行右侧显示已识别条数；多行输入下方是种子 / 文本导入入口。
     fn render_urls(&self, cx: &mut Context<Self>) -> Div {
-        let spacing = active_theme(cx).tokens().spacing;
+        let theme = active_theme(cx);
+        let spacing = theme.tokens().spacing;
         let count = self.entries.len();
         let has_text = !self.urls.read(cx).value().trim().is_empty();
+        let url_box = {
+            let tokens = theme.tokens();
+            Textarea::new(&self.urls)
+                .w_full()
+                .text_size(tokens.typography.sm.size)
+                .line_height(tokens.typography.sm.line_height)
+        };
         v_flex()
             .w_full()
             .gap(spacing.xs + spacing.xxs)
@@ -1447,7 +1467,7 @@ impl NewDownloadView {
                         this.child(field_hint(self.strings.format_url_count(count), cx))
                     }),
             )
-            .child(Self::textarea(&self.urls, px(128.), 6., cx))
+            .child(url_box)
             .when(has_text && count == 0, |this| {
                 this.child(field_error(self.strings.no_valid_url.clone(), cx))
             })
@@ -1733,38 +1753,30 @@ impl NewDownloadView {
         form_field(self.strings.threads.clone(), control, None, cx)
     }
 
-    /// 文件名 | 线程数并排；批量隐藏文件名，全磁力隐藏线程数。线程数过高时下方展开风险提示。
-    fn render_name_threads(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let mut fields = Vec::with_capacity(2);
-        if !self.is_batch() {
-            fields.push(
-                form_field(
-                    self.strings.rename.clone(),
-                    Input::new(&self.rename).control(cx).w_full(),
-                    None,
-                    cx,
-                )
-                .into_any_element(),
-            );
-        }
-        // 分段数只对本机下载有意义；下发只带链接 / 文件名 / 保存目录。
-        let show_threads = !self.all_magnet() && !self.is_remote();
-        if show_threads {
-            fields.push(self.render_threads(cx).into_any_element());
-        }
-        if fields.is_empty() {
+    /// 文件名：独占一行（与保存目录同宽）；批量时隐藏。
+    fn render_rename(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.is_batch() {
             return None;
         }
-        let row = form_row(fields, cx);
-        if !show_threads {
-            return Some(row);
+        Some(form_field(
+            self.strings.rename.clone(),
+            Input::new(&self.rename).control(cx).w_full(),
+            None,
+            cx,
+        ))
+    }
+
+    /// 线程数独占一行；全磁力 / 下发时隐藏（分段数只对本机下载有意义）。线程数过高时下方展开风险提示。
+    fn render_threads_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.all_magnet() || self.is_remote() {
+            return None;
         }
         let risk = threads_risk_callout(
             "new-download-threads-risk",
             i64::from(self.segments(cx)),
             self.translator.read(cx),
         );
-        Some(v_flex().w_full().child(row).child(risk))
+        Some(v_flex().w_full().child(self.render_threads(cx)).child(risk))
     }
 
     fn render_http_auth(&self, cx: &mut Context<Self>) -> Div {
@@ -2053,7 +2065,8 @@ impl NewDownloadView {
             .child(self.render_urls(cx))
             .children(self.render_target(cx))
             .child(self.render_save_dir(cx))
-            .children(self.render_name_threads(cx))
+            .children(self.render_rename(cx))
+            .children(self.render_threads_row(cx))
             .children((!self.is_remote()).then(|| self.render_advanced(cx)))
     }
 

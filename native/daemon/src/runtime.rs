@@ -792,6 +792,10 @@ fn apply_manager_settings(engine: &mut Engine, config: &HashMap<String, String>)
     engine
         .manager
         .set_idle_file_scan(bool_config(config, "idle_file_scan", false));
+    engine.manager.set_completed_record_retention_days(
+        u32::try_from(i32_config(config, "completed_record_retention_days", 0).clamp(0, 3650))
+            .unwrap_or(0),
+    );
 }
 
 fn configured_save_dir(config: &HashMap<String, String>, fallback: String) -> String {

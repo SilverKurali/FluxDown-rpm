@@ -80,7 +80,9 @@ fn url_file_segment(url: &str) -> Option<&str> {
 
 /// 解析多行文本为下载条目。
 ///
-/// - 原始行以空格 / Tab 开头 = 选项行，附着到上一条（`out=` / `checksum=`）；
+/// - 原始行以空格 / Tab 开头且不以链接开头 = 选项行，附着到上一条（`out=` / `checksum=`）；
+///   以链接开头的缩进行（从网页 / 聊天复制常带前导空白）按普通行解析；
+/// - 零宽字符与 BOM（U+200B/C/D、U+2060、U+FEFF）先整体剔除，它们不可见且不属于链接；
 /// - `#` 开头为注释，空行跳过；
 /// - 含 `magnet:?` / `ed2k://` 时从该位置截取到行尾；
 /// - 其余行：`loose` 为 true 时取行内首个 `http(s)/ftp/thunder` 链接并去掉尾部标点
@@ -104,12 +106,13 @@ pub(crate) struct ParsedInput {
 /// 提取链接 / `-o` / `--checksum`（#299，详见 [`crate::model::aria2c`]），头部信息随结果
 /// 返回；其余行的行为不变。
 pub(crate) fn parse_input(text: &str, loose: bool) -> ParsedInput {
-    let text = join_continuations(text);
+    let visible = strip_invisible(text);
+    let text = join_continuations(&visible);
     let mut entries = Vec::new();
     let mut hints: Option<RequestHints> = None;
     let mut current: Option<UrlEntry> = None;
     for line in text.split('\n') {
-        if line.starts_with(' ') || line.starts_with('\t') {
+        if (line.starts_with(' ') || line.starts_with('\t')) && !starts_with_link(line.trim()) {
             let Some(entry) = current.as_mut() else {
                 continue;
             };
@@ -159,6 +162,16 @@ pub(crate) fn parse_input(text: &str, loose: bool) -> ParsedInput {
     ParsedInput {
         entries,
         hints: hints.unwrap_or_default(),
+    }
+}
+
+/// 剔除零宽字符与 BOM；无此类字符时不分配。
+fn strip_invisible(text: &str) -> std::borrow::Cow<'_, str> {
+    const INVISIBLE: [char; 5] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
+    if text.contains(INVISIBLE) {
+        std::borrow::Cow::Owned(text.replace(INVISIBLE, ""))
+    } else {
+        std::borrow::Cow::Borrowed(text)
     }
 }
 
@@ -705,6 +718,43 @@ mod tests {
         let loose = parse_entries("迅雷：thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=.\n", true);
         assert_eq!(loose.len(), 1);
         assert_eq!(loose[0].url, "thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=");
+    }
+
+    /// 从网页 / 聊天复制的链接常带前导空白或零宽字符 / BOM：仍识别为链接，选项行语义不变。
+    #[test]
+    fn parse_tolerates_leading_whitespace_and_invisible_chars() {
+        let url = "https://a.example/x.exe";
+        for text in [
+            format!(" {url}"),
+            format!("\t{url}"),
+            format!("\u{200B}{url}"),
+            format!("\u{FEFF}{url}"),
+            format!("  \u{2060}{url}\u{200D}"),
+        ] {
+            let entries = parse_entries(&text, false);
+            assert_eq!(entries.len(), 1, "{text:?}");
+            assert_eq!(entries[0].url, url, "{text:?}");
+        }
+        let entries = parse_entries(
+            "https://a.example/a\n  out=a.bin\n  https://a.example/b\n\tchecksum=md5=ff",
+            false,
+        );
+        assert_eq!(
+            entries,
+            vec![
+                UrlEntry {
+                    url: "https://a.example/a".to_owned(),
+                    file_name: "a.bin".to_owned(),
+                    ..UrlEntry::default()
+                },
+                UrlEntry {
+                    url: "https://a.example/b".to_owned(),
+                    checksum: "md5=ff".to_owned(),
+                    ..UrlEntry::default()
+                },
+            ]
+        );
+        assert!(parse_entries("  out=orphan.bin", false).is_empty());
     }
 
     #[test]

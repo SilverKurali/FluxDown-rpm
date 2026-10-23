@@ -10,6 +10,7 @@ import {
   CirclePause,
   Cpu,
   Globe,
+  Link2,
   Plus,
   Layers,
   Rows3,
@@ -23,16 +24,18 @@ import { categoryIconByKey } from '../../../lib/category-icons'
 import { cn } from '../../../lib/cn'
 import { LATER_QUEUE_ID, MAIN_QUEUE_ID, rpc, useAgent, useConnection, usePref, usePrefBool } from '../../../lib/rpc'
 import { cloudPresenceKnown } from '../../../lib/cloud-presence'
-import type { CustomCategoryDto, QueueDto } from '../../../lib/rpc'
+import type { CustomCategoryDto, LinkDeviceInfo, QueueDto } from '../../../lib/rpc'
 import { ContextMenuArea, Icon, confirmDialog } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
 import type { MenuEntry } from '../../../ui'
-import { openQueueManager } from '../dialogs'
+import { openNewDownload, openQueueManager } from '../dialogs'
 import { SidebarCounts } from '../model/counts'
-import { mergeDevices, sidebarDevices } from '../model/devices'
+import { mergeDevices } from '../model/devices'
+import type { DeviceEntry } from '../model/devices'
 import { LOCAL_DEVICE, SIDEBAR_SECTION_PREFS, STATUS_FILTERS, sameSelection } from '../model/filters'
 import type { DownloadFilter, DownloadStatusFilter, SidebarSelection } from '../model/filters'
 import { categoryLabel, useDownloads } from '../state'
+import { RenameLinkDialog, confirmRemoveLinkDevice } from '../../settings/sections/account/PairedDevicesCard'
 
 type Section = 'status' | 'queues' | 'devices'
 
@@ -187,13 +190,17 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const showCategory = usePrefBool(SIDEBAR_SECTION_PREFS.category, true)
   const loggedIn = useAgent((snapshot) => snapshot.session !== null && snapshot.session !== undefined, false)
   const devicesPref = usePref<unknown>(SIDEBAR_SECTION_PREFS.devices)
-  // 设备区三态：显式设置按值；未设置时有任何设备才显示。
-  const sidebarEntries = useMemo(
-    () => sidebarDevices(mergeDevices(cloudDevices, linkedDevices, { cloud: cloudReady, local: localReady })),
+  // 其他设备 = 云其他设备（含挂接直连）+ 独立直连；云条目可选中筛选任务，独立直连只作为「下载到」入口。
+  const otherEntries = useMemo(
+    () => mergeDevices(cloudDevices, linkedDevices, { cloud: cloudReady, local: localReady }),
     [cloudDevices, linkedDevices, cloudReady, localReady],
   )
+  const cloudEntries = useMemo(() => otherEntries.filter((entry) => entry.kind === 'cloud'), [otherEntries])
+  const linkEntries = useMemo(() => otherEntries.filter((entry) => entry.kind === 'link'), [otherEntries])
+  const [renamingLink, setRenamingLink] = useState<LinkDeviceInfo | null>(null)
+  // 设备区三态：显式设置按值；未设置时登录或有任何其他设备才显示。
   const showDevices =
-    typeof devicesPref === 'boolean' ? devicesPref : loggedIn || sidebarEntries.length > 0
+    typeof devicesPref === 'boolean' ? devicesPref : loggedIn || otherEntries.length > 0
 
   const categoryEntries = useMemo<CustomCategoryDto[]>(
     () => categories.visible().map((rule) => rule.dto).filter((dto) => dto.builtinType !== 'all'),
@@ -263,12 +270,33 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 
   const devices: { id: string; label: string; online: boolean | null }[] = [
     { id: LOCAL_DEVICE, label: t('thisDevice'), online: true },
-    ...sidebarEntries.map((device) => ({
+    ...cloudEntries.map((device) => ({
       id: device.id,
       label: device.name,
       online: device.online,
     })),
   ]
+
+  const downloadToLink = (device: DeviceEntry) => {
+    onNavigate?.()
+    openNewDownload({ target: `link:${device.id}` })
+  }
+
+  const linkMenu = (device: DeviceEntry): MenuEntry[] => {
+    const info = linkedDevices.find((item) => item.fingerprint === device.id)
+    const entries: MenuEntry[] = [
+      { type: 'item', key: 'download', label: t('deviceDownloadToThis'), onSelect: () => downloadToLink(device) },
+    ]
+    if (info) {
+      entries.push(
+        { type: 'item', key: 'rename', label: t('linkedDeviceRename'), onSelect: () => setRenamingLink(info) },
+        { type: 'separator', key: 'sep' },
+        { type: 'item', key: 'unpair', label: t('localDeviceUnpair'), destructive: true, onSelect: () => void confirmRemoveLinkDevice(t, info) },
+      )
+    }
+    return entries
+  }
+
   const openAddDevice = () => {
     onNavigate?.()
     void navigate({ to: '/settings/$category', params: { category: 'account' } })
@@ -421,6 +449,18 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
               />
             )
           })}
+          {linkEntries.map((device) => (
+            <ContextMenuArea key={device.id} entries={() => linkMenu(device)} title={device.name}>
+              <NavRow
+                selected={false}
+                label={device.online === null ? `${device.name} · ${t('devicePresenceUnknown')}` : device.name}
+                icon={Link2}
+                count={0}
+                dot={device.online === true}
+                onClick={() => downloadToLink(device)}
+              />
+            </ContextMenuArea>
+          ))}
           <NavRow
             selected={false}
             label={t('addDeviceEntry')}
@@ -436,6 +476,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <nav className="flex h-full w-full min-w-0 flex-col gap-3 overflow-y-auto overflow-x-hidden bg-chrome px-2 pt-2 pb-safe">
       {sections}
+      {renamingLink ? <RenameLinkDialog device={renamingLink} onClose={() => setRenamingLink(null)} /> : null}
     </nav>
   )
 }

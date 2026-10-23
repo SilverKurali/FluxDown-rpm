@@ -374,6 +374,17 @@ public struct ChangeNicknameParams: Sendable, Hashable, Codable {
     public init(nickname: String) { self.nickname = nickname }
 }
 
+/// 删除账号：`currentPassword` 与 `code`（`sendDeleteCode` 发到绑定邮箱）二选一，nil 字段不编码。
+public struct DeleteAccountParams: Sendable, Hashable, Codable {
+    public var currentPassword: String?
+    public var code: String?
+
+    public init(currentPassword: String? = nil, code: String? = nil) {
+        self.currentPassword = currentPassword
+        self.code = code
+    }
+}
+
 /// 已登录修改 / 设置密码：`currentPassword` 与 `code`（`sendPasswordCode` 发到绑定邮箱）二选一。
 public struct ChangePasswordParams: Sendable, Hashable, Codable {
     public var newPassword: String

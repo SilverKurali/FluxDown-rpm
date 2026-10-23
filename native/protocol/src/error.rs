@@ -153,6 +153,8 @@ pub enum ErrorReason {
     NotifyDisabled,
     /// 云端推送：渠道配置无效（Device Key / 主题 / 机器人地址不合法，或该种类暂不可用）。
     NotifyTargetInvalid,
+    /// 提示音试听：文件缺失、格式不受支持或系统无可用播放器。
+    SoundUnplayable,
     /// 套餐购买：云端未开放支付。
     PaymentDisabled,
     /// 套餐购买：支付网关建单失败（可稍后重试）。

@@ -28,6 +28,10 @@ pub const REMEMBER_LAST_SAVE_DIR_PREF: &str = "download.remember_last_save_dir";
 pub const SAVE_DIR_HISTORY_PREF: &str = "download.save_dir_history";
 /// 本机偏好：是否记录并在新建下载中列出保存目录历史（缺省开启；设备本地）。
 pub const SAVE_DIR_HISTORY_ENABLED_PREF: &str = "download.save_dir_history_enabled";
+/// 本机偏好：下载限速最近自定义值（KB/s 整数数组，最新在前；设备本地，不进云同步）。
+pub const SPEED_LIMIT_RECENT_PREF: &str = "download.speed_limit_recent_kbps";
+/// 本机偏好：上传限速最近自定义值（KB/s 整数数组，最新在前；设备本地，不进云同步）。
+pub const UPLOAD_LIMIT_RECENT_PREF: &str = "download.upload_limit_recent_kbps";
 /// 本机偏好：新建下载「下载到」上次选择的目标（`local` / `cloud:<id>` / `link:<fp>`），
 /// 设备本地，不进云同步。
 pub const LAST_DOWNLOAD_TARGET_PREF: &str = "download.last_target";
@@ -585,15 +589,6 @@ impl DownloadsController {
             !self.agent_stale && self.cloud_connected,
             !self.agent_stale,
         )
-    }
-
-    /// 侧栏设备区与设备筛选的条目：只列云条目（含挂接直连的）。独立直连设备是一次性投递目标，
-    /// 没有任务视图，不进侧栏。
-    #[must_use]
-    pub(crate) fn sidebar_devices(&self) -> Vec<DeviceEntry> {
-        let mut devices = self.other_devices();
-        devices.retain(|device| !device.is_standalone_link());
-        devices
     }
 
     #[must_use]

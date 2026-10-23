@@ -3,9 +3,10 @@ name: Release
 # ── 统一发布：一个 vX.Y.Z（预览 vX.Y.Z-rc.N）GitHub Release 承载本次全部组件 ──
 # 流程：changes（变更检测 + 源码解析）→ prepare-release（生成双语说明、建草稿 release）
 #       → 各 build-* 并行构建 → upload-<组件>（上传产物 + SHA256SUMS-<组件>.txt 完成哨兵，
-#       同步 OSS）→ publish-release（汇总校验和、刷新说明头部、草稿转正、决定 latest）。
-# 组件之间互不阻断：某组件打包失败只让它自己的 upload 被跳过，其余组件照常发布；
-# 官网 /api/release 只认有完成哨兵的组件，缺失组件自动回落到它上一个完整版本。
+#       同步 OSS）→ publish-release（汇总校验和、刷新说明头部、全部组件齐全才草稿转正、决定 latest）。
+# 组件之间互不阻断：某组件打包失败只让它自己的 upload 被跳过，其余组件照常上传；
+# 但 release 保持草稿（不触发 published webhook、官网与客户端仍提供上一版本），直到 tag 与历次补发
+# 累计应发布的组件全部有完成哨兵（含 Server Docker）后才由那次运行转正。
 # 补救：
 #   - 偶发失败（源码无需改动）：本次运行页 “Re-run failed jobs”，只重跑失败组件与收尾 job。
 #   - 需要改代码 / 改打包脚本：修复合入发布分支后 workflow_dispatch 补发该组件，
@@ -98,6 +99,8 @@ jobs:
       cli: ${{ steps.detect.outputs.cli }}
       engine: ${{ steps.detect.outputs.engine }}
       any: ${{ steps.detect.outputs.any }}
+      # 本次应发布组件（逗号分隔，规范顺序）：prepare-release 播种 / publish-release 判定共用
+      expected: ${{ steps.expected.outputs.list }}
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
@@ -324,6 +327,22 @@ jobs:
             echo "any=$ANY"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::Components changed in ${PREV:-<none>}..${TAG}: app=$APP extension=$EXTENSION server=$SERVER mobile=$MOBILE cli=$CLI engine=$ENGINE"
+
+      - name: List expected components
+        id: expected
+        env:
+          C_APP: ${{ steps.detect.outputs.app }}
+          C_EXTENSION: ${{ steps.detect.outputs.extension }}
+          C_SERVER: ${{ steps.detect.outputs.server }}
+          C_CLI: ${{ steps.detect.outputs.cli }}
+          C_MOBILE: ${{ steps.detect.outputs.mobile }}
+        run: |
+          EXPECTED=""
+          for c in APP EXTENSION SERVER CLI MOBILE; do
+            v="C_$c"
+            if [ "${!v}" = true ]; then EXPECTED="${EXPECTED:+${EXPECTED},}${c,,}"; fi
+          done
+          echo "list=$EXPECTED" >> "$GITHUB_OUTPUT"
 
   # ── 前置 Job: 引擎协议与依赖门禁 ──
   verify-engine:
@@ -1339,8 +1358,8 @@ jobs:
           name: server-bin-${{ matrix.platform }}
           path: release-assets/*
 
-  # ── 并行 Job 5c': NAS/软路由包（OpenWrt ipk + QNAP qpkg + 群晖 spk + 飞牛 fpk，复用 linux musl 静态产物）──
-  # ipk 纯脚本手打（packaging/openwrt/build_ipk.sh，无需 OpenWrt SDK）；
+  # ── 并行 Job 5c': NAS/软路由包（OpenWrt ipk/apk + QNAP qpkg + 群晖 spk + 飞牛 fpk，复用 linux musl 静态产物）──
+  # ipk / apk 纯脚本手打（packaging/openwrt/build.sh，无需 OpenWrt SDK；apk 需 apk-tools v3，在 alpine 容器内打）；
   # qpkg 用官方 QDK qbuild（packaging/qnap/build_qpkg.sh）。
   # 不跑 InstallToUbuntu.sh（其 apt 依赖列表含 ubuntu 24.04 已不存在的 `python` 包），手动装 QDK。
   # spk 纯脚本手打（packaging/synology/build_spk.sh，做法同 SynoCommunity spksrc，无需群晖 toolkit）；
@@ -1396,10 +1415,25 @@ jobs:
           VERSION=${{ steps.version.outputs.VERSION }}
           X64="extracted/fluxdown-server-${VERSION}-linux-x64"
           A64="extracted/fluxdown-server-${VERSION}-linux-arm64"
-          ./packaging/openwrt/build_ipk.sh server "$VERSION" "$X64" x86_64 release-assets
-          ./packaging/openwrt/build_ipk.sh server "$VERSION" "$A64" \
+          ./packaging/openwrt/build.sh ipk server "$VERSION" "$X64" x86_64 release-assets
+          ./packaging/openwrt/build.sh ipk server "$VERSION" "$A64" \
             aarch64_generic,aarch64_cortex-a53,aarch64_cortex-a72,aarch64_cortex-a76 release-assets
-          ./packaging/openwrt/build_ipk.sh luci "$VERSION" release-assets
+          ./packaging/openwrt/build.sh ipk luci "$VERSION" release-assets
+
+      # OpenWrt 25.12 起改用 apk（apk-tools v3）；`apk mkpkg` 只有 alpine 3.24+ 自带。
+      # mkpkg 默认 compat 3.0.0_pre1，25.12 自带的 apk 3.0.5 可直接安装。
+      - name: Build OpenWrt apk
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          X64="extracted/fluxdown-server-${VERSION}-linux-x64"
+          A64="extracted/fluxdown-server-${VERSION}-linux-arm64"
+          docker run --rm -v "$PWD:/w" -w /w \
+            -e VERSION="$VERSION" -e X64="$X64" -e A64="$A64" alpine:3.24 sh -ec '
+              ./packaging/openwrt/build.sh apk server "$VERSION" "$X64" x86_64 release-assets
+              ./packaging/openwrt/build.sh apk server "$VERSION" "$A64" \
+                aarch64_generic,aarch64_cortex-a53,aarch64_cortex-a72,aarch64_cortex-a76 release-assets
+              ./packaging/openwrt/build.sh apk luci "$VERSION" release-assets
+            '
 
       - name: Build QNAP qpkg
         run: |
@@ -1630,6 +1664,8 @@ jobs:
   # 与构建并行；上传 job 只在草稿就绪后开始。
   # tag 推送：生成说明并写入（release 已存在时只刷新说明，不改草稿/发布状态）；
   # 手动补发：release 已存在则不动，缺失时以兜底标题新建草稿（说明可事后手改）。
+  # 写入的说明经 release_publish.py --seed-notes 带上本次应发布组件（与已有记录取并集），
+  # 即使 publish-release 没跑到，后续补发也不会把缺组件的 release 提前转正。
   # 演练：在本 runner 打本地 tag 后照常生成说明，写入 job summary 与 artifact，不建草稿。
   prepare-release:
     name: Prepare Release
@@ -1709,6 +1745,7 @@ jobs:
         if: needs.changes.outputs.rehearsal == 'false'
         env:
           EXISTS: ${{ steps.existing.outputs.exists }}
+          EXPECTED: ${{ needs.changes.outputs.expected }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             NOTES=RELEASE_NOTES.md
@@ -1719,6 +1756,10 @@ jobs:
             NOTES="$RUNNER_TEMP/notes.md"
             echo "Release ${TAG}" > "$NOTES"
           fi
+
+          SEED=(--tag "$TAG" --expected "$EXPECTED" --seed-notes "$NOTES")
+          if [ "$EXISTS" = true ]; then SEED+=(--release-exists); fi
+          python3 .github/scripts/release_publish.py "${SEED[@]}"
 
           if [ "$EXISTS" = true ]; then
             gh release edit "$TAG" --notes-file "$NOTES"
@@ -1977,9 +2018,10 @@ jobs:
           dry-run: ${{ needs.changes.outputs.rehearsal != 'false' }}
 
   # ── Release Job 3: 收尾发布（tag 推送与补发都跑，幂等）──
-  # 汇总 SHA256SUMS.txt、刷新说明头部（已发布组件 + 服务器/CLI 安装说明）、草稿转正、
-  # 决定 latest（稳定版 + 桌面端完整 + 最高稳定版本）。有组件未完成时发布其余组件后
-  # 以失败结束并在 job summary 给出补发命令。实现见 .github/scripts/release_publish.py。
+  # 汇总 SHA256SUMS.txt、刷新说明头部（已发布组件 + 服务器/CLI 安装说明 + 累计应发布组件 /
+  # Docker 状态）、决定 latest（稳定版 + 桌面端完整 + 最高稳定版本）。累计应发布组件全部完成才
+  # 草稿转正；否则保持草稿、以失败结束并在 job summary 给出补发命令，补发齐全的那次运行转正。
+  # 实现见 .github/scripts/release_publish.py。
   # 演练：同一脚本以 --rehearsal-dir 读取本次的哨兵与说明 artifact，只产出总校验和、release 正文
   # 与计划中的 gh 操作预览（rehearsal-release-preview），不调用任何 gh 写操作。
   publish-release:
@@ -2033,17 +2075,8 @@ jobs:
           TAG: ${{ needs.changes.outputs.tag }}
           DOCKER_RESULT: ${{ needs.build-server-docker.result }}
           REHEARSAL: ${{ needs.changes.outputs.rehearsal }}
-          C_APP: ${{ needs.changes.outputs.app }}
-          C_EXTENSION: ${{ needs.changes.outputs.extension }}
-          C_SERVER: ${{ needs.changes.outputs.server }}
-          C_CLI: ${{ needs.changes.outputs.cli }}
-          C_MOBILE: ${{ needs.changes.outputs.mobile }}
+          EXPECTED: ${{ needs.changes.outputs.expected }}
         run: |
-          EXPECTED=""
-          for c in APP EXTENSION SERVER CLI MOBILE; do
-            v="C_$c"
-            if [ "${!v}" = true ]; then EXPECTED="${EXPECTED:+${EXPECTED},}${c,,}"; fi
-          done
           MODE=()
           if [ "$REHEARSAL" != false ]; then MODE=(--rehearsal-dir rehearsal); fi
           python3 .github/scripts/release_publish.py \
@@ -2062,7 +2095,7 @@ jobs:
 
   # ── 发布公告：草稿转正后推送到 Telegram 频道（t.me/fluxdown）──
   # release 由 GITHUB_TOKEN 发布，不会触发 on: release 事件，所以公告在本流水线内发送。
-  # 部分组件失败时 publish-release 以非零退出但 release 已转正，照常公告；仍为草稿则跳过。
+  # 只有组件齐全、本次把草稿转正时才公告（tag 推送或补齐的那次补发）；仍为草稿则跳过。
   # 公告失败不影响发布结果。
   notify-telegram:
     name: Notify Telegram Channel

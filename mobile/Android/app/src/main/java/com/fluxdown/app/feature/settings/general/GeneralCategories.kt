@@ -32,6 +32,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** 「自定义分类」行 id（下载页；与 iOS 一致）。 */
+internal const val CATEGORIES_ROW_ID = "download.categories"
+
 /** 分类编辑器的呈现目标；每次打开新建一个实例（以实例身份区分「再次打开」，草稿随之重置）。 */
 internal class CategoryTarget(val existing: CustomCategoryDto?)
 
@@ -218,7 +221,7 @@ internal fun GlassSectionScope.categoryRows(
     onDeleteRequest: (CustomCategoryDto) -> Unit,
 ) {
     row {
-        SettingRowBox(ctx, GeneralRow.Categories.id, CustomCategoryDto.PREFERENCE_KEY) {
+        SettingRowBox(ctx, CATEGORIES_ROW_ID, CustomCategoryDto.PREFERENCE_KEY) {
             FluxListRow(
                 title = str(R.string.customCategories),
                 subtitle = str(R.string.categoryPriorityNote),

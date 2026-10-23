@@ -3390,6 +3390,9 @@ impl Db {
             // 任务的文件被删除或移动时的动作："keep" = 保留任务记录（默认，
             // 仅标记 file_missing）；"delete" = 扫描到文件消失后自动删除任务记录。
             ("file_missing_action", "keep"),
+            // 已完成任务记录保留天数：超期的「已完成」记录被自动清理（只删记录，
+            // 不删文件，做种中的任务跳过）；"0" = 永不清理（默认）。
+            ("completed_record_retention_days", "0"),
             // 空闲（无活跃/排队任务）时是否仍执行周期性文件跟踪扫描：
             // "0" = 完全空闲期跳过定时扫描（默认，避免唤醒 NAS 休眠硬盘）；
             // "1"/"true" = 照常扫描。窗口聚焦、手动重扫不受影响。
@@ -3489,6 +3492,7 @@ impl Db {
             .await?;
         }
         self.migrate_idle_file_scan_default_off().await?;
+        self.migrate_completed_at_backfill().await?;
         #[cfg(feature = "ed2k")]
         self.migrate_ed2k_server_sub_https().await?;
         Ok(())
@@ -3515,6 +3519,72 @@ impl Db {
             .await?;
         }
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// 一次性迁移：保留期清理依赖 `completed_at`，而旧版本完成的任务可能没有该时间戳。
+    /// 仅在迁移标记首次写入成功时，把「已完成但 completed_at 为空」的行补写为当前时刻，
+    /// 让遗留记录的保留窗口从升级时开始计算（不会因缺时间戳而被立即清理或永不清理）。
+    /// 标记与回填在同一事务。
+    async fn migrate_completed_at_backfill(&self) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
+        let marked = sqlx::query(
+            "INSERT INTO config (key, value) VALUES ('migration_completed_at_backfill', '1')
+             ON CONFLICT (key) DO NOTHING",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if marked > 0 {
+            sqlx::query(
+                "UPDATE tasks SET completed_at = $1 WHERE status = 3 AND completed_at = ''",
+            )
+            .bind(chrono_now())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 列出已超过保留期的「已完成」任务 id：`status = 3`、`completed_at` 非空且早于
+    /// `cutoff_secs`（Unix 秒），并排除做种中 / 排队做种的任务。最多返回 `limit` 条，
+    /// 按完成时间从旧到新。
+    pub async fn list_expired_completed_task_ids(
+        &self,
+        cutoff_secs: i64,
+        limit: i64,
+    ) -> Result<Vec<String>, DbError> {
+        let sql = format!(
+            "SELECT id FROM tasks
+             WHERE status = 3 AND completed_at <> ''
+               AND seeding_status NOT IN ({active}, {queued})
+               AND (CASE WHEN completed_at = '' THEN 0 ELSE CAST(completed_at AS BIGINT) END) < $1
+             ORDER BY completed_at ASC, id ASC
+             LIMIT $2",
+            active = crate::bt_seeding::SEEDING_STATUS_ACTIVE,
+            queued = crate::bt_seeding::SEEDING_STATUS_QUEUED,
+        );
+        let ids = sqlx::query_scalar(AssertSqlSafe(sql))
+            .bind(cutoff_secs)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(ids)
+    }
+
+    /// 测试专用：直接写入 `completed_at`（正常路径只会写入当前时刻，无法造出「旧」记录）。
+    #[cfg(test)]
+    pub(crate) async fn set_completed_at_for_test(
+        &self,
+        id: &str,
+        completed_at: &str,
+    ) -> Result<(), DbError> {
+        sqlx::query("UPDATE tasks SET completed_at = $1 WHERE id = $2")
+            .bind(completed_at)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -8876,6 +8946,90 @@ mod tests {
             db.get_config("ed2k_server_sub_urls").await.expect("read"),
             Some(user.to_owned())
         );
+        close_test_db(&db, dir).await;
+    }
+
+    /// 直接设置测试行的 status / completed_at / seeding_status。
+    async fn set_completion(db: &Db, id: &str, status: i32, completed_at: &str, seeding: i32) {
+        sqlx::query(
+            "UPDATE tasks SET status = $1, completed_at = $2, seeding_status = $3 WHERE id = $4",
+        )
+        .bind(status)
+        .bind(completed_at)
+        .bind(seeding)
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .expect("set completion");
+    }
+
+    /// 保留期查询契约：只选 status=3、completed_at 非空且严格早于 cutoff、
+    /// 非做种（1/8）的任务；其余（较新、空时间戳、未完成、做种中）一律不选。
+    #[tokio::test]
+    async fn list_expired_completed_selects_only_old_non_seeding_rows() {
+        let (db, dir) = open_test_db().await;
+        for id in [
+            "old", "boundary", "new", "blank", "paused", "seed1", "seed8", "seedstop",
+        ] {
+            insert_task_with_size(&db, id, 10).await;
+        }
+        set_completion(&db, "old", 3, "1000", 0).await;
+        set_completion(&db, "boundary", 3, "5000", 0).await;
+        set_completion(&db, "new", 3, "9000", 0).await;
+        set_completion(&db, "blank", 3, "", 0).await;
+        set_completion(&db, "paused", 2, "1000", 0).await;
+        set_completion(&db, "seed1", 3, "1000", 1).await;
+        set_completion(&db, "seed8", 3, "1000", 8).await;
+        // 其他做种终态（用户停止等）不是在做种，可清理。
+        set_completion(&db, "seedstop", 3, "2000", 2).await;
+
+        let ids = db
+            .list_expired_completed_task_ids(5000, 100)
+            .await
+            .expect("list");
+        assert_eq!(ids, ["old", "seedstop"]);
+
+        let limited = db
+            .list_expired_completed_task_ids(5000, 1)
+            .await
+            .expect("limit");
+        assert_eq!(limited, ["old"]);
+        close_test_db(&db, dir).await;
+    }
+
+    /// 迁移契约：已完成但无时间戳的遗留行仅在首次迁移时被补写；
+    /// 其他状态与已有时间戳不动，迁移后新出现的空时间戳行不再被改写。
+    #[tokio::test]
+    async fn completed_at_backfill_migrates_once() {
+        let (db, dir) = open_test_db().await;
+        db.init_default_config("/tmp").await.expect("init");
+        insert_task_with_size(&db, "legacy", 10).await;
+        insert_task_with_size(&db, "stamped", 10).await;
+        insert_task_with_size(&db, "running", 10).await;
+        set_completion(&db, "legacy", 3, "", 0).await;
+        set_completion(&db, "stamped", 3, "1234", 0).await;
+        set_completion(&db, "running", 1, "", 0).await;
+
+        db.delete_config("migration_completed_at_backfill")
+            .await
+            .expect("drop marker");
+        db.init_default_config("/tmp").await.expect("migrate");
+        let load = |id: &'static str| {
+            let db = db.clone();
+            async move { db.load_task_by_id(id).await.expect("load").expect("row") }
+        };
+        let legacy = load("legacy").await.completed_at;
+        assert!(
+            legacy.parse::<u64>().is_ok_and(|v| v > 1_000_000),
+            "遗留行必须补写当前时间，got {legacy:?}"
+        );
+        assert_eq!(load("stamped").await.completed_at, "1234");
+        assert_eq!(load("running").await.completed_at, "");
+
+        // 迁移后再次启动：新出现的空时间戳行不得被改写。
+        set_completion(&db, "legacy", 3, "", 0).await;
+        db.init_default_config("/tmp").await.expect("restart");
+        assert_eq!(load("legacy").await.completed_at, "");
         close_test_db(&db, dir).await;
     }
 }

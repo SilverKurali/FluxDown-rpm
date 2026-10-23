@@ -145,6 +145,7 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         | ErrorReason::NotifyChannelLimit
         | ErrorReason::NotifyDisabled
         | ErrorReason::NotifyTargetInvalid
+        | ErrorReason::SoundUnplayable
         | ErrorReason::Unknown => return None,
     })
 }

@@ -159,6 +159,8 @@ object HostMethod {
     const val agentProfileChangeNickname = "agent.profile.changeNickname"
     const val agentProfileSendPasswordCode = "agent.profile.sendPasswordCode"
     const val agentProfileChangePassword = "agent.profile.changePassword"
+    const val agentProfileSendDeleteCode = "agent.profile.sendDeleteCode"
+    const val agentProfileDeleteAccount = "agent.profile.deleteAccount"
     const val agentGatewayGet = "agent.gateway.get"
     const val agentGatewayPatch = "agent.gateway.patch"
     /** 仅供本机官方 UI 展示/复制用户 token；结果 `{ "userToken": "..." }`（未配置为空串）。 */
@@ -226,6 +228,8 @@ object HostMethod {
     const val agentPlatformSetUrlProtocol = "agent.platform.setUrlProtocol"
     /** 系统文件管理器为文件显示的图标（PNG）；参数见 `PlatformFileIconParams`。 */
     const val agentPlatformFileIcon = "agent.platform.fileIcon"
+    /** 由 agent 在本机播放一次提示音偏好值；仅桌面，移动端不使用。 */
+    const val agentSoundPreview = "agent.sound.preview"
     const val agentCaptureSubmit = "agent.capture.submit"
     /** 从本机 `.torrent` 文件建任务：agent 读文件、上传 daemon blob 后调用 `daemon.task.create`。 */
     const val agentCaptureSubmitTorrentFile = "agent.capture.submitTorrentFile"

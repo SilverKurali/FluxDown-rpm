@@ -92,6 +92,8 @@ export const download = defineMessages({
       fnosTitle: "fnOS",
       fnosDesc: "NAS · fnOS App Center package",
       luci: "LuCI app",
+      openwrtApk: "25.12+ · apk",
+      openwrtIpk: "24.10 and earlier · opkg",
       guide: "Setup guide",
       dockerGuide: "Docker guide",
     },
@@ -104,6 +106,11 @@ export const download = defineMessages({
       title: "Android",
       desc: "APK builds per CPU ABI. Not sure which one? Take the universal build. Upgrading from the old Flutter-based app: the new app is signed with a new certificate, so uninstall the old one first (this clears its local data).",
       universal: "Universal",
+    },
+    ios: {
+      title: "iOS",
+      desc: "Public beta on TestFlight. Install Apple's TestFlight app, then open the invite link to join. Beta builds expire after 90 days; TestFlight delivers updates automatically.",
+      join: "Join the TestFlight beta",
     },
     ext: {
       eyebrow: "Browser",
@@ -248,6 +255,8 @@ export const download = defineMessages({
       fnosTitle: "飞牛 fnOS",
       fnosDesc: "NAS · 飞牛应用中心安装包",
       luci: "LuCI 界面",
+      openwrtApk: "25.12 起 · apk",
+      openwrtIpk: "24.10 及更早 · opkg",
       guide: "部署指南",
       dockerGuide: "Docker 指南",
     },
@@ -260,6 +269,11 @@ export const download = defineMessages({
       title: "Android",
       desc: "按 CPU 架构分别提供 APK。不确定选哪个?下载通用版即可。从旧版(Flutter 版)升级:新版换用了新的签名证书,需先卸载旧版再安装(会清除旧版本地数据)。",
       universal: "通用版",
+    },
+    ios: {
+      title: "iOS",
+      desc: "已开放 TestFlight 公开测试。先安装 Apple 的 TestFlight App,再打开邀请链接加入。测试版每个构建 90 天后过期,新版本由 TestFlight 自动推送。",
+      join: "加入 TestFlight 公测",
     },
     ext: {
       eyebrow: "浏览器",

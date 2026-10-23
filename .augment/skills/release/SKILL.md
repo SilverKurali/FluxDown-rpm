@@ -85,7 +85,7 @@ gh run watch
 
 ## 4b. 组件打包失败 → 补发（不重跑其余组件）
 
-某组件失败时其余组件照常发布，`publish-release` 以失败结束并在 job summary 列出缺失组件与补发命令。
+某组件失败时其余组件照常上传，但 **release 保持草稿**（不触发 `published` webhook / Telegram 公告，官网与客户端仍提供上一版本）；`publish-release` 以失败结束并在 job summary 列出缺失组件与补发命令。tag 与历次补发的应发布组件累计记在说明头部 `<!-- fluxdown:release:begin … expected=… docker=… -->`，全部有完成哨兵（含 Server Docker）后由补齐的那次运行转正。
 
 ```bash
 # 偶发失败（源码无需改动）：在该运行页点 “Re-run failed jobs”，或

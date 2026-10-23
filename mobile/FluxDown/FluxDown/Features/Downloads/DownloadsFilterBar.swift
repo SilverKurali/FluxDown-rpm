@@ -59,7 +59,7 @@ struct DownloadsFilterBar: View {
     private var scopeItems: [ScopeItem<StatusFolder>] {
         // 任务表分页载入中：计数是半份列表算出来的，不显示（nil）。
         let loaded = model.list.loaded
-        return StatusFolder.allCases.map { folder in
+        return StatusFolder.visible.map { folder in
             let count = model.facets.count(folder)
             let tone: ScopeCountTone = switch folder {
             case .active: .accent

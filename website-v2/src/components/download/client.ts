@@ -11,6 +11,7 @@ import type { Lang } from "@/i18n/config";
 import { formatSize, pickPath, versionAnchor, type ReleaseAsset, type ReleaseInfo } from "@/lib/release-format";
 import { withBase } from "@/lib/base";
 import { assetDownloadUrl } from "@/lib/download-source";
+import { TESTFLIGHT_URL } from "@/lib/site-nav";
 
 type Channel = "stable" | "frontier";
 type Os = "windows" | "macos" | "linux" | "android" | "ios";
@@ -263,13 +264,20 @@ function init(root: HTMLElement) {
       primaryBackup.href = assetDownloadUrl(pick.asset, "github");
       primary.title = pick.asset.name;
       primaryLabel.textContent = pick.label;
+    } else if (os === "ios") {
+      primary.href = TESTFLIGHT_URL;
+      primary.target = "_blank";
+      primary.rel = "noopener";
+      primaryBackup.removeAttribute("href");
+      primary.removeAttribute("title");
+      primaryLabel.textContent = t.ios.join;
     } else {
       primary.href = os === "android" ? "#android" : "#desktop";
       primary.removeAttribute("target");
       primaryBackup.removeAttribute("href");
       primary.removeAttribute("title");
       primaryLabel.textContent =
-        osName && root.dataset.state !== "loading" && (os === "ios" || release) ? t.hero.noBuild(osName) : t.hero.allPlatforms;
+        osName && root.dataset.state !== "loading" && release ? t.hero.noBuild(osName) : t.hero.allPlatforms;
     }
     const altBackup = $<HTMLAnchorElement>("[data-alt-backup]")!;
     altLink.hidden = !pick.alt;

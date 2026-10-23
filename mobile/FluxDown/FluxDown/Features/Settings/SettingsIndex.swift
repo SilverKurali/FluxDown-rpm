@@ -81,7 +81,7 @@ enum SettingsIndex {
         "general.sidebarStatus": ["searchKeywordsSidebarVisibility"],
         "general.sidebarQueues": ["searchKeywordsSidebarVisibility"],
         "general.sidebarCategory": ["searchKeywordsSidebarVisibility"],
-        "general.categories": ["searchKeywordsCustomCategories"],
+        "download.categories": ["searchKeywordsCustomCategories"],
         "appearance.language": ["searchKeywordsLanguage"],
         "appearance.mode": ["searchKeywordsThemeMode"],
         "appearance.color": ["searchKeywordsThemeColor"],

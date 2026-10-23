@@ -1,11 +1,11 @@
-//! 通用：启动与托盘、系统集成、侧边栏与活动栏可见性、自定义分类。
+//! 通用：启动与托盘、系统集成、侧边栏与活动栏可见性。
 
 use fluxdown_protocol::capture_link::OpenAssociation;
 use fluxdown_protocol::{PlatformIntegrationDto, ShellStatusDto, TrayUnavailableReason};
 use fluxdown_ui_components::FluxIcon;
 use gpui::App;
 
-use super::{SectionContext, categories};
+use super::SectionContext;
 use crate::ActivityBarToggle;
 use crate::ui::{Control, SettingsPage, SettingsSection};
 
@@ -42,7 +42,6 @@ pub(crate) fn page(
     sections.extend([
         sidebar_section(ctx),
         activity_bar_section(ctx, activity_bar),
-        categories::group(ctx, cx),
     ]);
     page.sections(sections)
 }

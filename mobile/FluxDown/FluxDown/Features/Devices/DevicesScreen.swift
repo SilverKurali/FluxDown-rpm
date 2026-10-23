@@ -412,6 +412,7 @@ private struct DevicesContent: View {
     @ViewBuilder
     private func linkSection(state: HostState, readOnly: Bool) -> some View {
         let devices = DevicePresentation.sorted(link: state.linkDevices)
+        let attached = DeviceRules.attachedLinkFingerprints(cloud: state.cloudDevices, link: state.linkDevices)
         Section {
             if devices.isEmpty {
                 Text(L("linkedDevicesEmpty"))
@@ -425,7 +426,7 @@ private struct DevicesContent: View {
                         platform: device.platform,
                         online: device.online,
                         revoked: device.revoked,
-                        sameAccount: DevicePresentation.isSameAccount(device, cloud: state.cloudDevices),
+                        sameAccount: attached.contains(device.fingerprint),
                         grantsControl: model.linkInfos.first { $0.fingerprint == device.fingerprint }?.grantsControl ?? false
                     )
                 }

@@ -43,13 +43,17 @@ const t = download[lang];
     </div>
     <span class="chip group-yours" data-yours hidden><span class="live-dot"></span>{t.state.yours}</span>
   </div>
-  <div class="group-rows">
-    {rows.map((row) => <AssetRow {...row} fallback={fallback} />)}
-  </div>
-  <p class="group-empty" data-empty hidden>
-    {t.state.notInRelease}
-    {notifyHref && <a class="link" href={notifyHref}>{t.state.notify}</a>}
-  </p>
+  {rows.length > 0 && (
+    <Fragment>
+      <div class="group-rows">
+        {rows.map((row) => <AssetRow {...row} fallback={fallback} />)}
+      </div>
+      <p class="group-empty" data-empty hidden>
+        {t.state.notInRelease}
+        {notifyHref && <a class="link" href={notifyHref}>{t.state.notify}</a>}
+      </p>
+    </Fragment>
+  )}
   <slot />
 </div>
 

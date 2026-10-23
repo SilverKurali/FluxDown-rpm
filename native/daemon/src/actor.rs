@@ -1049,7 +1049,10 @@ async fn execute_operation(
         ActorOperation::ResumeAll => {
             engine.manager.resume_all_eligible().await;
         }
-        ActorOperation::RescanFiles => engine.manager.spawn_file_scan(),
+        ActorOperation::RescanFiles => {
+            engine.manager.spawn_file_scan();
+            engine.manager.purge_expired_completed_records(false).await;
+        }
         ActorOperation::SetTaskSeedLimits {
             task_id,
             ratio_limit_milli,
@@ -2037,6 +2040,15 @@ async fn apply_live_config<'a>(
             all.get("idle_file_scan")
                 .is_some_and(|value| value == "true" || value == "1"),
         );
+    }
+    if keys.contains(&"completed_record_retention_days") {
+        engine.manager.set_completed_record_retention_days(
+            all.get("completed_record_retention_days")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0),
+        );
+        // 设置变更立即生效（跳过去抖）；清理只删记录，失败只记日志。
+        engine.manager.purge_expired_completed_records(true).await;
     }
     if keys.contains(&"global_user_agent")
         && let Some(value) = all.get("global_user_agent")

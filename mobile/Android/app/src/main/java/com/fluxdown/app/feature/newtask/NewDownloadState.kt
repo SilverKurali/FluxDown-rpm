@@ -89,6 +89,8 @@ internal class NewDownloadState(
     private val offeredSaveDir: String,
     defaultQueueId: String,
     defaultSegments: Int,
+    /** 打开时预选的「下载到」目标（[DispatchTarget.id]）；null = 当前主机。 */
+    private val initialTargetId: String? = null,
 ) {
     var urlText by mutableStateOf(prefill)
     var saveDir by mutableStateOf(defaultSaveDir)
@@ -109,7 +111,7 @@ internal class NewDownloadState(
     var showEmptyError by mutableStateOf(false)
 
     /** 「下载到」所选远端目标的 [DispatchTarget.id]；null = 当前主机。 */
-    var targetId by mutableStateOf<String?>(null)
+    var targetId by mutableStateOf(initialTargetId)
 
     /** 远端保存目录（与 [saveDir] 各自保留，来回切换目标不互相覆盖）；空 = 目标设备默认目录。 */
     var remoteSaveDir by mutableStateOf("")
@@ -147,7 +149,7 @@ internal class NewDownloadState(
     /** 有未提交内容：关闭前需要确认。 */
     val isDirty: Boolean
         get() = urlText.isNotBlank() || rename.isNotBlank() || saveDir != initialSaveDir || queueId != initialQueueId ||
-            targetId != null || remoteSaveDir.isNotBlank() ||
+            targetId != initialTargetId || remoteSaveDir.isNotBlank() ||
             advanced.modified(single = true, singleHttp = true).isNotEmpty()
 
     /** 当前选中的远端目标；目标已不在候选里（登出 / 解除配对 / 对方解除）时回落到当前主机；`link:<fp>` 已挂接时解析为云条目。 */
@@ -266,7 +268,12 @@ internal class NewDownloadState(
          * [external] 非空 = 外部唤起：链接与请求上下文按 [addExternal] 规则预填；保存目录先显示命中分类配置的目录
          * （同 agent 捕获确认弹层），否则用主机默认目录；提交时始终以不含分类的默认目录作 offeredSaveDir，交给 Rust 路由。
          */
-        fun create(prefill: String, state: HostState, external: ExternalDownload? = null): NewDownloadState {
+        fun create(
+            prefill: String,
+            state: HostState,
+            external: ExternalDownload? = null,
+            targetId: String? = null,
+        ): NewDownloadState {
             val cfg = state.config
             val offered = cfg["default_save_dir"].orEmpty().trim()
             return NewDownloadState(
@@ -275,6 +282,7 @@ internal class NewDownloadState(
                 offeredSaveDir = offered,
                 defaultQueueId = state.defaultQueueId(),
                 defaultSegments = cfg["default_segments"]?.toIntOrNull() ?: 0,
+                initialTargetId = targetId,
             ).also { form -> external?.let(form::addExternal) }
         }
     }

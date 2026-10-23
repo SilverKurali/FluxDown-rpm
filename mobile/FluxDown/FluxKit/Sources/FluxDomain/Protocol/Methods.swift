@@ -163,6 +163,8 @@ public enum HostMethod {
     public static let agentProfileChangeNickname = "agent.profile.changeNickname"
     public static let agentProfileSendPasswordCode = "agent.profile.sendPasswordCode"
     public static let agentProfileChangePassword = "agent.profile.changePassword"
+    public static let agentProfileSendDeleteCode = "agent.profile.sendDeleteCode"
+    public static let agentProfileDeleteAccount = "agent.profile.deleteAccount"
     public static let agentGatewayGet = "agent.gateway.get"
     public static let agentGatewayPatch = "agent.gateway.patch"
     /// 仅供本机官方 UI 展示/复制用户 token；结果 `{ "userToken": "..." }`（未配置为空串）。
@@ -230,6 +232,8 @@ public enum HostMethod {
     public static let agentPlatformSetUrlProtocol = "agent.platform.setUrlProtocol"
     /// 系统文件管理器为文件显示的图标（PNG）；参数见 `PlatformFileIconParams`。
     public static let agentPlatformFileIcon = "agent.platform.fileIcon"
+    /// 由 agent 在本机播放一次提示音偏好值；仅桌面，移动端不使用。
+    public static let agentSoundPreview = "agent.sound.preview"
     public static let agentCaptureSubmit = "agent.capture.submit"
     /// 从本机 `.torrent` 文件建任务：agent 读文件、上传 daemon blob 后调用 `daemon.task.create`。
     public static let agentCaptureSubmitTorrentFile = "agent.capture.submitTorrentFile"

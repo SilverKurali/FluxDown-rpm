@@ -19,6 +19,7 @@ pub mod rpc;
 pub mod settings;
 pub mod shell_open;
 pub mod shortcuts;
+pub mod sound;
 pub mod table_sync;
 pub mod task_activity;
 pub mod update_prompt;

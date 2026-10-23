@@ -155,6 +155,8 @@ struct ProtocolChannelTests {
         #expect(HostMethod.agentCloudNotifyTelegramBindStatus == "agent.cloudNotify.telegramBindStatus")
         #expect(HostMethod.agentCloudNotifySendEmailCode == "agent.cloudNotify.sendEmailCode")
         #expect(HostMethod.agentCloudNotifyVerifyEmail == "agent.cloudNotify.verifyEmail")
+        #expect(HostMethod.agentProfileSendDeleteCode == "agent.profile.sendDeleteCode")
+        #expect(HostMethod.agentProfileDeleteAccount == "agent.profile.deleteAccount")
         #expect(HostSection.agentCloudNotify == "agent.cloudNotify")
         #expect(HostCapability.agentRemoteTasks == "agent.remoteTasks")
         #expect(HostSection.all.count == 16)
