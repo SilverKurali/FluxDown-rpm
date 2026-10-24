@@ -50,11 +50,11 @@ import {
   PROGRESS_GAP,
   PROGRESS_LABEL_WIDTH,
   rowHeightClass,
-  SELECTION_COLUMN_WIDTH,
+  selectionColumnWidth,
   TRAILING_GUTTER,
 } from './rowMetrics'
 import type { LayoutColumn } from './rowMetrics'
-import { Meta } from './rowParts'
+import { Meta, RowActionsBar } from './rowParts'
 
 interface RowProps {
   t: Translate
@@ -164,12 +164,7 @@ function RowActions({ view, labels, selected }: { view: DownloadTaskView; labels
   }
   if (buttons.length === 0) return null
   return (
-    <div
-      className={cn(
-        'absolute inset-y-0 right-1 rounded-r-[var(--fx-components-task-row-radius)] hidden items-center gap-0.5 pl-1 pr-1 group-hover/row:flex',
-        selected ? 'bg-nav-selected' : 'bg-row-hover',
-      )}
-    >
+    <RowActionsBar selected={selected}>
       {buttons.map((button) => (
         <Tooltip key={button.key} content={button.label}>
           <button
@@ -186,7 +181,7 @@ function RowActions({ view, labels, selected }: { view: DownloadTaskView; labels
           </button>
         </Tooltip>
       ))}
-    </div>
+    </RowActionsBar>
   )
 }
 
@@ -207,7 +202,7 @@ const TaskRow = memo(function TaskRow(props: RowProps) {
         )}
       >
         <div className={cn('pointer-events-none absolute inset-y-0 left-1 right-1 rounded-[var(--fx-components-task-row-radius)]', selected ? 'bg-accent' : 'group-hover/row:bg-row-hover')} />
-        <div className="relative flex shrink-0 items-center justify-center self-stretch" style={{ width: SELECTION_COLUMN_WIDTH }}>
+        <div className="relative flex shrink-0 items-center justify-center self-stretch" style={{ width: selectionColumnWidth(density) }}>
           {depth > 0 ? <span aria-hidden className="pointer-events-none absolute inset-y-0 left-1/2 w-px bg-hairline" /> : null}
           {anySelected ? (
             <div className="relative flex p-1" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
@@ -315,10 +310,10 @@ export function TaskTable() {
   }, [resolved, prefs.file_name_width, resizing])
   const totalMinWidth = useMemo(
     () =>
-      SELECTION_COLUMN_WIDTH +
+      selectionColumnWidth(prefs.density) +
       TRAILING_GUTTER +
       columns.reduce((sum, column) => sum + (column.fluid ? MIN_WIDTH.file_name : column.width), 0),
-    [columns],
+    [columns, prefs.density],
   )
 
   const rowActionLabels = useMemo(
@@ -489,7 +484,7 @@ export function TaskTable() {
         >
           <div
             className="group/all flex shrink-0 items-center justify-center"
-            style={{ width: SELECTION_COLUMN_WIDTH }}
+            style={{ width: selectionColumnWidth(prefs.density) }}
           >
             {/* 非多选模式（普通单击选中）表头全选框按未选处理；表头选择条只在显式多选模式出现，单项操作走右键菜单。 */}
             <div className={cn(ctx.multiSelect ? 'flex' : 'invisible group-hover/all:visible')}>

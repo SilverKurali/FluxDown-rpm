@@ -3,8 +3,22 @@
 import { MIN_WIDTH } from '../model/viewPrefs'
 import type { ResolvedColumn, ViewDensity } from '../model/viewPrefs'
 
-/** 固定左侧选择列宽（含左侧留白）。 */
-export const SELECTION_COLUMN_WIDTH = 36
+/** 选中底色左右内缩（`left-1` / `right-1`）。 */
+const SELECTED_INSET_X = 4
+/** 选择列图标与选中底色左右边缘之间的最小留白。 */
+const FILE_ICON_GAP_X = 4
+/** 宽松密度的文件图标底块边长（`KindGlyph` 的 `size-8`）。 */
+const RELAXED_TILE_SIZE = 32
+
+/**
+ * 固定左侧选择列宽（含左侧留白），与 GPUI `selection_column_width_for` 同一规则：
+ * 图标居中后两侧仍留出 选中内缩 + 留白，且不小于 36。
+ */
+export function selectionColumnWidth(density: ViewDensity): number {
+  const min = 36
+  return density === 'relaxed' ? Math.max(min, RELAXED_TILE_SIZE + 2 * (SELECTED_INSET_X + FILE_ICON_GAP_X)) : min
+}
+
 export const TRAILING_GUTTER = 8
 export const HEADER_HEIGHT = 28
 export const CELL_PADDING_X = 8

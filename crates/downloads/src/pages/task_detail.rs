@@ -812,7 +812,7 @@ impl TaskDetailView {
         let Some(row) = self.store.get(&RowKey::Local(self.task_id.clone())) else {
             return;
         };
-        let message = row.error_message.clone();
+        let message = self.strings.task_error_text(&row.error_message).to_owned();
         drop(row);
         if message.is_empty() {
             return;
@@ -1399,7 +1399,9 @@ impl TaskDetailView {
                             .flex_1()
                             .min_w_0()
                             .text_color(tokens.colors.destructive)
-                            .child(SharedString::from(row.error_message.clone())),
+                            .child(SharedString::from(
+                                self.strings.task_error_text(&row.error_message).to_owned(),
+                            )),
                     )
                     .child(
                         Button::new("detail-copy-error")

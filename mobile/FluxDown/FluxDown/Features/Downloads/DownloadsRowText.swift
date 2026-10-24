@@ -104,7 +104,7 @@ struct RowText {
             return StatusLine(text: t("statusPaused"), tone: .secondary)
         case .failed:
             let base = t("statusError")
-            if let line = Self.firstLine(task.errorMessage) {
+            if let line = Self.firstLine(TaskErrorMessage.displayText(task.errorMessage, localize: { t($0) })) {
                 return StatusLine(text: base + " · " + line, tone: .failure)
             }
             return StatusLine(text: base, tone: .failure)

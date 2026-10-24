@@ -17,7 +17,7 @@ use gpui_component::{
 };
 
 use crate::{
-    components::task_table::{SELECTION_COLUMN_WIDTH, ToolbarCommand, table_header_height},
+    components::task_table::{ToolbarCommand, table_header_height},
     model::{RowKey, TaskState, TaskStore},
     pages::downloads::DownloadView,
 };
@@ -213,6 +213,7 @@ impl DownloadView {
         let delegate = self.table_state.read(cx).delegate();
         let selection = delegate.selection_summary();
         let multi_select = delegate.in_multi_select();
+        let selection_column_width = delegate.selection_column_width();
         self.selection_summary.set(selection);
         if selection.count == 0 || !multi_select {
             return None;
@@ -302,7 +303,7 @@ impl DownloadView {
                 .occlude()
                 .absolute()
                 .top_0()
-                .left(px(SELECTION_COLUMN_WIDTH))
+                .left(px(selection_column_width))
                 .right_0()
                 // 留出表头底部分隔线。
                 .h(table_header_height(cx) - stroke)

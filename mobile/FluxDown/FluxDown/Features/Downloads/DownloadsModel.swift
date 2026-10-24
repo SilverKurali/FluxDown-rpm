@@ -11,7 +11,7 @@ nonisolated enum StatusFolder: CaseIterable, Hashable {
 
     /// 范围条显示（也是 `Facets.folderCounts` 的索引序）的文件夹：「做种中」是 BT 专属，商店版不含 BT，隐藏。
     static let visible: [StatusFolder] = {
-        #if FULL_P2P
+        #if FULL_FLAVOR
         allCases
         #else
         allCases.filter { $0 != .seeding }
@@ -83,7 +83,7 @@ nonisolated enum TaskVisual: Hashable {
         case .completed:
             if task.fileMissing {
                 self = .missing
-            } else if task.isSeeding {
+            } else if task.presentsSeeding {
                 self = .seeding
             } else {
                 self = .completed

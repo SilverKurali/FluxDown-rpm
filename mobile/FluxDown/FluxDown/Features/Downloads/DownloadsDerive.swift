@@ -626,6 +626,7 @@ struct DownloadsDeriver {
         }
     }
 
+    #if FULL_FLAVOR
     /// 无 host 的行是否属于 BT / 磁力（本机看协议，远程看链接形态）。
     private static func isBt(_ row: DownloadsRow) -> Bool {
         switch row {
@@ -633,6 +634,7 @@ struct DownloadsDeriver {
         case let .remote(remote): remote.task.url.hasPrefix("magnet:") || remote.task.url.hasPrefix("torrent-file://")
         }
     }
+    #endif
 
     private func groups(
         for rows: [DownloadsRow],
@@ -709,11 +711,16 @@ struct DownloadsDeriver {
                 out.append(Group(key: "site:\(site)", title: .text(site), rows: bySite[site] ?? []))
             }
             if let hostless = bySite[""] {
+                #if FULL_FLAVOR
                 // 无 host：磁力 / 种子归「BT · 磁力」，其余（eD2K 等）归「—」。
                 let bt = hostless.filter(Self.isBt)
                 let other = hostless.filter { !Self.isBt($0) }
                 if !bt.isEmpty { out.append(Group(key: "site:", title: .key("viewSiteBt"), rows: bt)) }
                 if !other.isEmpty { out.append(Group(key: "site:-", title: .text(Format.dash), rows: other)) }
+                #else
+                // store 不含 P2P：无 host 的行一律归「—」。
+                out.append(Group(key: "site:-", title: .text(Format.dash), rows: hostless))
+                #endif
             }
             return out
         case .group:

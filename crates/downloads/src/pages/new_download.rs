@@ -4,6 +4,7 @@
 //! 提交时经 `agent.capture.resolve` 确认，Cookie / 请求头 / 请求体等上下文由 agent 合并；
 //! 未确认的捕获在窗口关闭时一并忽略。
 
+mod category;
 mod hints;
 mod preview;
 mod probe;
@@ -36,6 +37,7 @@ use crate::{
             compose_request, custom_segments, detect_ua_preset, manual_proxy_url, parse_entries,
             parse_input, ua_preset_keys, ua_preset_value,
         },
+        save_dir_category::{CategoryMode, NewDownloadCategory, category_options},
         save_dir_history::{read_save_dir_history, record_save_dir, save_dir_choices},
     },
     strings::NewDownloadStrings,
@@ -109,6 +111,8 @@ pub struct NewDownloadContext {
     pub initial_urls: Vec<String>,
     /// 分类目录路由（偏好 `custom_categories`）；`None` = 没有分类配置目录。
     pub category_route: Option<fluxdown_protocol::CategoryRouteDto>,
+    /// 保存目录分类下拉的候选（同一偏好投影：可见、非 `all`、配置了目录的分类，按 `position`）。
+    pub category_options: Vec<NewDownloadCategory>,
     /// 「下载到」候选：账号其他设备 + 已配对设备（本机始终可选，不在其中）；空 = 不显示选择器。
     pub targets: Vec<DeviceEntry>,
     /// 「下载到」初值：设备本地偏好里上次的目标（目标已不存在则为本机）。
@@ -198,6 +202,9 @@ pub(crate) fn build_new_download_context(
         // `link:<fp>` 已挂接到云条目时解析为该云条目；目标已不存在则回退本机。
         .and_then(|target| resolve_target(target, &targets))
         .unwrap_or_default();
+    let categories = fluxdown_protocol::CustomCategoryDto::from_preference(
+        preferences.get(fluxdown_protocol::CUSTOM_CATEGORIES_PREF_KEY),
+    );
     NewDownloadContext {
         save_dir: save_dir.to_owned(),
         save_dir_history,
@@ -211,9 +218,8 @@ pub(crate) fn build_new_download_context(
             })
             .collect(),
         manual_proxy_url: manual_proxy_url(config),
-        category_route: fluxdown_protocol::CategoryRouteDto::from_preference(
-            preferences.get(fluxdown_protocol::CUSTOM_CATEGORIES_PREF_KEY),
-        ),
+        category_route: fluxdown_protocol::CategoryRouteDto::from_categories(&categories),
+        category_options: category_options(&categories),
         initial_urls: Vec::new(),
         targets,
         target,
@@ -300,6 +306,12 @@ pub struct NewDownloadView {
     save_dir_menu_open: bool,
     /// 保存目录组合框上一帧的窗口坐标，用于判定外部点击是否落在输入框上。
     save_dir_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// 保存目录的分类模式（默认自动）；仅 `context.category_route` 存在时有意义。
+    category_mode: CategoryMode,
+    /// 自动模式上一次写入目录框的值：目录框仍等于它说明用户没手动改过，可继续跟随。
+    category_auto_dir: Option<String>,
+    /// 自动模式按当前输入预测出的分类目录（触发器显示命中分类）；变化时同步更新，渲染只读。
+    category_predicted: Option<String>,
 }
 
 impl NewDownloadView {
@@ -399,6 +411,9 @@ impl NewDownloadView {
             remote_save_dir,
             save_dir_menu_open: false,
             save_dir_bounds: Rc::default(),
+            category_mode: CategoryMode::Auto,
+            category_auto_dir: None,
+            category_predicted: None,
         };
         this.refresh_entries(window, cx);
         this.subscribe_inputs(&translator, window, cx);
@@ -459,6 +474,17 @@ impl NewDownloadView {
             )
             .detach();
         }
+        // 重命名框是自动分类的预测输入之一；探测预填走 `set_value`（不发 Change），由探测同步处理。
+        cx.subscribe_in(
+            &self.rename,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if let InputEvent::Change = event {
+                    this.sync_category(window, cx);
+                }
+            },
+        )
+        .detach();
         cx.subscribe(&self.user_agent, |this, input, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
                 let detected = detect_ua_preset(&input.read(cx).value());
@@ -557,6 +583,15 @@ impl NewDownloadView {
                 .find(|save_dir| !save_dir.is_empty())
         {
             let save_dir = save_dir.to_owned();
+            // 捕获方带来的分类目录视为自动写入值：之后仍可跟随文件名变化。
+            if self
+                .context
+                .category_route
+                .as_ref()
+                .is_some_and(|route| route.is_category_dir(&save_dir))
+            {
+                self.category_auto_dir = Some(save_dir.clone());
+            }
             self.save_dir
                 .update(cx, |input, cx| input.set_value(save_dir, window, cx));
         }
@@ -836,6 +871,7 @@ impl NewDownloadView {
             segments,
             queues,
             category_route,
+            category_options,
             manual_proxy_url,
             ..
         } = context;
@@ -865,7 +901,18 @@ impl NewDownloadView {
         self.context.segments = segments;
         self.context.queues = queues;
         self.context.category_route = category_route;
+        self.context.category_options = category_options;
+        if let CategoryMode::Category(id) = &self.category_mode
+            && !self
+                .context
+                .category_options
+                .iter()
+                .any(|option| option.id == *id)
+        {
+            self.category_mode = CategoryMode::Auto;
+        }
         self.context.manual_proxy_url = manual_proxy_url;
+        self.sync_category(window, cx);
         cx.notify();
     }
 
@@ -1013,7 +1060,11 @@ impl NewDownloadView {
                 common: Box::new(common),
                 items: tasks,
                 captures,
-                category_route: self.context.category_route.clone(),
+                category_route: self
+                    .context
+                    .category_route
+                    .clone()
+                    .filter(|_| self.category_mode == CategoryMode::Auto),
                 offered_save_dir,
             },
             window,
@@ -1583,7 +1634,7 @@ impl NewDownloadView {
         form_field(
             self.strings.save_dir.clone(),
             input_with_action(
-                self.render_save_dir_combo(cx),
+                self.render_save_dir_input(cx),
                 Button::new("new-download-browse")
                     .outline()
                     .icon(FluxIcon::FolderOpen)

@@ -67,6 +67,7 @@ jobs:
               - 'native/protocol/tests/fixtures/plugin_view_apply.json'
               - 'native/protocol/src/plugin_view_tones.json'
               - 'crates/extensions/tests/fixtures/consent_cases.json'
+              - 'native/engine/src/fixtures/category_route_cases.json'
               - '.github/workflows/ci.yml'
             website:
               - 'website-v2/**'

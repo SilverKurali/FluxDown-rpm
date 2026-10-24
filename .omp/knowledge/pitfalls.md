@@ -3,7 +3,7 @@
 > **用途**：这里记的是「踩过才知道」的约束。**改某个领域前先读对应小节；新踩的坑，修复时同回合补一条（带坐标）。**
 > 收录标准：必须有代码坐标、回归测试或修复提交为证，无证据的推测不写。
 > 与 `AGENTS.md` 的分工：AGENTS.md §4 是硬不变式的**权威源**，本文件不复制其条目，只在各节首交叉引用；
-> 本文件也不维护会漂移的枚举清单（见 AGENTS.md §0 维护约定）。
+> 本文件也不维护会漂移的枚举清单（见 `rule://agent-docs-maintenance` 维护约定）。
 > 条目格式：`- **约束一句话**：为什么（触发现象） → 坐标 path::symbol / 回归测试`。路径以仓库根为基准。
 
 ---
@@ -23,6 +23,7 @@
 - **带子目录的文件名必须在落库前并入 `save_dir`**：下载器只把 `file_name` 当单个组件清洗（防穿越），否则子目录被压平成 `子目录_文件名`（#716）；BT 名字另有语义不拆 → `native/engine/src/download_manager.rs`（`is_bt` / `has_subdir` 分支）。
 - **HLS 小响应拉取不得在共享 client 上设全局 timeout，播放列表首行带 BOM 要先剥**：全局 timeout 会误伤普通 HTTP 长下载；`m3u8_rs` 要求首行就是 `#EXTM3U` → `native/engine/src/hls_downloader.rs::fetch_small` / `trim_playlist_prefix`。
 - **订阅源正文无有效 tracker 必须算该源失败**：HTML 错误页或空页若当「成功 + 空列表」，会覆盖宿主缓存并在刷新间隔内丢光订阅 tracker → `native/engine/src/tracker_subscription.rs::parse_source_body`。
+- **浏览器 POST 接管的任务恢复 / 重试不得改发 GET**：请求体（OneDrive 打包下载含一次性 `access_token`）不落库，旧逻辑恢复时按 GET 发 HEAD + Range 探测，只收 POST 的端点恒 405（#970），表单端点则下回错误内容。建任务时只把非 GET 方法记入 `tasks.request_method`，恢复体首据此以 `POST_ONLY_RESUME_MESSAGE` 失败；以 GET 撞上 `405 + Allow` 只含 POST 时探测标 `405 post-only`、立即停止并报 `POST_ONLY_ENDPOINT_MESSAGE`。两条文案由 GPUI / Web / Android / iOS 按全文匹配本地化（`taskErrorPostOnly*`），改文案须同步各端镜像 → `native/engine/src/downloader.rs`（`allows_only_post` / `probe_post_only`）、`native/engine/src/download_manager.rs::fail_post_only_resume`、回归 `native/engine/tests/engine/post_only.rs`（`#[ignore]`，需 `--ignored`）。
 
 ## BT / eD2K
 
@@ -85,6 +86,7 @@
 - **前台服务停止必须用 `stopSelfResult(lastStartId)`，并在每次启动请求重新计时空闲宽限**：用 `stopSelf()` 会拆掉在途、尚未来得及 `startForeground` 的启动请求，系统以 `ForegroundServiceDidNotStartInTimeException` 杀整个进程；外部唤起建任务后也不能被旧计时停掉 → `mobile/Android/app/src/main/java/com/fluxdown/app/service/DownloadService.kt::stopIfIdle`。
 - **FileProvider 要声明 `root-path` 覆盖 `/storage/`**：可移动存储卡上的文件（`/storage/6BF9-89B3/...`）否则生成不了 content URI，打开已下载文件会崩；文件不在声明根内时提示失败而不是抛异常 → `mobile/Android/app/src/main/res/xml/file_paths.xml`（`storage_volumes`）。
 - **叠层返回键的优先级：菜单 / 对话框在 Sheet 之上**：后注册的 Sheet 返回处理器会抢先，菜单打开时返回键应交给 `FluxOverlayHost` → `mobile/Android/fluxui/src/main/java/com/fluxdown/fluxui/overlay/FluxSheet.kt`（`canGoBack` 条件）。
+- **应用自更新不用 `PackageInstaller` 会话，交给「打开 APK」的默认安装程序，且只在界面可见时拉起**：会话的确认界面固定由系统安装器处理，无视用户设定的默认安装程序（小米机上总是小米安装器）；部分国行 MIUI 安装器对第三方会话直接回 `INSTALL_FAILED_ABORTED`（用户什么都没点，旧映射显示「已取消安装」）；从 `BroadcastReceiver` 拉确认界面在后台被系统静默拦截，状态永远停在「正在安装」。未持有 `UPDATE_PACKAGES_WITHOUT_USER_ACTION` 时会话本来也要确认。安装包经 FileProvider `app_update` 根（`../no_backup/updates/`，不可信应用不能硬链接）只读授权 → `mobile/Android/app/src/main/java/com/fluxdown/app/update/ApkInstaller.kt`、`UpdateEffects.kt`（交接 `LaunchedEffect`）、`res/xml/file_paths.xml`。
 
 ## iOS
 

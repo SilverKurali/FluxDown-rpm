@@ -381,8 +381,10 @@ mod imp {
     }
 }
 
-/// 本地路径 → `file:` URI（WinRT `MediaSource::CreateFromUri` 只接受 URI）。
-/// 去掉 `\\?\` 前缀；UNC 路径映射为 `file://host/share/...`；其余字节按 RFC 3986 百分号编码。
+/// 本地路径 → `file:` IRI（WinRT `MediaSource::CreateFromUri` 只接受 URI）。
+/// 去掉 `\\?\` 前缀；UNC 路径映射为 `file://host/share/...`；ASCII 保留字符按 RFC 3986 百分号编码，
+/// 非 ASCII 字符原样保留：Windows 把 file URI 中的 `%XX` 按系统 ANSI 代码页逐字节解码，
+/// UTF-8 转义的中文路径会被解成乱码而打不开（#971）。
 #[cfg(any(windows, test))]
 fn file_uri(path: &str) -> String {
     let (prefix, rest) = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
@@ -396,16 +398,18 @@ fn file_uri(path: &str) -> String {
     };
     let mut uri = String::with_capacity(prefix.len() + rest.len() + 8);
     uri.push_str(prefix);
-    for byte in rest.bytes() {
-        match byte {
-            b'\\' | b'/' => uri.push('/'),
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b':' => {
-                uri.push(char::from(byte));
-            }
+    for ch in rest.chars() {
+        match ch {
+            '\\' | '/' => uri.push('/'),
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '.' | '_' | '~' | ':' => uri.push(ch),
+            ch if !ch.is_ascii() => uri.push(ch),
             other => {
-                uri.push('%');
-                uri.push(char::from(b"0123456789ABCDEF"[usize::from(other >> 4)]));
-                uri.push(char::from(b"0123456789ABCDEF"[usize::from(other & 0x0F)]));
+                let mut buf = [0u8; 4];
+                for byte in other.encode_utf8(&mut buf).bytes() {
+                    uri.push('%');
+                    uri.push(char::from(b"0123456789ABCDEF"[usize::from(byte >> 4)]));
+                    uri.push(char::from(b"0123456789ABCDEF"[usize::from(byte & 0x0F)]));
+                }
             }
         }
     }
@@ -417,14 +421,14 @@ mod tests {
     use super::file_uri;
 
     #[test]
-    fn windows_paths_become_percent_encoded_file_uris() {
+    fn windows_paths_become_file_iris() {
         assert_eq!(
             file_uri(r"C:\Windows\Media\Windows Notify.wav"),
             "file:///C:/Windows/Media/Windows%20Notify.wav"
         );
         assert_eq!(
             file_uri(r"\\?\C:\音乐\a#b.wav"),
-            "file:///C:/%E9%9F%B3%E4%B9%90/a%23b.wav"
+            "file:///C:/音乐/a%23b.wav"
         );
         assert_eq!(
             file_uri(r"\\nas\share\ding.mp3"),

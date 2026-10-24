@@ -16,7 +16,7 @@ use gpui_component::{Icon, h_flex, table::TableState, v_flex};
 use super::{
     CELL_PADDING_X, DownloadColumnKind, DownloadTableDelegate, GroupBucket, PROGRESS_GAP,
     PROGRESS_LABEL_WIDTH, ROW_ACTION_SIZE, ROW_GROUP, SELECT_CELL_GROUP, SELECTED_INSET_X,
-    VisibleRow, meta_cell, percent_label, row_at, status_color,
+    TABLE_TRAILING_GUTTER, VisibleRow, meta_cell, percent_label, row_at, status_color,
 };
 use crate::{
     components::group_visuals::{group_counts_line, group_folder_icon},
@@ -554,7 +554,7 @@ impl DownloadTableDelegate {
         let theme = active_theme(cx);
         let muted = theme.tokens().colors.muted_foreground;
         let tertiary = theme.extended().colors.text_tertiary;
-        let cell = match kind {
+        match kind {
             DownloadColumnKind::FileName => self.render_group_name_cell(row_ix, group, cx),
             DownloadColumnKind::Status => self.render_group_status_cell(group, cx),
             DownloadColumnKind::Protocol => {
@@ -571,18 +571,7 @@ impl DownloadTableDelegate {
             }
             DownloadColumnKind::Progress => self.render_group_sparkline(group, cx),
             kind => self.task_cell(kind, &group.view, cx),
-        };
-        if col_ix == self.shown_columns_count()
-            && let Some(actions) = self.render_group_actions(ix, group, cx)
-        {
-            return div()
-                .size_full()
-                .relative()
-                .child(cell)
-                .child(actions)
-                .into_any_element();
         }
-        cell
     }
 
     /// 成员在某字段上全部相同则返回该值。
@@ -823,9 +812,14 @@ impl DownloadTableDelegate {
             .into_any_element()
     }
 
-    /// 组行悬停操作：全部暂停 / 全部恢复（按全组判定）、打开组文件夹；停靠面板未打开时加
-    /// 「详情」（聚焦该组并打开面板）。
-    fn render_group_actions(&self, ix: usize, group: &GroupRow, cx: &App) -> Option<AnyElement> {
+    /// 组行悬停操作（挂在右侧留白列上，贴可视区右缘）：全部暂停 / 全部恢复（按全组判定）、
+    /// 打开组文件夹；停靠面板未打开时加「详情」（聚焦该组并打开面板）。
+    pub(super) fn render_group_actions(
+        &self,
+        ix: usize,
+        group: &GroupRow,
+        cx: &App,
+    ) -> Option<AnyElement> {
         let host = self.host.as_ref()?;
         let counts = self.whole_group_counts(&group.id);
         let theme = active_theme(cx);
@@ -895,8 +889,9 @@ impl DownloadTableDelegate {
             h_flex()
                 .absolute()
                 .top_0()
-                .right_0()
                 .bottom_0()
+                // 父节点是右侧留白列：浮层右缘对齐其左缘，即单元格可视区右缘。
+                .right(px(TABLE_TRAILING_GUTTER))
                 .gap(tokens.spacing.xxs)
                 .pl(tokens.spacing.xs)
                 .bg(extended.colors.row_hover)

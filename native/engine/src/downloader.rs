@@ -769,23 +769,7 @@ impl RequestSpec {
         extra_headers: std::collections::HashMap<String, String>,
         body: Option<CapturedRequestBody>,
     ) -> Self {
-        let method = method
-            .and_then(|s| {
-                let upper = s.trim().to_ascii_uppercase();
-                reqwest::Method::from_bytes(upper.as_bytes()).ok()
-            })
-            .map(|m| {
-                if m == reqwest::Method::OPTIONS {
-                    log_info!(
-                        "[request-spec] captured method OPTIONS is a CORS preflight, not a real \
-                         download transaction — remapping to GET"
-                    );
-                    reqwest::Method::GET
-                } else {
-                    m
-                }
-            })
-            .unwrap_or(reqwest::Method::GET);
+        let method = parse_captured_method(method);
 
         let body = body.and_then(|b| match decode_captured_body(b) {
             Ok(decoded) => Some(decoded),
@@ -803,6 +787,40 @@ impl RequestSpec {
             body,
             ..Self::default()
         }
+    }
+}
+
+/// 扩展捕获的 method 字符串 → 请求方法：大小写 / 空白容忍，非法回退 GET，
+/// OPTIONS（CORS 预检）重映射为 GET（理由见 [`RequestSpec::from_captured`]）。
+fn parse_captured_method(method: Option<&str>) -> reqwest::Method {
+    method
+        .and_then(|s| {
+            let upper = s.trim().to_ascii_uppercase();
+            reqwest::Method::from_bytes(upper.as_bytes()).ok()
+        })
+        .map(|m| {
+            if m == reqwest::Method::OPTIONS {
+                log_info!(
+                    "[request-spec] captured method OPTIONS is a CORS preflight, not a real \
+                     download transaction — remapping to GET"
+                );
+                reqwest::Method::GET
+            } else {
+                m
+            }
+        })
+        .unwrap_or(reqwest::Method::GET)
+}
+
+/// `tasks.request_method` 列值：GET / HEAD（含回退为 GET 的情形）记空串，其余记
+/// 规范化后的方法名。只记方法不记请求体——请求体常含一次性令牌（OneDrive 打包
+/// 下载的 `access_token`），重放还可能有副作用，因此恢复时据此明确拒绝而非改发 GET。
+pub(crate) fn persisted_request_method(method: Option<&str>) -> String {
+    let method = parse_captured_method(method);
+    if method == reqwest::Method::GET || method == reqwest::Method::HEAD {
+        String::new()
+    } else {
+        method.as_str().to_owned()
     }
 }
 
@@ -1531,6 +1549,20 @@ const CF_MITIGATED_HEADER: &str = "cf-mitigated";
 /// 错误文案，也是 [`probe_rejection`] 的识别依据。
 const BOT_CHALLENGE_TAG: &str = "bot-challenge";
 
+/// 探测状态描述里的「端点只接受 POST」标记，形如 `405 post-only`（405 且 `Allow`
+/// 列出 POST、不含 GET / HEAD）；[`probe_post_only`] 据此识别。
+const POST_ONLY_TAG: &str = "post-only";
+
+/// 探测发现端点只接受 POST（如 OneDrive `*.svc.ms/transform/zip` 打包下载）时的
+/// 任务错误文案。客户端按全文匹配本地化（GPUI / Web / Android / iOS 镜像同一字符串），
+/// 改动须同步各端。
+pub const POST_ONLY_ENDPOINT_MESSAGE: &str =
+    "This link only accepts POST requests (HTTP 405); start the download from the browser";
+
+/// 由浏览器 POST 请求发起的任务被恢复 / 重试时的错误文案：请求体不落库，无法重放，
+/// 改发 GET 必然被拒（或下到错误内容）。客户端按全文匹配本地化，改动须同步各端。
+pub const POST_ONLY_RESUME_MESSAGE: &str = "This task was started by a browser POST request and cannot be resumed; start it again from the browser";
+
 /// 探测失败中「服务端主动拒绝」的类别，决定下一轮请求头如何自适应。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeRejection {
@@ -1548,14 +1580,53 @@ fn is_bot_challenge(headers: &reqwest::header::HeaderMap) -> bool {
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("challenge"))
 }
 
-/// 非 2xx 探测响应的状态描述：状态码，命中反机器人质询时追加 [`BOT_CHALLENGE_TAG`]。
+/// 非 2xx 探测响应的状态描述：状态码，命中反机器人质询时追加 [`BOT_CHALLENGE_TAG`]，
+/// 405 且只允许 POST 时追加 [`POST_ONLY_TAG`]。
 fn probe_status_desc(resp: &reqwest::Response) -> String {
     let status = resp.status().as_u16();
     if is_bot_challenge(resp.headers()) {
         format!("{status} {BOT_CHALLENGE_TAG}")
+    } else if resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        && allows_only_post(resp.headers())
+    {
+        format!("{status} {POST_ONLY_TAG}")
     } else {
         status.to_string()
     }
+}
+
+/// `Allow` 头列出 POST 且不含 GET / HEAD（OneDrive 打包端点回 `Allow: OPTIONS, POST`）。
+fn allows_only_post(headers: &reqwest::header::HeaderMap) -> bool {
+    let Some(allow) = headers
+        .get(reqwest::header::ALLOW)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let mut post = false;
+    for method in allow.split(',').map(str::trim) {
+        if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
+            return false;
+        }
+        post |= method.eq_ignore_ascii_case("POST");
+    }
+    post
+}
+
+/// 探测失败里是否有一路明确回了「只接受 POST」（[`POST_ONLY_TAG`]）。换请求头 / 重试
+/// 都改变不了方法限制，命中即停止探测并给出 [`POST_ONLY_ENDPOINT_MESSAGE`]。
+fn probe_post_only(e: &DownloadError) -> bool {
+    let DownloadError::Other(msg) = e else {
+        return false;
+    };
+    let Some(rest) = msg.strip_prefix("probes failed: ") else {
+        return false;
+    };
+    rest.split(", ").any(|part| {
+        part.split_once('=')
+            .and_then(|(_, desc)| desc.trim().strip_suffix(POST_ONLY_TAG))
+            .is_some_and(|status| status.trim() == "405")
+    })
 }
 
 /// 判断探测失败是否为服务端明确拒绝及其类别；质询优先于 403 / 429。
@@ -2089,6 +2160,10 @@ async fn adapt_probe_request(
                     PROBE_MAX_RETRIES,
                     e
                 );
+                if probe_post_only(&e) {
+                    log_info!("[resolve] endpoint only accepts POST; stopping probes");
+                    return Err(DownloadError::Other(POST_ONLY_ENDPOINT_MESSAGE.to_string()));
+                }
                 let rejection = probe_rejection(&e);
                 last_err = Some(e);
                 // 仅在可能触发去重时才快照刚发出的请求身份（锁定了 UA / Referer）。
@@ -6382,6 +6457,34 @@ mod tests {
             None
         );
         assert_eq!(super::infer_origin_referrer("not-a-valid-url"), None);
+    }
+
+    #[test]
+    fn post_only_requires_405_with_allow_listing_post_but_not_get() {
+        let allow = |value: &str| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::ALLOW, value.parse().unwrap());
+            super::allows_only_post(&headers)
+        };
+        assert!(allow("OPTIONS, POST"));
+        assert!(allow("post"));
+        assert!(!allow("GET, POST"), "GET still allowed: not POST-only");
+        assert!(!allow("HEAD,POST"));
+        assert!(!allow("OPTIONS"));
+        assert!(!super::allows_only_post(&reqwest::header::HeaderMap::new()));
+
+        let post_only =
+            |msg: &str| super::probe_post_only(&super::DownloadError::Other(msg.into()));
+        assert!(post_only(
+            "probes failed: HEAD=405 post-only, ranged GET=405 post-only"
+        ));
+        assert!(post_only("probes failed: plain GET=405 post-only"));
+        assert!(!post_only(
+            "probes failed: HEAD=405, ranged GET=400, plain GET=400"
+        ));
+        assert!(!post_only(
+            "probes failed: HEAD=network-error: 405 post-only"
+        ));
     }
 
     #[test]

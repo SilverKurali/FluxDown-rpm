@@ -16,6 +16,7 @@ import com.fluxdown.app.ui.TaskVisualState
 import com.fluxdown.core.format.Format
 import com.fluxdown.core.model.Queue
 import com.fluxdown.core.model.SeedingStatus
+import com.fluxdown.core.model.TaskErrorMessage
 import com.fluxdown.core.model.TaskProtocol
 import com.fluxdown.fluxui.data.MetaTone
 import com.fluxdown.fluxui.data.buildTaskMeta
@@ -36,6 +37,15 @@ internal class RowText(c: Context) {
     val completed = c.str(R.string.statusCompleted)
     val missing = c.str(R.string.statusFileMissing)
     val failed = c.str(R.string.statusError)
+    private val errorPostOnlyEndpoint = c.str(R.string.taskErrorPostOnlyEndpoint)
+    private val errorPostOnlyResume = c.str(R.string.taskErrorPostOnlyResume)
+
+    /** 引擎稳定错误文案 → 本地化；其余原样。 */
+    fun taskError(raw: String): String = when (TaskErrorMessage.match(raw)) {
+        TaskErrorMessage.PostOnlyEndpoint -> errorPostOnlyEndpoint
+        TaskErrorMessage.PostOnlyResume -> errorPostOnlyResume
+        null -> raw
+    }
 
     private val etaSecondsFmt = c.getString(R.string.etaSeconds)
     private val etaMinutesFmt = c.getString(R.string.etaMinutes)
@@ -165,7 +175,7 @@ internal fun buildRowMeta(
         }
         TaskVisualState.Preparing -> part(t.preparing)
         TaskVisualState.Verifying -> part(t.verifying)
-        TaskVisualState.Failed -> part(firstLine(task.errorMessage) ?: t.failed, MetaTone.Coral)
+        TaskVisualState.Failed -> part(firstLine(t.taskError(task.errorMessage)) ?: t.failed, MetaTone.Coral)
         TaskVisualState.Missing -> {
             part(t.missing, MetaTone.Amber)
             if (showSize) part(totalSize)

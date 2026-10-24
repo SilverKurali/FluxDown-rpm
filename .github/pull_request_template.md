@@ -23,7 +23,7 @@ Closes #
 
 ## 破坏性变化 / Breaking changes
 
-<!-- 修改已有契约的项另列于此并给出 diff；协议严格枚举新增需升协议版本（AGENTS.md §5）。 -->
+<!-- 修改已有契约的项另列于此并给出 diff；协议严格枚举新增需升协议版本（`.omp/rules/mirror-wire-protocol.md`）。 -->
 
 ```diff
 - old
@@ -32,7 +32,7 @@ Closes #
 
 ## 镜像契约 / Mirror contracts
 
-<!-- 触及 AGENTS.md §5 表中左列任一处时，列出同步改了哪一端、两侧测试 / 共享夹具是否都跑过。 -->
+<!-- 改动命中 AGENTS.md §5 索引的任一 `.omp/rules/mirror-*.md` 时，列出同步改了哪一端、两侧测试 / 共享夹具是否都跑过。 -->
 
 ## 验证 / Verification
 

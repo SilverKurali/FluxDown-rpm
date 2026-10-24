@@ -15,6 +15,11 @@ public protocol HostSession: AnyObject, Sendable {
     /// 结束会话：停止驱动与重连。本机主机保持运行。
     func close()
 
+    /// 新建下载表单的分类目录预测（同步、不访问网络）：按当前主机分类路由，返回 `fileName`
+    /// （不含 `.` 时回退 `url` 路径末段）命中的分类保存目录；无路由 / 无命中为 nil。
+    /// 与建任务时的路由同一套匹配语义（Rust `route_save_dir`）。
+    func categorySaveDir(fileName: String, url: String) -> String?
+
     // daemon.task.*
     func createTask(_ request: CreateTaskRequest) async throws(HostError) -> String
     func pause(_ taskId: String) async throws(HostError)

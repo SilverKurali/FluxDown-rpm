@@ -45,7 +45,7 @@ struct GeneralPage: View {
             if let item = GeneralRow.analytics.item {
                 ConfigToggleRow(item: item).disabled(readOnly)
             }
-            #if FULL_P2P
+            #if FULL_FLAVOR
             GeneralLinkHandlingRows()
             #endif
         } header: {
@@ -84,7 +84,7 @@ struct GeneralPage: View {
     }
 }
 
-#if FULL_P2P
+#if FULL_FLAVOR
 // MARK: - 链接与文件打开方式（只读）
 
 /// 读取 Info.plist 的静态声明：`magnet:` / `ed2k://` / `.torrent`。iOS 无法检测是否被其它 App 抢占，只展示本 App 是否声明。

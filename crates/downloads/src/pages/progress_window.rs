@@ -732,7 +732,9 @@ impl ProgressWindowView {
                 |this| {
                     this.child(Self::render_error(
                         0,
-                        SharedString::from(row.error_message.clone()),
+                        SharedString::from(
+                            self.strings.task_error_text(&row.error_message).to_owned(),
+                        ),
                         cx,
                     ))
                 },

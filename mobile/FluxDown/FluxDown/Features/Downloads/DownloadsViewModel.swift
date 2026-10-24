@@ -28,8 +28,9 @@ nonisolated struct PendingSelection: Equatable {
     let countdownKey: String
     let deadlineUnixMs: Int64
 
-    /// 横幅对应队首请求；队首是「文件已存在」时聚合全部同类请求（最早的到期时间）。
+    /// 横幅对应队首（本构建可处理的）请求；队首是「文件已存在」时聚合全部同类请求（最早的到期时间）。
     static func make(_ selections: [SelectionRequest], taskName: (String) -> String?) -> PendingSelection? {
+        let selections = selections.presentable
         guard let request = selections.first else { return nil }
         func plain(_ titleKey: String) -> PendingSelection {
             PendingSelection(
@@ -42,10 +43,14 @@ nonisolated struct PendingSelection: Equatable {
             )
         }
         switch request.kind {
+        #if FULL_FLAVOR
         case .bt: return plain("btFileSelectTitle")
-        case .hls: return plain("hlsQualityTitle")
         case .variant: return plain("resolveVariantTitle")
         case .plugin: return plain("pluginChoiceTitle")
+        #else
+        case .bt, .variant, .plugin: return nil
+        #endif
+        case .hls: return plain("hlsQualityTitle")
         case let .fileExists(conflict):
             let conflicts = selections.fileConflicts
             let many = conflicts.count > 1
@@ -286,9 +291,9 @@ final class DownloadsModel {
             case .paused, .failed: caps.resumeIds.append(task.taskId)
             case .downloading, .pending, .preparing: caps.pauseIds.append(task.taskId)
             case .completed:
-                if task.isSeeding {
+                if task.presentsSeeding {
                     caps.pauseIds.append(task.taskId)
-                } else if task.canResumeSeeding {
+                } else if task.presentsResumeSeeding {
                     caps.resumeIds.append(task.taskId)
                 }
             case .unknown: break

@@ -333,4 +333,12 @@ struct TasksProtocolTests {
         #expect(!PluginFailure.isIgnorable(status: .failed, errorMessage: "connection reset"))
         #expect(!PluginFailure.isIgnorable(status: .paused, errorMessage: "[插件] yt: boom"))
     }
+
+    @Test func taskErrorMessageLocalization() {
+        #expect(TaskErrorMessage.localizationKey(for: TaskErrorMessage.postOnlyEndpoint) == "taskErrorPostOnlyEndpoint")
+        #expect(TaskErrorMessage.localizationKey(for: " " + TaskErrorMessage.postOnlyResume + "\n") == "taskErrorPostOnlyResume")
+        #expect(TaskErrorMessage.localizationKey(for: "connection reset") == nil)
+        #expect(TaskErrorMessage.displayText("connection reset", localize: { _ in "x" }) == "connection reset")
+        #expect(TaskErrorMessage.displayText(TaskErrorMessage.postOnlyResume, localize: { "L:" + $0 }) == "L:taskErrorPostOnlyResume")
+    }
 }

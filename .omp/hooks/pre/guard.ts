@@ -1,8 +1,8 @@
 /**
- * FluxDown 命令守卫：把 AGENTS.md §6–§7 与「并行子代理」里机械可判定的红线在工具调用前硬拦截。
+ * FluxDown 命令守卫：把 .omp/RULES.md（git 授权 / 分支模型）与 AGENTS.md §2、§7「并行子代理」里机械可判定的红线在工具调用前硬拦截。
  *
  * TTSR 规则（.omp/rules/forbidden-commands.md）只在输出流里打断并提示，模型可原样重试；
- * 这里在执行前直接拒绝，不可绕过。规则正文仍以 AGENTS.md 为准，本文件只做判定。
+ * 这里在执行前直接拒绝，不可绕过。规则正文仍以 RULES.md / AGENTS.md 为准，本文件只做判定。
  *
  * - 推送 v* tag / --tags / --follow-tags / --mirror：触发不可逆的全平台发布，交互会话弹确认，无 UI 时拒绝。
  * - --no-verify：绕过 .githooks 本地门禁（AGENTS.md §2 明令禁止）。
@@ -128,7 +128,7 @@ function checkPush(rest: string[], stableDiverged: () => string | undefined): Ve
 	const unresolved = refs.some(r => /[$`]/.test(r));
 
 	if ((force || plusForce || lease) && refs.some(r => PROTECTED.test(r))) {
-		return { block: true, reason: "禁止强推 main / stable（AGENTS.md §6 分支模型）。" };
+		return { block: true, reason: "禁止强推 main / stable（.omp/RULES.md 分支模型）。" };
 	}
 	if ((force || plusForce) && !lease) {
 		return { block: true, reason: "只允许 --force-with-lease，禁止裸 --force / +refspec 强推。" };
@@ -140,7 +140,7 @@ function checkPush(rest: string[], stableDiverged: () => string | undefined): Ve
 	) {
 		return {
 			confirm:
-				"推送 v* tag 会立即触发全平台发布流水线，不可逆（AGENTS.md §6）。只有用户在本会话明确要求发版时才允许。",
+				"推送 v* tag 会立即触发全平台发布流水线，不可逆（.omp/RULES.md）。只有用户在本会话明确要求发版时才允许。",
 		};
 	}
 	if (refs.some(r => /^(?:refs\/heads\/)?stable$/.test(r))) {

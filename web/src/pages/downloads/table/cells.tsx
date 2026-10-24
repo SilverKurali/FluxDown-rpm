@@ -6,6 +6,7 @@ import { FileIcon } from '../../../lib/icon-pack'
 import { Badge, Icon, Tooltip } from '../../../ui'
 import { reopenFileConflicts } from '../dialogs/fileConflict'
 import { percentLabel, sourceSite } from '../model/task'
+import { localizeTaskError } from '../model/taskError'
 import type { DownloadTaskView } from '../model/task'
 import type { ViewDensity } from '../model/viewPrefs'
 import { SegmentProgress } from './SegmentProgress'
@@ -87,7 +88,7 @@ export function StatusCell({ t, view, density }: { t: Translate; view: DownloadT
   const twoLine = density !== 'compact'
   const detail = statusDetail(t, view)
   const failedError = view.state === 'failed' && view.errorMessage.trim() !== ''
-  const tooltip = failedError ? view.errorMessage : twoLine ? undefined : (detail ?? undefined)
+  const tooltip = failedError ? localizeTaskError(t, view.errorMessage) : twoLine ? undefined : (detail ?? undefined)
   return (
     <div className="tabular flex min-w-0 flex-col justify-center text-xs" title={tooltip}>
       <div className={cn('truncate', taskStatusClass(view))}>{statusLabel(t, view)}</div>

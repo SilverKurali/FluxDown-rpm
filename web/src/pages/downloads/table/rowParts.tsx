@@ -1,5 +1,6 @@
-// 任务表行的小件组件：数值元信息单元格与树轨。
+// 任务表行的小件组件：数值元信息单元格、树轨与行悬停操作浮层。
 
+import type { ReactNode } from 'react'
 import { cn } from '../../../lib/cn'
 import { CELL_PADDING_X, TREE_CHEVRON, TREE_INDENT } from './rowMetrics'
 
@@ -37,4 +38,23 @@ export function TreeRails({ depth }: { depth: number }) {
       style={{ left: CELL_PADDING_X + level * TREE_INDENT + TREE_CHEVRON / 2 }}
     />
   ))
+}
+
+/**
+ * 行悬停操作浮层（放在行末）：零宽 sticky 锚点贴住表格滚动区右缘，横向滚动时按钮不随末列移出视口
+ * （与 GPUI 挂在右侧留白列上的浮层一致）；未溢出时锚点就在行末，位置与行内右缘相同。
+ */
+export function RowActionsBar({ selected, children }: { selected: boolean; children: ReactNode }) {
+  return (
+    <div className="sticky right-1 w-0 shrink-0 self-stretch">
+      <div
+        className={cn(
+          'absolute inset-y-0 right-0 hidden items-center gap-0.5 rounded-r-[var(--fx-components-task-row-radius)] pl-1 pr-1 group-hover/row:flex',
+          selected ? 'bg-nav-selected' : 'bg-row-hover',
+        )}
+      >
+        {children}
+      </div>
+    </div>
+  )
 }

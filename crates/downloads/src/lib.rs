@@ -28,6 +28,7 @@ pub use model::progress_window::{
     ProgressWindowEffect, ProgressWindowPrefs, ProgressWindowTracker, StartOrigin, UserStartIntent,
     WindowContext,
 };
+pub use model::save_dir_category::NewDownloadCategory;
 pub use model::shutdown::*;
 pub use pages::downloads::*;
 pub use pages::file_conflict::*;

@@ -68,6 +68,7 @@ import androidx.compose.ui.unit.em
 import com.fluxdown.app.R
 import com.fluxdown.app.actions.LocalTaskActions
 import com.fluxdown.app.actions.TaskActions
+import com.fluxdown.app.i18n.localizedTaskError
 import com.fluxdown.app.i18n.str
 import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.app.shell.hostState
@@ -356,7 +357,7 @@ private fun DetailHero(modelOf: () -> DetailModel?, gate: FlowInGate) {
             TaskVisualState.Failed -> {
                 Spacer(Modifier.height(16.dp))
                 FluxBanner(
-                    text = firstLine(task.errorMessage).ifEmpty { str(R.string.subtitleError) },
+                    text = firstLine(localizedTaskError(task.errorMessage)).ifEmpty { str(R.string.subtitleError) },
                     kind = FluxBannerKind.Error,
                     title = str(R.string.subtitleError),
                     actions = {
@@ -401,7 +402,7 @@ private fun StatusLine(model: DetailModel) {
     val size = task.totalBytes.takeIf { it > 0 }?.let { Format.bytes(it).toString() }
     val upload = "↑ " + (Format.speed(model.speedUp)?.toString() ?: "—")
     val tail = when (visual) {
-        TaskVisualState.Failed -> firstLine(task.errorMessage)
+        TaskVisualState.Failed -> firstLine(localizedTaskError(task.errorMessage))
         TaskVisualState.Completed, TaskVisualState.Missing -> listOfNotNull(size, protocol, task.siteLabel()).joinToString(" · ")
         TaskVisualState.Seeding -> "$protocol · $upload"
         else -> "$protocol · ${task.siteLabel()}"

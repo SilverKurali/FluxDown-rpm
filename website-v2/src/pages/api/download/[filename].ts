@@ -1,6 +1,6 @@
 /**
  * Release 下载入口（仅 302，不代理文件流量）。
- * 镜像 = 阿里云 CDN（OSS 私有 Bucket 回源，不能回退 GitHub），302 前必须确认 OSS 有该资产且大小一致。
+ * 镜像 = dl-cn（Cloudflare Worker / 备案后阿里云 CDN，私有 OSS 回源，不能回退 GitHub），302 前必须确认 OSS 有该资产且大小一致。
  * 只有中国大陆访客（ip2region 按 X-Client-IP 判定）且像正常客户端（24 小时内读过发布清单、
  * 非脚本 User-Agent，见 download-gate.ts）才走镜像；其余访客、脚本与镜像缺资产时走 GitHub。
  * source=github：仅 GitHub；source=oss：可走镜像的访客在镜像不可用时返回 503，其余同 auto。

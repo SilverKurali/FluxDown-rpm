@@ -21,7 +21,7 @@ description: >-
 
 ## 0. 授权边界
 
-用户调用本 skill 处理某个 PR，即对**该 PR** 授权以下动作，无需再逐项征询（`AGENTS.md` §6 按动作计授权，此处一次性列明）：
+用户调用本 skill 处理某个 PR，即对**该 PR** 授权以下动作，无需再逐项征询（`.omp/RULES.md` 按动作计授权，此处一次性列明）：
 
 - 在 `.worktrees/pr-<N>` 内 commit；经 `$S push` 快进推回 PR head 分支。
 - 在 PR 下发评论 / review（approve、request changes）；方向错误时关闭 PR。
@@ -72,7 +72,7 @@ Rust 构建复用主目录 target 免全量编译：worktree 内每条 cargo 命
 
 ### 完整性
 - 测试：新行为、边界、回归有测试且能抓住真实 bug；无测源码文本 / mock 回显 / 只测不 panic 的伪测试。
-- 镜像契约（`AGENTS.md` §5）逐项核对：改了一侧没改另一侧即不完整（RSS filter 三份、排序/来源构成 Web 镜像、webhook 事件名、protocol ↔ `web/src/lib/rpc/protocol`、UniFFI DTO ↔ Kotlin/Swift 等）。
+- 镜像契约（`AGENTS.md` §5 索引的 `.omp/rules/mirror-*.md`，按改动文件命中各规则 `globs` 逐条核对）：改了一侧没改另一侧即不完整（RSS filter、排序/来源构成 Web 镜像、webhook 事件名、protocol ↔ `web/src/lib/rpc/protocol`、UniFFI DTO ↔ Kotlin/Swift 等）。
 - i18n：新增文案 en + zh 基线对齐（`assets/i18n/{en,zh}.json`），无硬编码文案；社区语言不碰。
 - API 改动重生成 `website-v2/public/openapi.json`；架构/契约变化同步 `.omp/knowledge/*`。
 - lint 红线：非测试 `unwrap`/`expect`、静默忽错、`todo!`、通配 import、新增 `unsafe`（`rule://no-unsafe-in-rust`）、用 `allow` 消音。

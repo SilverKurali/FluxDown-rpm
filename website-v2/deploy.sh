@@ -95,15 +95,25 @@ ${DOCKER} compose down --remove-orphans >/dev/null 2>&1 || true
 ${DOCKER} rm -f fluxdown-website-v2 >/dev/null 2>&1 || true
 ${DOCKER} compose up -d --wait website
 
-# ── 刷新阿里云 CDN 缓存（仅根部署）────────────
-# 静态页面在 CDN 边缘缓存 1 天，旧 HTML 引用的 /_astro 哈希资源在新镜像里已不存在，
-# 必须在新容器就绪后刷新。失败即中止且不写部署戳，下次重跑会再刷。
+# ── 清除 Cloudflare 边缘缓存（仅根部署）────────
+# 静态页面在 Cloudflare 边缘缓存 1 天（区域 Cache Rules），旧 HTML 引用的 /_astro 哈希资源
+# 在新镜像里已不存在，必须在新容器就绪后按主机名清除。失败即中止且不写部署戳，下次重跑会再清。
 if [ -z "${SITE_BASE}" ]; then
-  echo "[+] 刷新阿里云 CDN 缓存（fluxdown.com / www.fluxdown.com）..."
-  env_value() { sed -n "s/^$1=//p" "${SCRIPT_DIR}/.env" 2>/dev/null | tail -n 1; }
-  ALIYUN_CDN_ACCESS_KEY_ID="$(env_value ALIYUN_CDN_ACCESS_KEY_ID)" \
-  ALIYUN_CDN_ACCESS_KEY_SECRET="$(env_value ALIYUN_CDN_ACCESS_KEY_SECRET)" \
-    node "${SCRIPT_DIR}/scripts/aliyun-cdn-refresh.mjs"
+  echo "[+] 清除 Cloudflare 缓存（fluxdown.com / www.fluxdown.com）..."
+  CF_TOKEN="$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' "${SCRIPT_DIR}/.env" 2>/dev/null | tail -n 1)"
+  CF_ZONE="${CLOUDFLARE_ZONE_ID:-ccb51a98de238a1916428142f890db4d}"
+  if [ -z "${CF_TOKEN}" ]; then
+    echo "      .env 缺少 CLOUDFLARE_API_TOKEN（需 区域.清除缓存 权限）" >&2
+    exit 1
+  fi
+  PURGE="$(curl -sS -m 30 -X POST \
+    -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" \
+    "https://api.cloudflare.com/client/v4/zones/${CF_ZONE}/purge_cache" \
+    -d '{"hosts":["fluxdown.com","www.fluxdown.com"]}')"
+  if ! printf '%s' "${PURGE}" | grep -q '"success":[[:space:]]*true'; then
+    echo "      清除失败: ${PURGE}" >&2
+    exit 1
+  fi
 fi
 echo "${TREE} ${SITE_BASE}" > "${STAMP}"
 

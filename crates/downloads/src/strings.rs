@@ -79,6 +79,8 @@ pub(crate) struct DownloadStrings {
     pub(crate) status_completed: SharedString,
     pub(crate) status_downloading: SharedString,
     pub(crate) status_error: SharedString,
+    pub(crate) task_error_post_only_endpoint: SharedString,
+    pub(crate) task_error_post_only_resume: SharedString,
     pub(crate) status_incomplete: SharedString,
     pub(crate) status_paused: SharedString,
     pub(crate) status_seeding: SharedString,
@@ -256,6 +258,8 @@ impl DownloadStrings {
             status_completed: shared(translator.text(keys::STATUS_COMPLETED)),
             status_downloading: shared(translator.text(keys::STATUS_DOWNLOADING)),
             status_error: shared(translator.text(keys::STATUS_ERROR)),
+            task_error_post_only_endpoint: shared(translator.text("taskErrorPostOnlyEndpoint")),
+            task_error_post_only_resume: shared(translator.text("taskErrorPostOnlyResume")),
             status_incomplete: shared(translator.text("tabDownloading")),
             status_paused: shared(translator.text(keys::STATUS_PAUSED)),
             status_seeding: shared(translator.text("statusSeeding")),
@@ -675,6 +679,13 @@ pub(crate) struct NewDownloadStrings {
     pub(crate) save_dir: SharedString,
     pub(crate) save_dir_placeholder: SharedString,
     pub(crate) browse: SharedString,
+    pub(crate) category_auto: SharedString,
+    category_auto_matched: SharedString,
+    pub(crate) category_auto_desc: SharedString,
+    pub(crate) category_none: SharedString,
+    pub(crate) category_none_desc: SharedString,
+    /// 内置分类（`builtin_type` → 本地化显示名）。
+    category_builtin_names: Vec<(&'static str, SharedString)>,
     pub(crate) threads: SharedString,
     pub(crate) threads_auto: SharedString,
     pub(crate) threads_custom: SharedString,
@@ -770,6 +781,23 @@ impl NewDownloadStrings {
             save_dir: shared(translator.text("saveDir")),
             save_dir_placeholder: shared(translator.text("selectSaveDir")),
             browse: shared(translator.text("browse")),
+            category_auto: shared(translator.text("saveDirCategoryAuto")),
+            category_auto_matched: shared(translator.text("saveDirCategoryAutoMatched")),
+            category_auto_desc: shared(translator.text("saveDirCategoryAutoDesc")),
+            category_none: shared(translator.text("saveDirCategoryNone")),
+            category_none_desc: shared(translator.text("saveDirCategoryNoneDesc")),
+            category_builtin_names: [
+                ("video", "categoryVideo"),
+                ("audio", "categoryAudio"),
+                ("document", "categoryDocument"),
+                ("image", "categoryImage"),
+                ("program", "categoryProgram"),
+                ("archive", "categoryArchive"),
+                ("other", "categoryOther"),
+            ]
+            .into_iter()
+            .map(|(kind, key)| (kind, shared(translator.text(key))))
+            .collect(),
             threads: shared(translator.text("threads")),
             threads_auto: shared(translator.text("auto")),
             threads_custom: shared(translator.text("customThreads")),
@@ -855,6 +883,30 @@ impl NewDownloadStrings {
     /// `{count} 个链接`。
     pub(crate) fn format_url_count(&self, count: usize) -> SharedString {
         SharedString::from(self.url_count.replace("{count}", &count.to_string()))
+    }
+
+    /// 分类显示名：内置项走 i18n，自定义项用 `name`。
+    pub(crate) fn category_name(
+        &self,
+        category: &crate::model::save_dir_category::NewDownloadCategory,
+    ) -> SharedString {
+        category
+            .builtin_type
+            .as_deref()
+            .and_then(|kind| {
+                self.category_builtin_names
+                    .iter()
+                    .find(|(builtin, _)| *builtin == kind)
+            })
+            .map_or_else(
+                || SharedString::from(category.name.clone()),
+                |(_, label)| label.clone(),
+            )
+    }
+
+    /// 自动模式命中分类时的触发器文案：`自动 · {name}`。
+    pub(crate) fn format_category_auto_matched(&self, name: &str) -> SharedString {
+        SharedString::from(self.category_auto_matched.replace("{name}", name))
     }
 
     /// `已识别：{文件名 · 大小}`；大小未知（0）时显示「大小未知」。名称为空时只显示大小。
@@ -1052,6 +1104,24 @@ fn group_digits(value: usize) -> String {
     grouped
 }
 
+impl DownloadStrings {
+    /// 任务错误消息的显示文本：引擎两条稳定错误整串匹配（trim 后）时返回本地化文案，
+    /// 其余原样返回。仅用于显示 / 复制，逻辑判断仍用原始 `error_message`。
+    pub(crate) fn task_error_text<'a>(&'a self, raw: &'a str) -> &'a str {
+        match raw.trim() {
+            POST_ONLY_ENDPOINT_MESSAGE => &self.task_error_post_only_endpoint,
+            POST_ONLY_RESUME_MESSAGE => &self.task_error_post_only_resume,
+            _ => raw,
+        }
+    }
+}
+
+/// 镜像引擎 `native/engine/src/downloader.rs` 的 `POST_ONLY_ENDPOINT_MESSAGE`；改动须同步。
+const POST_ONLY_ENDPOINT_MESSAGE: &str =
+    "This link only accepts POST requests (HTTP 405); start the download from the browser";
+/// 镜像引擎 `native/engine/src/downloader.rs` 的 `POST_ONLY_RESUME_MESSAGE`；改动须同步。
+const POST_ONLY_RESUME_MESSAGE: &str = "This task was started by a browser POST request and cannot be resumed; start it again from the browser";
+
 fn shared(value: &str) -> SharedString {
     SharedString::from(value.to_owned())
 }
@@ -1096,6 +1166,24 @@ mod tests {
         ] {
             assert_eq!(group_digits(value), expected);
         }
+    }
+
+    #[test]
+    fn post_only_errors_are_localized_and_others_pass_through()
+    -> Result<(), fluxdown_ui_i18n::I18nError> {
+        let catalog = std::sync::Arc::new(fluxdown_ui_i18n::I18nCatalog::load_embedded()?);
+        let translator = catalog.translator("en");
+        let strings = DownloadStrings::from_translator(&translator);
+        assert_eq!(
+            strings.task_error_text(super::POST_ONLY_ENDPOINT_MESSAGE),
+            translator.text("taskErrorPostOnlyEndpoint")
+        );
+        assert_eq!(
+            strings.task_error_text(&format!("{}\n", super::POST_ONLY_RESUME_MESSAGE)),
+            translator.text("taskErrorPostOnlyResume")
+        );
+        assert_eq!(strings.task_error_text("disk full"), "disk full");
+        Ok(())
     }
 
     /// 引擎 status 5（探测 / 插件解析）在任务表、详情、进度窗口与活动日志都是「准备中」，

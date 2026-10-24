@@ -47,8 +47,8 @@ pub(crate) fn capture_entry(url: &str, file_name: &str) -> UrlEntry {
     }
 }
 
-/// 百分号解码为 UTF-8；解码结果不是合法 UTF-8 时返回 `None`。非法 `%` 序列按字面保留。
-pub(crate) fn percent_decode_utf8(text: &str) -> Option<String> {
+/// 百分号解码为字节；非法 `%` 序列按字面保留。
+fn percent_decode_bytes(text: &str) -> Vec<u8> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -65,11 +65,21 @@ pub(crate) fn percent_decode_utf8(text: &str) -> Option<String> {
             i += 1;
         }
     }
-    String::from_utf8(out).ok()
+    out
+}
+
+/// 百分号解码为 UTF-8；解码结果不是合法 UTF-8 时返回 `None`。非法 `%` 序列按字面保留。
+pub(crate) fn percent_decode_utf8(text: &str) -> Option<String> {
+    String::from_utf8(percent_decode_bytes(text)).ok()
+}
+
+/// 百分号解码为 UTF-8，非法字节以 U+FFFD 替换（与 agent 分类目录解析的 URL 末段解码一致）。
+pub(crate) fn percent_decode_lossy(text: &str) -> String {
+    String::from_utf8_lossy(&percent_decode_bytes(text)).into_owned()
 }
 
 /// `scheme://host/a/b.zip?x#y` → `b.zip`；无路径或以 `/` 结尾时为 `None`。
-fn url_file_segment(url: &str) -> Option<&str> {
+pub(crate) fn url_file_segment(url: &str) -> Option<&str> {
     let rest = &url[url.find("://")? + 3..];
     let rest = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
     let path = &rest[rest.find('/')?..];

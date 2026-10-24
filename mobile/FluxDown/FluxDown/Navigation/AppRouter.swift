@@ -18,8 +18,10 @@ nonisolated enum DownloadsRoute: Hashable {
 /// 设置栈推入页（顺序见 03-settings §1.1；对齐 PC `build_pages`，桌面专属项省略）。
 nonisolated enum SettingsRoute: Hashable {
     case account, general, appearance, notify
-    case download, network, extensions, webhook, api
-    #if FULL_P2P
+    case download, network, webhook, api
+    #if FULL_FLAVOR
+    /// 插件 / 组件（仅 full flavor；store 不含插件功能）。
+    case extensions
     case bt, ed2k
     #endif
     case diagnostics, about

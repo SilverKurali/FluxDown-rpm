@@ -54,9 +54,10 @@ use crate::{
 mod groups;
 use groups::GroupRow;
 
-/// 固定左侧选择列宽（含表格左侧留白）：平时显示文件类型图标，行悬停 / 已选中 /
-/// 存在任意选中时换成复选框。
-pub(crate) const SELECTION_COLUMN_WIDTH: f32 = 36.;
+/// 固定左侧选择列的最小宽（含表格左侧留白）：平时显示文件类型图标，行悬停 / 已选中 /
+/// 存在任意选中时换成复选框。实际宽度随密度下的图标尺寸放宽，见
+/// [`DownloadTableDelegate::selection_column_width`]。
+const MIN_SELECTION_COLUMN_WIDTH: f32 = 36.;
 /// 表头拖拽调宽的上限（下限按列取 [`DownloadColumnKind::min_width`]）。
 const MAX_COLUMN_WIDTH: f32 = 480.;
 /// 文件名列拖宽上限（长文件名需要比其他列更宽的空间）。
@@ -88,6 +89,23 @@ const FILE_ICON_COMFORTABLE_SCALE: f32 = 1.5;
 const FILE_ICON_RELAXED_SCALE: f32 = 2.;
 /// 选中底色左右内缩（inset 样式）。
 const SELECTED_INSET_X: f32 = 4.;
+/// 选择列图标与选中底色左右边缘之间的最小留白：图标（含满画布的图标包字形）不贴边、不越出圆角底色。
+const FILE_ICON_GAP_X: f32 = 4.;
+
+/// 各密度下选择列文件图标边长（`lg` = 主题 `icon.lg`）。
+fn file_icon_size_for(density: ViewDensity, lg: f32) -> f32 {
+    match density {
+        ViewDensity::Relaxed => lg * FILE_ICON_RELAXED_SCALE,
+        ViewDensity::Comfortable => lg * FILE_ICON_COMFORTABLE_SCALE,
+        ViewDensity::Compact => lg,
+    }
+}
+
+/// 选择列宽：图标居中后两侧仍留出 选中内缩 + 留白，且不小于 [`MIN_SELECTION_COLUMN_WIDTH`]。
+fn selection_column_width_for(density: ViewDensity, lg: f32) -> f32 {
+    let icon = file_icon_size_for(density, lg);
+    (icon + 2. * (SELECTED_INSET_X + FILE_ICON_GAP_X)).max(MIN_SELECTION_COLUMN_WIDTH)
+}
 /// 任务行 group 名：选择列复选框与行操作按钮随行悬停显隐。
 const ROW_GROUP: &str = "download-task-row";
 /// 表头全选格 group 名：悬停该格时显示全选框。
@@ -737,6 +755,9 @@ pub(crate) struct DownloadTableDelegate {
     /// 被推迟的重排的补偿定时器（到期后强制按最新排序重排）。
     reorder_timer: Option<Task<()>>,
     selected_tasks: HashSet<RowKey>,
+    /// 正在构建的任务 / 组行：`render_tr` 记下，同一行随后的 `render_last_empty_col` 取走并
+    /// 在右侧留白上挂行悬停操作（留白始终贴可视区右缘，横向滚动时按钮不随末列移出视口）。
+    trailing_actions: Option<groups::Entity>,
     selection_anchor: Option<RowKey>,
     /// 显式多选模式：仅 Cmd/Ctrl+点击或全选进入，普通单击 / 清空选择退出；
     /// 行首复选框只在该模式且有选中项时显示（与 Web `multiSelect` 对齐）。
@@ -767,6 +788,9 @@ pub(crate) struct DownloadTableDelegate {
     /// 最近一次交给表格的文字缩放（界面缩放 × 字号缩放，`column()` 写入）：
     /// 列的最小宽 / 默认宽按它放大，与当前主题不同即需 refresh 重建列。
     text_scale: Cell<f32>,
+    /// 最近一次交给表格的主题 `icon.lg`（`column()` 写入）：选择列宽按它与密度推算，
+    /// 与当前主题不同即需 refresh 重建列。
+    icon_base: Cell<f32>,
     /// 列配置（宽度 / 可见性 / 顺序 / 排序指示）需要重建表头 `col_groups`。
     /// 纯行数据变化不置位：`TableState::refresh` 会用代理宽度覆盖表格内部
     /// 实时宽度，进度节拍若每次都刷新会把用户正在拖拽的列宽弹回去。
@@ -809,6 +833,7 @@ impl DownloadTableDelegate {
             row_order: RowOrder::default(),
             reorder_timer: None,
             selected_tasks: HashSet::new(),
+            trailing_actions: None,
             selection_anchor: None,
             multi_select: false,
             pending_delete: HashSet::new(),
@@ -825,6 +850,7 @@ impl DownloadTableDelegate {
             viewport_width: 0.,
             applied_file_width: Cell::new(0.),
             text_scale: Cell::new(1.),
+            icon_base: Cell::new(16.),
             columns_dirty: false,
             host: None,
             plugin_commands: Vec::new(),
@@ -991,8 +1017,10 @@ impl DownloadTableDelegate {
             .filter(|column| column.kind != DownloadColumnKind::FileName && column.visible)
             .map(|column| column.kind.display_width(column.width, text_scale))
             .sum();
-        let reserved =
-            SELECTION_COLUMN_WIDTH + others + TABLE_TRAILING_GUTTER + f32::from(Scrollbar::width());
+        let reserved = self.selection_column_width()
+            + others
+            + TABLE_TRAILING_GUTTER
+            + f32::from(Scrollbar::width());
         (viewport - reserved).max(min_width)
     }
 
@@ -1005,6 +1033,16 @@ impl DownloadTableDelegate {
     /// 文字缩放（主题的界面缩放 × 字号缩放）与上次交给表格的列不一致，需重建列。
     fn text_scale_stale(&self, text_scale: f32) -> bool {
         (self.text_scale.get() - text_scale).abs() > f32::EPSILON
+    }
+
+    /// 主题 `icon.lg` 与上次交给表格的列不一致（选择列宽随之变化），需重建列。
+    fn icon_base_stale(&self, lg: f32) -> bool {
+        (self.icon_base.get() - lg).abs() > f32::EPSILON
+    }
+
+    /// 当前密度下的选择列宽（px）；选择条等覆盖层据此对齐选择列右缘。
+    pub(crate) fn selection_column_width(&self) -> f32 {
+        selection_column_width_for(self.prefs.density, self.icon_base.get())
     }
 
     /// prepaint 判定：容器宽变化，或文件名列宽与期望不符（例如刚同步了其他列宽）。
@@ -2008,8 +2046,9 @@ impl DownloadTableDelegate {
                 })
             }
             TaskState::Paused => Some(bytes_progress(task)),
-            TaskState::Failed => task
-                .error_message
+            TaskState::Failed => self
+                .strings
+                .task_error_text(&task.error_message)
                 .lines()
                 .next()
                 .map(str::trim)
@@ -2065,14 +2104,10 @@ impl DownloadTableDelegate {
     }
 
     /// 选择列图标边长：双行 / 三行密度给文件图标更大的尺寸（与文字块等高感），紧凑单行与
-    /// 文字同高。
+    /// 文字同高。选择列宽随之放宽（[`Self::selection_column_width`]），图标不越出选中底色。
     fn file_icon_size(&self, cx: &App) -> Pixels {
-        let lg = active_theme(cx).extended().icon.lg;
-        match self.prefs.density {
-            ViewDensity::Relaxed => lg * FILE_ICON_RELAXED_SCALE,
-            ViewDensity::Comfortable => lg * FILE_ICON_COMFORTABLE_SCALE,
-            ViewDensity::Compact => lg,
-        }
+        let lg = f32::from(active_theme(cx).extended().icon.lg);
+        px(file_icon_size_for(self.prefs.density, lg))
     }
 
     /// 固定左列：平时显示系统文件图标（取不到时回退为按类型的图标，元数据加载中为
@@ -2248,7 +2283,9 @@ impl DownloadTableDelegate {
         let two_line = self.prefs.density.two_line();
         let detail = self.status_detail(task);
         let tooltip = if task.state == TaskState::Failed && !task.error_message.trim().is_empty() {
-            Some(SharedString::from(task.error_message.clone()))
+            Some(SharedString::from(
+                self.strings.task_error_text(&task.error_message).to_owned(),
+            ))
         } else if two_line {
             None
         } else {
@@ -2429,7 +2466,8 @@ impl DownloadTableDelegate {
             )
     }
 
-    /// 行悬停操作（最后一个可见列右端浮层）：暂停 / 继续 / 重试 / 打开 + 在文件夹中
+    /// 行悬停操作（挂在右侧留白列上，贴表格可视区右缘，横向滚动时不移出视口）：
+    /// 暂停 / 继续 / 重试 / 打开 + 在文件夹中
     /// 显示；停靠详情面板未打开时再加「详情」（面板打开后单击行即切换详情，按钮多余），
     /// 舒适与紧凑密度一致。底色与行悬停一致（选中时叠加选中色），除「详情」外点击不
     /// 改变选中。
@@ -2505,8 +2543,9 @@ impl DownloadTableDelegate {
             h_flex()
                 .absolute()
                 .top_0()
-                .right_0()
                 .bottom_0()
+                // 父节点是右侧留白列：浮层右缘对齐其左缘，即单元格可视区右缘。
+                .right(px(TABLE_TRAILING_GUTTER))
                 .gap(tokens.spacing.xxs)
                 .pl(tokens.spacing.xs)
                 .bg(extended.colors.row_hover)
@@ -2982,10 +3021,13 @@ impl TableDelegate for DownloadTableDelegate {
         if col_ix == 0 {
             // 不设 `fixed_left`：gpui-component 会给固定列画一条 `border` 色竖线，
             // 而文件名列已吸收剩余宽度，常规列集不会出现横向滚动。
+            self.icon_base
+                .set(f32::from(active_theme(cx).extended().icon.lg));
+            let width = px(self.selection_column_width());
             return Column::new("selection", "")
-                .width(px(SELECTION_COLUMN_WIDTH))
-                .min_width(px(SELECTION_COLUMN_WIDTH))
-                .max_width(px(SELECTION_COLUMN_WIDTH))
+                .width(width)
+                .min_width(width)
+                .max_width(width)
                 .resizable(false)
                 .movable(false)
                 .selectable(false)
@@ -3161,12 +3203,14 @@ impl TableDelegate for DownloadTableDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
+        self.trailing_actions = None;
         let theme = active_theme(cx);
         let row_height = self.prefs.density.row_height(theme.density());
         let id = match self.visible.get(row_ix) {
             Some(VisibleRow::Task(id) | VisibleRow::Member { id, .. }) => *id,
             Some(VisibleRow::Group(group)) => {
                 let group = *group;
+                self.trailing_actions = Some(groups::Entity::Group(group));
                 return self.render_group_tr(row_ix, group, cx);
             }
             Some(VisibleRow::GroupDir { .. }) => return self.render_group_dir_tr(row_ix, cx),
@@ -3220,6 +3264,7 @@ impl TableDelegate for DownloadTableDelegate {
                 };
             }
         });
+        self.trailing_actions = Some(groups::Entity::Task(id));
 
         div()
             .id(("download-task-row", row_ix))
@@ -3303,7 +3348,7 @@ impl TableDelegate for DownloadTableDelegate {
         let Some(kind) = self.shown_column(col_ix).map(|column| column.kind) else {
             return div().into_any_element();
         };
-        let cell = if kind == DownloadColumnKind::FileName && depth > 0 {
+        if kind == DownloadColumnKind::FileName && depth > 0 {
             // 组内成员：文件图标从选择列挪进文件名列（落在组行展开箭头的位置），整行比
             // 组行右移一级；目录之下的成员再缩进一级。
             let icon = task_file_icon(task, self.file_icon_size(cx), window, cx);
@@ -3323,30 +3368,32 @@ impl TableDelegate for DownloadTableDelegate {
                 .into_any_element()
         } else {
             self.task_cell(kind, task, cx)
-        };
-        if col_ix == self.shown_columns_count()
-            && let Some(actions) = self.render_row_actions(task, cx)
-        {
-            return div()
-                .size_full()
-                .relative()
-                .child(cell)
-                .child(actions)
-                .into_any_element();
         }
-        cell
     }
 
-    /// 右侧留白与选择列内含的左侧留白对称。
+    /// 右侧留白与选择列内含的左侧留白对称；任务 / 组行在此挂行悬停操作（见
+    /// `render_row_actions` / `render_group_actions`）。
     fn render_last_empty_col(
         &mut self,
         _window: &mut Window,
-        _cx: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let actions = match self.trailing_actions.take() {
+            Some(groups::Entity::Task(id)) => self
+                .store
+                .row(id)
+                .and_then(|task| self.render_row_actions(&task, cx)),
+            Some(groups::Entity::Group(ix)) => self
+                .group_rows
+                .get(ix)
+                .and_then(|group| self.render_group_actions(ix, group, cx)),
+            None => None,
+        };
         h_flex()
             .w(px(TABLE_TRAILING_GUTTER))
             .h_full()
             .flex_shrink_0()
+            .children(actions)
     }
 
     fn move_column(
@@ -3681,16 +3728,18 @@ pub(crate) fn render_download_table(
         .on_prepaint(move |bounds, window, cx| {
             let width = f32::from(bounds.size.width);
             let text_scale = f32::from(active_theme(cx).text_extent(1.));
+            let icon_base = f32::from(active_theme(cx).extended().icon.lg);
             let delegate = observed.read(cx).delegate();
             let sync_width = delegate.viewport_needs_sync(width);
-            let rescale = delegate.text_scale_stale(text_scale);
+            let rescale =
+                delegate.text_scale_stale(text_scale) || delegate.icon_base_stale(icon_base);
             let arm_timer = delegate.needs_reorder_timer();
             if !sync_width && !rescale && !arm_timer {
                 return;
             }
             window.defer(cx, move |_, cx| {
                 observed.update(cx, |table, cx| {
-                    // 界面缩放 / 字号变化后列的最小宽、默认宽随之变化，重建列。
+                    // 界面缩放 / 字号 / 图标尺寸变化后列的最小宽、默认宽、选择列宽随之变化，重建列。
                     let resized = sync_width && table.delegate_mut().set_viewport_width(width);
                     if resized || rescale {
                         table.refresh(cx);

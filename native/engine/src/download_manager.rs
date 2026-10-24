@@ -1553,7 +1553,7 @@ fn ask_support(
     } else if dash_downloader::is_dash_url(url) || is_ed2k_url(url) {
         AskSupport::NoSkip
     } else if non_get_request {
-        // 答复后以恢复路径重入，恢复一律按 GET 重发，非 GET 请求不能询问。
+        // 答复后以恢复路径重入，而非 GET 任务的恢复会被拒绝（请求体不落库），不能询问。
         AskSupport::None
     } else {
         AskSupport::WithSkip
@@ -2759,6 +2759,8 @@ struct PreparedTask {
     is_bt: bool,
     /// `tasks.category_route` 列值（空串 = 不路由）。
     category_route: String,
+    /// `tasks.request_method` 列值（空串 = GET；见 `downloader::persisted_request_method`）。
+    request_method: String,
 }
 
 impl PreparedTask {
@@ -2820,6 +2822,7 @@ impl PreparedTask {
                 ""
             },
             category_route: &self.category_route,
+            request_method: &self.request_method,
             torrent_file_bytes: &self.torrent_file_bytes,
         }
     }
@@ -8674,6 +8677,7 @@ impl DownloadManager {
                 (initial.unwrap_or(route.base_dir), column)
             }
         };
+        let request_method = downloader::persisted_request_method(method.as_deref());
         PrepareOutcome::Ready(Box::new(PreparedTask {
             task_id: Uuid::now_v7().to_string(),
             url,
@@ -8706,6 +8710,7 @@ impl DownloadManager {
             resolver_choice_pending,
             is_bt,
             category_route,
+            request_method,
         }))
     }
 
@@ -10781,6 +10786,31 @@ impl DownloadManager {
         self.sync_queue_occupancy();
     }
 
+    /// 浏览器 POST 接管任务无法恢复：以 [`downloader::POST_ONLY_RESUME_MESSAGE`]
+    /// 落为失败并通知宿主（进度不清，用户回浏览器重新发起即可）。
+    async fn fail_post_only_resume(&mut self, task_id: &str, task: &TaskInfo) {
+        let msg = downloader::POST_ONLY_RESUME_MESSAGE;
+        if let Err(error) = self.db.update_task_status(task_id, 4, msg).await {
+            crate::logger::report_error("download-manager", "persist task state", &error);
+        }
+        self.sink.emit(EngineEvent::TaskProgress {
+            task_id: task_id.to_string(),
+            status: 4,
+            downloaded_bytes: task.downloaded_bytes,
+            total_bytes: task.total_bytes,
+            speed: 0,
+            file_name: task.file_name.clone(),
+            save_dir: task.save_dir.clone(),
+            url: task.url.clone(),
+            error_message: msg.to_string(),
+            upload_speed_bps: 0,
+            uploaded_bytes: task.uploaded_bytes,
+            seeding_status: task.seeding_status,
+            seeding_message: task.seeding_message.clone(),
+            seeding_time_secs: task.seeding_time_secs,
+        });
+    }
+
     /// Internal: actually spawn the resume (no concurrency check).
     async fn do_resume_task(&mut self, task_id: &str) {
         // 插件惰性解析守卫（体首，协议判定前）：命中 resolver 且非再入 → off-actor
@@ -10878,6 +10908,35 @@ impl DownloadManager {
         } else {
             (None, None, false, 0, false)
         };
+
+        // 浏览器 POST 接管的任务：请求体（常含一次性令牌）不落库，无法重放；改发
+        // GET（HEAD + Range 探测）对只收 POST 的端点必然 405，对表单端点则会下到
+        // 错误内容。恢复 / 重试一律明确失败，提示回浏览器重新发起。插件 resolve
+        // 已给出新的请求（`plugin_resolved`）时不受此限。
+        #[cfg(feature = "plugins")]
+        let request_replaced = plugin_resolved;
+        #[cfg(not(feature = "plugins"))]
+        let request_replaced = false;
+        if !request_replaced {
+            match self.db.load_task_request_method(task_id).await {
+                Ok(method) if !method.is_empty() => {
+                    log_info!(
+                        "[manager] resume_task {}: started by a {} request whose body is not \
+                         persisted — refusing to resume",
+                        task_id,
+                        method
+                    );
+                    self.fail_post_only_resume(task_id, &task).await;
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => crate::logger::report_error(
+                    "download-manager",
+                    "load task request method",
+                    &error,
+                ),
+            }
+        }
 
         // 恢复持久化的浏览器请求上下文：鉴权站点（cookie+token 双因子的 fnOS、
         // 带 Authorization 的私有服务）缺它们 resume 必然 4xx。
@@ -11437,9 +11496,9 @@ impl DownloadManager {
                 selector: self.selector.clone(),
                 checksum: task.checksum,
                 extra_headers: resume_extra_headers.clone(),
-                // method/body 仍不持久化：恢复一律按 GET 重发（重放 POST 体有
-                // 副作用风险，成本远高于收益）。cookies/referrer/extra_headers
-                // 则从 DB 恢复，保住鉴权站点的 resume。
+                // 请求体不落库，走到这里的必是 GET 任务（非 GET 任务已在体首以
+                // POST_ONLY_RESUME_MESSAGE 失败）。cookies/referrer/extra_headers
+                // 从 DB 恢复，保住鉴权站点的 resume。
                 spec: downloader::RequestSpec::from_captured(
                     None,
                     resume_cookies,

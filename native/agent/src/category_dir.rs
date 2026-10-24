@@ -19,7 +19,8 @@ pub(crate) fn category_route(preferences: &BTreeMap<String, Value>) -> Option<Ca
 }
 
 /// 命中的分类保存目录；无命中 / 命中分类未配置目录时返回 `None`。
-pub(crate) fn route_save_dir<'a>(
+#[must_use]
+pub fn route_save_dir<'a>(
     route: &'a CategoryRouteDto,
     file_name: &str,
     url: &str,

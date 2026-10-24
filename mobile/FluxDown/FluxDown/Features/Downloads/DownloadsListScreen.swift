@@ -30,8 +30,10 @@ struct DownloadsListScreen: View {
     @State private var pendingGroupDelete: GroupDeleteRequest?
     /// 多选底栏「删除」待确认的任务（确认 alert 由该按钮挂载）。
     @State private var pendingSelectionDelete: TaskDeleteRequest?
+    #if FULL_FLAVOR
     /// 待确认「忽略插件重试」的任务（`daemon.plugin.ignoreRetry`）。
     @State private var ignoreRetryTaskId: String?
+    #endif
 
     private var prefs: ViewPrefsStore { container.viewPrefs }
 
@@ -56,6 +58,7 @@ struct DownloadsListScreen: View {
             .safeAreaBar(edge: .top, spacing: 0) {
                 DownloadsFilterBar(model: model)
             }
+            #if FULL_FLAVOR
             .alert(L("taskIgnorePluginRetryTitle"), isPresented: Binding(
                 get: { ignoreRetryTaskId != nil },
                 set: { if !$0 { ignoreRetryTaskId = nil } }
@@ -67,6 +70,7 @@ struct DownloadsListScreen: View {
             } message: {
                 Text(L("taskIgnorePluginRetryMsg"))
             }
+            #endif
             .alert(L("mobileClearFinishedTitle"), isPresented: $confirmingClear) {
                 Button(L("cancel"), role: .cancel) {}
                 Button(L("mobileClearFinishedAction", ["n": clearIds.count]), role: .destructive) { clearFinished(clearIds) }
@@ -180,6 +184,7 @@ struct DownloadsListScreen: View {
         .contextMenu {
             if !editing {
                 TaskMenuItems(task: item.task, boosted: item.boosted, onSelect: { model.beginSelecting(with: item.id) })
+                #if FULL_FLAVOR
                 if PluginFailure.isIgnorable(status: item.task.status, errorMessage: item.task.errorMessage) {
                     Section {
                         Button(L("taskIgnorePluginRetry"), systemImage: "puzzlepiece.extension") {
@@ -187,6 +192,7 @@ struct DownloadsListScreen: View {
                         }
                     }
                 }
+                #endif
             }
         } preview: {
             DownloadRowView(
@@ -462,6 +468,7 @@ struct DownloadsListScreen: View {
 
     // MARK: 动作
 
+    #if FULL_FLAVOR
     /// `daemon.plugin.ignoreRetry`：跳过插件，用原始链接重试（仅插件失败任务，已由菜单条件保证）。
     private func ignorePluginRetry(_ taskId: String) {
         actions.run(onSuccess: { [toasts] in
@@ -470,6 +477,7 @@ struct DownloadsListScreen: View {
             try await session.callVoid(HostMethod.daemonPluginIgnoreRetry, params: TaskIdParams(taskId: taskId))
         }
     }
+    #endif
 
     private func refresh() async {
         guard actions.guardWritable() else { return }

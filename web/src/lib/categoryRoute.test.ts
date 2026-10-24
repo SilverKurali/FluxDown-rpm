@@ -1,6 +1,16 @@
 import { describe, expect, test } from 'bun:test'
 import type { CustomCategoryDto } from './rpc'
-import { routeBaseDir, routeFollows, routeFromCategories, routeFromPreference } from './categoryRoute'
+import { autoFollowDir, matchedCategory, modeDir, pickableCategories, routeBaseDir, routeFollows, routeFromCategories, routeFromPreference, routeSaveDir } from './categoryRoute'
+import type { CategoryRouteDto } from './rpc'
+
+declare const Bun: { file(path: URL): { json(): Promise<unknown> } }
+const routeCases = (await Bun.file(new URL('../../../native/engine/src/fixtures/category_route_cases.json', import.meta.url)).json()) as {
+  name: string
+  route: CategoryRouteDto
+  fileName: string
+  url: string
+  expected: string | null
+}[]
 
 const cat = (id: string, patch: Partial<CustomCategoryDto> = {}): CustomCategoryDto => ({
   id,
@@ -66,5 +76,39 @@ describe('follows / baseDir', () => {
     expect(routeBaseDir(route, '/v', '/d')).toBe('/d')
     expect(routeBaseDir(route, '/o', '/d')).toBe('/d')
     expect(routeBaseDir(route, ' /d ', '/d')).toBe('/d')
+  })
+})
+
+describe('routeSaveDir (shared fixtures)', () => {
+  for (const item of routeCases) {
+    test(item.name, () => {
+      expect(routeSaveDir(item.route, item.fileName, item.url)).toBe(item.expected)
+    })
+  }
+})
+
+describe('auto follow / mode', () => {
+  test('空、等于 offered、等于上次自动写入才跟随', () => {
+    expect(autoFollowDir('', '/d', null, '/v')).toBe('/v')
+    expect(autoFollowDir(' /d ', '/d', null, '/v')).toBe('/v')
+    expect(autoFollowDir('/v', '/d', '/v', null)).toBe('/d')
+    expect(autoFollowDir('/custom', '/d', '/v', '/p')).toBeNull()
+  })
+
+  test('可选分类过滤与命中', () => {
+    const list = [
+      cat('all', { builtinType: 'all', saveDir: '/a' }),
+      cat('v', { saveDir: '/v' }),
+      cat('h', { saveDir: '/h', visible: false }),
+      cat('n'),
+      cat('other', { builtinType: 'other', saveDir: '/o' }),
+    ]
+    const options = pickableCategories(list)
+    expect(options.map((c) => c.id)).toEqual(['v', 'other'])
+    expect(matchedCategory(options, '/o')?.id).toBe('other')
+    expect(matchedCategory(options, '/x')).toBeNull()
+    expect(modeDir({ kind: 'category', id: 'v' }, options, '/d', null)).toBe('/v')
+    expect(modeDir({ kind: 'none' }, options, '/d', '/v')).toBe('/d')
+    expect(modeDir({ kind: 'auto' }, options, '/d', null)).toBe('/d')
   })
 })

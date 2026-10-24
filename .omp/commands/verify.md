@@ -14,7 +14,7 @@ argument-hint: "[crate / 子项目 / 路径，留空 = 自 origin/main 分叉以
    - 每个改动 crate：`cargo nextest run -p <crate> <filter>`；engine 集成测试是单一二进制 `--test engine`，按模块过滤（如 `--test engine plugin_ffmpeg::`）。**禁止 `--workspace` 测试**。
    - 改了 `native/api`：重跑 `gen_openapi` 并确认 `website-v2/public/openapi.json` 无意外漂移。
    - 改了 engine 但未开 feature 的路径：`cargo check -p fluxdown_engine`（验证关插件时主链路零变化）。
-3. 镜像契约：对照 AGENTS.md §5，改了表中左列任一处，就跑右列对应端的测试（共享夹具的 Rust 与 TS 两侧都要跑）。
+3. 镜像契约：改动文件命中 AGENTS.md §5 索引的任一 `.omp/rules/mirror-*.md`（看规则 `globs`），就按该规则「→」后列出的每一端跑对应测试（共享夹具的 Rust 与 TS 两侧都要跑）。
 4. 前端子项目有改动（在各自目录）：
    - `web/`：`bun run lint && bun run test && bun run build`
    - `fluxDown/`：`bun test && npm run typecheck && npm run build`

@@ -267,6 +267,15 @@ pub(crate) fn routed_request(
     (request, routed)
 }
 
+/// 会话路由下命中的分类保存目录；无路由 / 无命中 / 命中分类未配置目录时为 `None`。
+fn category_save_dir_for(
+    route: Option<&CategoryRouteDto>,
+    file_name: &str,
+    url: &str,
+) -> Option<String> {
+    fluxdown_agent::route_save_dir(route?, file_name, url).map(str::to_owned)
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl HostSession {
     /// 拉取式信号流：首个为 `Snapshot`；`None` = 会话已永久关闭（`Fatal` 之后、
@@ -465,6 +474,13 @@ impl HostSession {
         self.cancel.cancel();
     }
 
+    /// 新建下载表单的分类目录预测：按已连接主机当前分类路由，返回 `file_name`（不含 `.` 时
+    /// 回退 `url` 路径末段）命中的分类保存目录；无路由 / 无命中返回 `None`。与建任务时
+    /// 的路由同一套匹配语义（agent `route_save_dir`）。
+    pub fn category_save_dir(&self, file_name: String, url: String) -> Option<String> {
+        category_save_dir_for(self.routes.borrow().as_ref(), &file_name, &url)
+    }
+
     /// 批量导入（GPUI 同一套语义，见 `import.rs`）：按 256 条分块调用 `daemon.task.createMany`，
     /// 结果不确定时同一 `batchId` 退避重发，可取消。立即返回句柄；经句柄拉取进度与最终汇总。
     /// 本机主机与远端 `/rpc` 走同一路径。丢弃句柄不会取消导入。
@@ -557,6 +573,34 @@ mod tests {
         let no_route = super::routed_create_params(req, None);
         assert_eq!(no_route.request.save_dir, "");
         assert_eq!(no_route.category_route, None);
+    }
+
+    #[test]
+    fn category_save_dir_follows_the_route_and_is_none_without_one() {
+        let route = route();
+        assert_eq!(
+            super::category_save_dir_for(Some(&route), "photo.JPG", "").as_deref(),
+            Some("/pictures")
+        );
+        // 文件名不含 `.` 时回退 URL 路径末段。
+        assert_eq!(
+            super::category_save_dir_for(Some(&route), "", "https://x.test/a/b.jpg?x=1").as_deref(),
+            Some("/pictures")
+        );
+        assert_eq!(
+            super::category_save_dir_for(Some(&route), "setup.exe", ""),
+            None
+        );
+        assert_eq!(super::category_save_dir_for(None, "photo.jpg", ""), None);
+    }
+
+    #[tokio::test]
+    async fn session_without_custom_dirs_has_no_category_save_dir() {
+        let (session, _recorder, _link) = ready().await;
+        assert_eq!(
+            session.category_save_dir("photo.jpg".to_owned(), String::new()),
+            None
+        );
     }
 
     #[test]

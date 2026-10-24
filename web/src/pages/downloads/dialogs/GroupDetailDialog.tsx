@@ -10,6 +10,7 @@ import { toastRpcError } from '../../../lib/rpcToast'
 import { copyText } from '../../../lib/copy'
 import type { MenuEntry } from '../../../ui'
 import { closeGroupDetail } from './store'
+import { localizeTaskError } from '../model/taskError'
 import { formatBytes } from './utils'
 
 
@@ -265,7 +266,7 @@ function MemberRow({ task }: { task: TaskDto }) {
           {size} · <span className={STATUS_COLOR[task.status] ?? 'text-text-tertiary'}>{t(statusKey(task.status))}</span>
           {percent ? ` · ${percent}` : ''}
         </div>
-        {task.status === TASK_STATUS.error && task.errorMessage ? <div className="truncate text-xs text-destructive" title={task.errorMessage}>{task.errorMessage}</div> : null}
+        {task.status === TASK_STATUS.error && task.errorMessage ? <div className="truncate text-xs text-destructive" title={localizeTaskError(t, task.errorMessage)}>{localizeTaskError(t, task.errorMessage)}</div> : null}
       </div>
       <span className="tabular hidden text-right text-xs text-muted-foreground desktop:block">{size}</span>
       <div className="col-span-2 flex items-center gap-2 empty:hidden desktop:col-span-1 desktop:empty:flex">

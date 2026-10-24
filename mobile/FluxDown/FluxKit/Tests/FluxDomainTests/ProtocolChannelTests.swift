@@ -94,6 +94,7 @@ struct ProtocolChannelTests {
         }
 
         func close() {}
+        func categorySaveDir(fileName _: String, url _: String) -> String? { nil }
         func createTask(_: CreateTaskRequest) async throws(HostError) -> String { "" }
         func pause(_: String) async throws(HostError) {}
         func resume(_: String) async throws(HostError) {}

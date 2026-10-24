@@ -661,10 +661,18 @@ impl GatewayService {
             method::AGENT_SOUND_PREVIEW => {
                 let params =
                     parse_params::<fluxdown_protocol::sound::SoundPreviewParams>(request.params)?;
-                tokio::task::spawn_blocking(move || crate::sound::preview(&params.value))
-                    .await
-                    .map_err(|error| internal_error("sound preview join", error))?
-                    .map_err(sound_preview_error)
+                let value = params.value;
+                let outcome = tokio::task::spawn_blocking({
+                    let value = value.clone();
+                    move || crate::sound::preview(&value)
+                })
+                .await
+                .map_err(|error| internal_error("sound preview join", error))?;
+                outcome
+                    .map_err(|error| {
+                        tracing::warn!(value = %value, error = %error, "sound preview failed");
+                        sound_preview_error(error)
+                    })
                     .map(|()| serde_json::json!({ "ok": true }))
             }
             method::AGENT_PLATFORM_INTEGRATION_GET => {
@@ -1430,7 +1438,6 @@ fn update_error(error: UpdateError) -> RpcErrorData {
 /// 都带 `soundUnplayable` 原因，供客户端给出可操作文案。
 fn sound_preview_error(error: crate::sound::PreviewError) -> RpcErrorData {
     use crate::sound::{PlaybackError, PreviewError};
-    tracing::debug!(error = %error, "sound preview failed");
     match error {
         PreviewError::InvalidValue => invalid_field("value"),
         PreviewError::UnsupportedType(_) => {

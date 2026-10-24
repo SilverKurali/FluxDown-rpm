@@ -6,7 +6,7 @@ import Testing
 // 通用页的纯逻辑：Info.plist 链接声明、分类图标映射、行目录。
 // 分类规则本身（解析 / 校验 / 重排 / 一键目录）由 FluxDomain 的 `PreferencesProtocolTests` 覆盖。
 
-#if FULL_P2P
+#if FULL_FLAVOR
 @MainActor
 struct GeneralLinkHandlingTests {
     private let shipped: [String: Any] = [
@@ -88,7 +88,7 @@ struct GeneralRowTests {
     @Test func searchIndexesEveryRow() {
         let ctx = SettingsSearchContext(form: SettingsConfigForm(), isLocalHost: true, capabilities: [])
         let ids = GeneralPage.searchEntries(ctx).map(\.id)
-        #expect(ids == GeneralRow.allCases.filter { FeatureFlags.webhooks || $0 != .activityWebhooks }.map(\.id))
+        #expect(ids == GeneralRow.allCases.filter { (FeatureFlags.webhooks || $0 != .activityWebhooks) && $0.isAvailable }.map(\.id))
         #expect(Set(ids).count == ids.count)
     }
 }

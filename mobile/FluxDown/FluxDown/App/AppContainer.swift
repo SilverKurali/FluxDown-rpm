@@ -339,6 +339,7 @@ nonisolated final class UnavailableSession: HostSession {
 
     func close() {}
 
+    func categorySaveDir(fileName: String, url: String) -> String? { nil }
     func createTask(_ request: CreateTaskRequest) async throws(HostError) -> String { throw error }
     func pause(_ taskId: String) async throws(HostError) { throw error }
     func resume(_ taskId: String) async throws(HostError) { throw error }

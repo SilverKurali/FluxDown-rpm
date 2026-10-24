@@ -17,6 +17,7 @@ import com.fluxdown.app.AppContainer
 import com.fluxdown.app.HomeActivity
 import com.fluxdown.app.R
 import com.fluxdown.app.data.DeviceSettings
+import com.fluxdown.app.i18n.localizedTaskError
 import com.fluxdown.app.i18n.str
 import com.fluxdown.app.nav.AppNavigator
 import com.fluxdown.app.nav.AppTab
@@ -301,7 +302,7 @@ object DownloadNotifier {
                 builder.build()
             }
             NotificationEvent.Kind.Failed -> {
-                val reason = event.errorMessage.trim()
+                val reason = context.localizedTaskError(event.errorMessage.trim())
                 val body = if (reason.isEmpty()) event.fileName else "${event.fileName}\n$reason"
                 NotificationCompat.Builder(context, CHANNEL_FAILED)
                     .setSmallIcon(R.drawable.ic_stat_download)

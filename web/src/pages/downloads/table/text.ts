@@ -2,6 +2,7 @@
 
 import type { FileKind } from '../../../lib/icon-pack'
 import { activeTransfers, formatBytes, isSeeding, MAX_ETA_SECS, sourceSite } from '../model/task'
+import { localizeTaskError } from '../model/taskError'
 import type { DownloadTaskView, TaskState } from '../model/task'
 import { stateLabel } from '../state'
 
@@ -116,7 +117,7 @@ export function statusDetail(t: Translate, view: DownloadTaskView): string | nul
       return bytesProgress(view)
     case 'failed': {
       const line = view.errorMessage.split('\n', 1)[0]?.trim() ?? ''
-      return line === '' ? null : line
+      return line === '' ? null : localizeTaskError(t, line)
     }
     default:
       return null

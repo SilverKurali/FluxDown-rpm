@@ -11,7 +11,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { useT } from '../../../i18n'
 import { CUSTOM_CATEGORIES_PREF_KEY, LATER_QUEUE_ID, MAIN_QUEUE_ID, METHOD, RpcError, call, rpc, rpcStore, useAgent, useConfigValues, useConnection, useDaemon } from '../../../lib/rpc'
-import { routeBaseDir, routeFollows, routeFromPreference } from '../../../lib/categoryRoute'
+import { autoFollowDir, modeDir, pickableCategories, routeBaseDir, routeFollows, routeFromCategories, routeSaveDir } from '../../../lib/categoryRoute'
+import type { CategoryPickMode } from '../../../lib/categoryRoute'
+import { categoriesFromPreference } from '../model/categories'
 import { cloudPresenceKnown } from '../../../lib/cloud-presence'
 import { describeUploadError } from '../../../lib/rpcErrorText'
 import { ThreadsRiskCallout } from '../../../lib/ThreadsRiskCallout'
@@ -33,6 +35,7 @@ import { capturesShown, closeNewDownload } from './store'
 import type { NewDownloadSession } from './store'
 import { isTorrentFile, submitTorrentFiles } from './torrents'
 import { SaveDirCombo } from './SaveDirCombo'
+import { CategoryPicker } from './CategoryPicker'
 import { SAVE_DIR_HISTORY_ENABLED_PREF, SAVE_DIR_HISTORY_PREF, readSaveDirHistory, recordSaveDir, saveDirChoices } from '../../../lib/saveDirHistory'
 import { accountErrorKey } from '../../settings/sections/account/errorText'
 import { buildRemoteTargets, checkRemoteSaveDir, dispatchRoute, LOCAL_TARGET, linkDispatchParams, pathExample, remoteDispatchParams, resolveTargetValue, summarizeDispatch } from './target'
@@ -167,6 +170,33 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
   const remoteDirCheck = target ? checkRemoteSaveDir(remoteSaveDir, target.pathStyle) : 'ok'
   const canSubmit = !busy && count > 0 && (target ? remoteDirCheck === 'ok' : saveDir.trim() !== '')
 
+  // ── 分类下拉：Auto 模式下目录框跟随识别出的文件名（规则见 `lib/categoryRoute.ts`）──
+  const categoriesPref = useAgent((snapshot) => snapshot.preferences.values[CUSTOM_CATEGORIES_PREF_KEY], undefined)
+  const categories = useMemo(() => categoriesFromPreference(categoriesPref), [categoriesPref])
+  const categoryRoute = useMemo(() => routeFromCategories(categories), [categories])
+  const categoryOptions = useMemo(() => pickableCategories(categories), [categories])
+  const [categoryMode, setCategoryMode] = useState<CategoryPickMode>({ kind: 'auto' })
+  /** 上一次自动写入目录框的值；用户手改后与之不等，不再覆盖。 */
+  const lastAutoDir = useRef<string | null>(null)
+  const categoryShown = categoryRoute !== null && !target
+  const predictedName = rename.trim() !== '' ? rename.trim() : (entries[0]?.fileName ?? '')
+  const predictedUrl = entries[0]?.url ?? ''
+  const predictedDir = categoryShown && categoryRoute ? routeSaveDir(categoryRoute, predictedName, predictedUrl) : null
+  useEffect(() => {
+    if (!categoryShown || categoryMode.kind !== 'auto') return
+    const next = autoFollowDir(saveDir, context.saveDir, lastAutoDir.current, predictedDir)
+    if (next === null) return
+    lastAutoDir.current = next
+    if (next !== saveDir) setSaveDir(next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在预测输入 / 模式变化时跟随，目录框当前值取渲染时快照
+  }, [categoryShown, categoryMode.kind, predictedDir])
+  const pickCategory = (mode: CategoryPickMode) => {
+    setCategoryMode(mode)
+    const next = modeDir(mode, categoryOptions, context.saveDir, predictedDir)
+    lastAutoDir.current = mode.kind === 'auto' ? next : null
+    setSaveDir(next)
+  }
+
   // ── 外部捕获并入表单 ──
   const capturesRef = useRef<PendingCaptureDto[]>([])
   capturesRef.current = captures
@@ -181,7 +211,10 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
       const current = textRef.current
       if (current.trim() === '') {
         const dir = fresh.map((capture) => capture.saveDir.trim()).find((value) => value !== '')
-        if (dir) setSaveDir(dir)
+        if (dir) {
+          lastAutoDir.current = dir
+          setSaveDir(dir)
+        }
       }
       setText(appendEntries(current, fresh.map((capture) => captureEntry(capture.url, capture.fileName))))
       setCaptures((prev) => [...prev, ...fresh])
@@ -442,8 +475,9 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
       )
       const { items } = batch
       let { common } = batch
-      // 分类路由：只对本机提交生效；目录仍是表单初始值 / 分类目录时交给引擎按文件名定落点。
-      const route = routeFromPreference(rpcStore.peek().snapshot?.preferences.values[CUSTOM_CATEGORIES_PREF_KEY])
+      // 分类路由：只对本机提交生效；目录仍是表单初始值 / 分类目录时交给引擎按文件名定落点；
+      // 分类下拉选了「不分类」/ 指定分类时用户已显式定目录，不路由。
+      const route = categoryShown && categoryMode.kind === 'auto' ? categoryRoute : null
       const followed = route !== null && routeFollows(route, options.saveDir, context.saveDir) ? route : null
       if (followed) common = { ...common, saveDir: routeBaseDir(followed, options.saveDir, context.saveDir) }
       const controller = new AbortController()
@@ -776,14 +810,19 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
             <FormField label={t('saveDir')} htmlFor="new-download-save-dir">
               <InputWithAction
                 input={
-                  <SaveDirCombo
-                    id="new-download-save-dir"
-                    value={saveDir}
-                    placeholder={t('selectSaveDir')}
-                    choices={saveDirOptions}
-                    label={t('saveDirRecent')}
-                    onChange={setSaveDir}
-                  />
+                  <div className="flex flex-wrap items-center gap-2">
+                    {categoryShown ? <CategoryPicker mode={categoryMode} options={categoryOptions} predicted={predictedDir} onChange={pickCategory} /> : null}
+                    <div className="min-w-[14rem] flex-1">
+                      <SaveDirCombo
+                        id="new-download-save-dir"
+                        value={saveDir}
+                        placeholder={t('selectSaveDir')}
+                        choices={saveDirOptions}
+                        label={t('saveDirRecent')}
+                        onChange={setSaveDir}
+                      />
+                    </div>
+                  </div>
                 }
                 action={
                   <Button icon={FolderOpen} onClick={() => setPickerOpen(true)}>

@@ -17,7 +17,7 @@
 #       环境变量 APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_PATH（.p8）；
 #       可选 FLUXCLOUD_BASE_URL（编译期写入核心，见 build-core.sh）；FLUXDOWN_APP_VERSION 缺省取 --version，
 #       写入核心的协议握手 / 云端 / UA 版本（与 Android package.sh、桌面打包一致）。
-#       商店构建固定 store flavor（build-core.sh --flavor store + FLUX_FLAVOR_CONDITIONS= 置空 FULL_P2P）；
+#       商店构建固定 store flavor（build-core.sh --flavor store + FLUX_FLAVOR_CONDITIONS= 置空 FULL_FLAVOR）；
 #       --skip-core 时核对核心 flavor 标记，非 store 直接拒绝；侧载构建见 sideload.sh。
 set -euo pipefail
 
@@ -100,7 +100,7 @@ if [ -n "$PROFILE" ]; then
   echo "==> installed provisioning profile $UUID"
 fi
 
-# 商店构建固定 store flavor：核心编译期不含 P2P，App 不定义 FULL_P2P。
+# 商店构建固定 store flavor：核心编译期不含 P2P，App 不定义 FULL_FLAVOR。
 if [ "$SKIP_CORE" = 0 ]; then
   FLUXDOWN_APP_VERSION="${FLUXDOWN_APP_VERSION:-$VERSION}" "$SCRIPT_DIR/build-core.sh" --release --flavor store
 fi
@@ -125,6 +125,14 @@ ARCHIVED_PLIST="$OUT/FluxDown.xcarchive/Products/Applications/FluxDown.app/Info.
 [ -f "$ARCHIVED_PLIST" ] || { echo "archive has no Info.plist at $ARCHIVED_PLIST" >&2; exit 1; }
 if plutil -p "$ARCHIVED_PLIST" | grep -qiE 'magnet|ed2k|torrent'; then
   echo "store archive Info.plist still declares P2P entries (FLUX_FLAVOR_CONDITIONS not empty?)" >&2
+  exit 1
+fi
+
+# 商店二进制不得编入 P2P / 插件功能代码（App Review 5.6：审核所见即全部功能）：按 full 专属视图类型名抽查。
+ARCHIVED_BIN="$OUT/FluxDown.xcarchive/Products/Applications/FluxDown.app/FluxDown"
+[ -f "$ARCHIVED_BIN" ] || { echo "archive has no executable at $ARCHIVED_BIN" >&2; exit 1; }
+if strings -a "$ARCHIVED_BIN" | grep -qE 'BtSelectionView|PluginChoiceView|VariantSelectionView|MarketPage|ExtensionsPage|ComponentsSections|TaskDetailSeedingPage|ManifestSelectView|TorrentImport'; then
+  echo "store executable still contains full-flavor P2P / plugin code (FLUX_FLAVOR_CONDITIONS not empty?)" >&2
   exit 1
 fi
 

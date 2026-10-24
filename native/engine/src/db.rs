@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     resp_mime TEXT NOT NULL DEFAULT '',
     source_changed INTEGER NOT NULL DEFAULT 0,
     category_route TEXT NOT NULL DEFAULT '',
+    request_method TEXT NOT NULL DEFAULT '',
     queue_order INTEGER NOT NULL DEFAULT 0,
     uploaded_bytes BIGINT NOT NULL DEFAULT 0,
     uploaded_at_completion BIGINT NOT NULL DEFAULT 0,
@@ -362,6 +363,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     resp_mime TEXT NOT NULL DEFAULT '',
     source_changed INTEGER NOT NULL DEFAULT 0,
     category_route TEXT NOT NULL DEFAULT '',
+    request_method TEXT NOT NULL DEFAULT '',
     queue_order INTEGER NOT NULL DEFAULT 0,
     uploaded_bytes BIGINT NOT NULL DEFAULT 0,
     uploaded_at_completion BIGINT NOT NULL DEFAULT 0,
@@ -770,6 +772,8 @@ pub struct NewTaskRow<'a> {
     pub bt_selected_files: &'a str,
     /// 分类目录路由列值（`CategoryRoute` JSON；空串 = 不路由）。
     pub category_route: &'a str,
+    /// 浏览器捕获的非 GET 请求方法（`POST` 等）；空串 = GET。请求体不落库。
+    pub request_method: &'a str,
     /// `.torrent` 字节；非空时同事务写入 `torrent_files`。
     pub torrent_file_bytes: &'a [u8],
 }
@@ -1514,6 +1518,10 @@ impl Db {
         // 外部捕获的分类目录路由（JSON，见 `category_route.rs`；空 = 保存目录即最终目录）。
         self.add_column_if_missing("tasks", "category_route", "TEXT NOT NULL DEFAULT ''")
             .await?;
+        // 浏览器 POST 接管任务的请求方法（空 = GET）。请求体（常含一次性令牌）不落库，
+        // 恢复 / 重试时据此明确拒绝，而不是改发 GET。
+        self.add_column_if_missing("tasks", "request_method", "TEXT NOT NULL DEFAULT ''")
+            .await?;
         Ok(())
     }
 
@@ -1687,9 +1695,9 @@ impl Db {
                 "INSERT INTO tasks (id, url, file_name, name_inferred, save_dir, segments, status, error_message, \
                  created_at, proxy_url, queue_id, checksum, ignore_tls_errors, queue_order, cookies, referrer, \
                  extra_headers, origin_url, audio_url, resolver_plugin_id, group_id, resolver_item, unattended, \
-                 bt_selected_files, resolver_choice_pending, category_route) \
+                 bt_selected_files, resolver_choice_pending, category_route, request_method) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, \
-                 $20, $21, $22, $23, $24, $25, $26)",
+                 $20, $21, $22, $23, $24, $25, $26, $27)",
             )
             .bind(row.id)
             .bind(row.url)
@@ -1717,6 +1725,7 @@ impl Db {
             .bind(row.bt_selected_files)
             .bind(i32::from(row.resolver_choice_pending))
             .bind(row.category_route)
+            .bind(row.request_method)
             .execute(&mut *tx)
             .await?;
             if !row.torrent_file_bytes.is_empty() {
@@ -4653,6 +4662,16 @@ impl Db {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(route.unwrap_or_default())
+    }
+
+    /// 任务落库的非 GET 请求方法（空串 = GET / 任务不存在）。
+    pub async fn load_task_request_method(&self, id: &str) -> Result<String, DbError> {
+        let method: Option<String> =
+            sqlx::query_scalar("SELECT request_method FROM tasks WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(method.unwrap_or_default())
     }
 
     /// 产物移入分类目录后同步任务位置（单条 UPDATE，目录与文件名不会分离）。
@@ -8714,6 +8733,7 @@ mod tests {
             resolver_choice_pending: false,
             bt_selected_files: "",
             category_route: "",
+            request_method: "",
             torrent_file_bytes: &[],
         }
     }

@@ -2,8 +2,8 @@
  * 阿里云 OSS 发布资产源。
  *
  * 发布资产由 .github/actions/oss-upload 上传到 `oss://<bucket>/<prefix>/<tag>/<file>`，
- * bucket 保持私有（对象不可公共读）。官网只用 AK/SK 做 HEAD 存在性探测，下载一律经阿里云 CDN
- * （`CN_CDN_BASE`，URL 鉴权 A 方式，OSS 私有 Bucket 回源）；不签发直连 OSS 的下载链接。
+ * bucket 保持私有（对象不可公共读）。官网只用 AK/SK 做 HEAD 存在性探测，下载一律经 dl-cn 镜像
+ * （`CN_CDN_BASE`，URL 鉴权 A 方式，私有 OSS 回源）；不签发直连 OSS 的下载链接。
  * 签名算法：https://help.aliyun.com/zh/oss/developer-reference/signature-version-1
  */
 
@@ -20,9 +20,9 @@ import {
 import { ossStorageKey } from "@/lib/oss-storage";
 
 /**
- * 官网签发的下载链接有效期（秒）。阿里云 CDN「URL 鉴权 → 鉴权 URL 有效时长」须配置为同一值：
- * A 方式的过期时间 = 签发时刻 + CDN 侧有效时长。分段下载在过期前发起的请求不受影响，
- * 过期后客户端重新请求 `/api/download` 即拿到新链接。
+ * 官网签发的下载链接有效期（秒）。镜像侧有效时长须为同一值（Worker `DOWNLOAD_URL_TTL_SEC`，
+ * 或阿里云 CDN「URL 鉴权 → 鉴权 URL 有效时长」）：A 方式的过期时间 = 签发时刻 + 镜像侧有效时长。
+ * 分段下载在过期前发起的请求不受影响，过期后客户端重新请求 `/api/download` 即拿到新链接。
  */
 export const DOWNLOAD_URL_TTL_SEC = 3 * 3600;
 
@@ -49,13 +49,14 @@ function encodedPath(key: string): string {
 
 const CDN_BASE = (CN_CDN_BASE ?? "").replace(/\/+$/, "");
 
-/** 阿里云 CDN 基址与鉴权主 KEY 都配置时才启用 CDN 下载。 */
+/** 镜像基址与鉴权主 KEY 都配置时才启用镜像下载。 */
 export const cdnConfigured = !!(CDN_BASE && CN_CDN_AUTH_KEY);
 
 /**
- * 阿里云 CDN 下载链接（URL 鉴权 A 方式：`auth_key=<签发时间>-<rand>-0-<md5>`，
- * md5 串为 `<编码后路径>-<签发时间>-<rand>-0-<密钥>`）。CDN 鉴权通过后去掉 auth_key 再算缓存键，
- * 签名不影响命中率。`.apk` / `.ipa` 由 CDN 回源 URI 改写到桶内 `.bin` 对象。
+ * dl-cn 镜像下载链接（阿里云 CDN URL 鉴权 A 方式：`auth_key=<签发时间>-<rand>-0-<md5>`，
+ * md5 串为 `<编码后路径>-<签发时间>-<rand>-0-<密钥>`）。现由 Cloudflare Worker（cdn/oss-proxy.js）
+ * 校验，备案后改回阿里云 CDN 也无需改签名；两者都去掉 auth_key 再算缓存键，签名不影响命中率。
+ * `.apk` / `.ipa` 由镜像回源时换成桶内 `.bin` 对象。
  * 调用前须保证 `cdnConfigured`。https://help.aliyun.com/zh/cdn/user-guide/type-a-signing
  */
 export function cdnDownloadUrl(key: string): string {
