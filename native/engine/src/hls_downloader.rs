@@ -31,7 +31,6 @@
 //!   按 media sequence 只追加新分片,播放列表出现 ENDLIST / 用户暂停或取消 / 播放列表
 //!   连续拉取失败时,以已录内容走与点播相同的收尾(remux / 音轨 mux)定稿为完成文件
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -154,63 +153,6 @@ async fn save_checkpoint(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Same-origin check for cookie safety
-// ---------------------------------------------------------------------------
-
-fn is_same_origin(base_url: &str, target_url: &str) -> bool {
-    let base = match url::Url::parse(base_url) {
-        Ok(u) => u,
-        Err(_) => return false,
-    };
-    let target = match url::Url::parse(target_url) {
-        Ok(u) => u,
-        Err(_) => return false,
-    };
-    base.scheme() == target.scheme()
-        && base.host_str() == target.host_str()
-        && base.port_or_known_default() == target.port_or_known_default()
-}
-
-fn cookies_for_url<'a>(playlist_url: &str, target_url: &str, cookies: &'a str) -> &'a str {
-    if cookies.is_empty() {
-        return "";
-    }
-    if is_same_origin(playlist_url, target_url) {
-        cookies
-    } else {
-        ""
-    }
-}
-
-/// 清单主机之外的请求不得携带的凭据类头。Cookie 另有独立的同源过滤
-/// (`cookies_for_url`),扩展捕获的 Authorization/Cookie 与站点 Basic 凭据
-/// 同样只属于用户提供的清单源站,分片/密钥/子清单指向第三方主机时不能带过去。
-fn is_credential_header(name: &str) -> bool {
-    ["authorization", "cookie", "proxy-authorization"]
-        .iter()
-        .any(|h| name.eq_ignore_ascii_case(h))
-}
-
-/// 目标与清单不同源时剔除凭据类头,同源(或本就没有凭据头)时零拷贝借用。
-pub(crate) fn extra_headers_for_origin<'a>(
-    manifest_url: &str,
-    target_url: &str,
-    headers: &'a HashMap<String, String>,
-) -> Cow<'a, HashMap<String, String>> {
-    if !headers.keys().any(|k| is_credential_header(k)) || is_same_origin(manifest_url, target_url)
-    {
-        return Cow::Borrowed(headers);
-    }
-    Cow::Owned(
-        headers
-            .iter()
-            .filter(|(k, _)| !is_credential_header(k))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-    )
-}
-
 /// 小请求(playlist / 密钥 / MPD)的整体超时:响应体只有几 KB~几 MB,30s 足够;
 /// 段 body 不能用整体超时(单段可达 256MB),见 `SEGMENT_IDLE_TIMEOUT`。
 pub(crate) const SMALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -222,7 +164,7 @@ pub(crate) const SEGMENT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// 拉取小响应体,并与取消、超时竞速;返回(重定向后的最终 URL, 响应体)。
 /// 不在共享 client 上设全局 timeout,否则会误伤普通 HTTP 长下载。
 pub(crate) async fn fetch_small(
-    req: reqwest::RequestBuilder,
+    req: crate::http_request::HttpRequest<'_>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(String, bytes::Bytes), DownloadError> {
     let work = async {
@@ -245,14 +187,14 @@ pub(crate) async fn fetch_small(
 
 /// 一次 HLS 请求的公共上下文。请求身份(Cookie / Referer / 请求头 / 按站点请求头)
 /// 一律取自运行级共享的 [`DownloadSpec`]:每次发请求前读 `current()`,凭据被插件
-/// 刷新后后续请求立即换用新身份。Cookie 按播放列表同源过滤,凭据类头按用户原始
-/// 清单源站过滤,Referer 对所有请求附加(防盗链 CDN 缺失即 403)。
+/// 刷新后后续请求立即换用新身份。播放列表 / 密钥 / 分片的每个请求(含其重定向的
+/// 每一跳)都以用户提交的清单 URL 为凭据锚点按 [`crate::credential_scope`] 判定:
+/// Cookie 只发往同站主机,Authorization 只发往同源,Referer 对所有请求附加
+/// (防盗链 CDN 缺失即 403;仅 https 来源发往 http 目标时不发)。
 #[derive(Clone, Copy)]
 struct HlsRequestCtx<'a> {
     spec: &'a DownloadSpec,
-    /// Cookie 同源判定基准(实际列出该资源的 playlist URL)。
-    cookie_base_url: &'a str,
-    /// 凭据类请求头的同源判定基准(用户提交的原始清单 URL)。
+    /// 凭据锚点:用户提交的原始清单 URL。
     header_origin_url: &'a str,
 }
 
@@ -325,20 +267,14 @@ fn confirm_resend<T>(
 
 impl HlsRequestCtx<'_> {
     /// 以请求身份 `identity` 构造 GET。
-    fn get(&self, client: &Client, url: &str, identity: &RequestSpec) -> reqwest::RequestBuilder {
-        let mut req = client.get(url);
-        let safe_cookies = cookies_for_url(self.cookie_base_url, url, &identity.cookies);
-        if !safe_cookies.is_empty() {
-            req = req.header("Cookie", safe_cookies);
-        }
-        // 放在 apply_extra_headers 之前:扩展捕获的真实 Referer 会覆盖默认值。
-        if crate::downloader::is_valid_referrer(&identity.referrer) {
-            req = req.header(reqwest::header::REFERER, identity.referrer.as_str());
-        }
-        let headers =
-            extra_headers_for_origin(self.header_origin_url, url, &identity.extra_headers);
-        let req = crate::downloader::apply_extra_headers(req, &headers);
-        crate::downloader::apply_origin_headers(req, url, &identity.origin_headers)
+    fn get<'s>(
+        &self,
+        client: &Client,
+        url: &str,
+        identity: &'s RequestSpec,
+    ) -> crate::http_request::HttpRequest<'s> {
+        crate::downloader::build_request(client, url, reqwest::Method::GET, identity)
+            .anchor(self.header_origin_url)
     }
 
     /// 拉取小体积资源(播放列表 / 密钥);被拒且凭据已刷新时用新身份重发一次。
@@ -1507,7 +1443,6 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     );
     let root_ctx = HlsRequestCtx {
         spec: &spec,
-        cookie_base_url: &p.url,
         header_origin_url: &p.url,
     };
     let FetchedPlaylist {
@@ -2140,7 +2075,6 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     );
     let seg_ctx = HlsRequestCtx {
         spec: &spec,
-        cookie_base_url: &media_playlist_url,
         header_origin_url: &p.url,
     };
     let map_bytes: HashMap<MapKey, Vec<u8>> = if is_fmp4 {
@@ -3518,7 +3452,6 @@ async fn run_audio_track(run: AudioRun) -> Result<i64, DownloadError> {
 
     let seg_ctx = HlsRequestCtx {
         spec: &spec,
-        cookie_base_url: &track.playlist_url,
         header_origin_url: &header_origin_url,
     };
     let map_bytes = prefetch_init_segments(
@@ -4362,7 +4295,6 @@ async fn run_live_track(run: LiveRun) -> Result<LiveOutcome, DownloadError> {
     // 播放列表请求沿用首次解析时的上下文(以用户 URL 为源站基准)。
     let root_ctx = HlsRequestCtx {
         spec: &spec,
-        cookie_base_url: &header_origin_url,
         header_origin_url: &header_origin_url,
     };
     let shared = Arc::new(SegmentShared {
@@ -5029,7 +4961,6 @@ impl SegmentShared {
     fn ctx(&self) -> HlsRequestCtx<'_> {
         HlsRequestCtx {
             spec: &self.spec,
-            cookie_base_url: &self.playlist_url,
             header_origin_url: &self.header_origin_url,
         }
     }
@@ -5570,7 +5501,6 @@ mod tests {
                 );
                 let ctx = super::HlsRequestCtx {
                     spec: &spec,
-                    cookie_base_url: &url,
                     header_origin_url: &url,
                 };
                 let transport = super::SegmentTransport {
@@ -6046,8 +5976,8 @@ mod tests {
     }
 
     use super::{
-        HlsRequestCtx, HlsVariant, SegmentTransport, VariantId, extra_headers_for_origin,
-        format_resume_checkpoint, match_saved_variant, parse_checkpoint_variant, resume_is_usable,
+        HlsRequestCtx, HlsVariant, SegmentTransport, VariantId, format_resume_checkpoint,
+        match_saved_variant, parse_checkpoint_variant, resume_is_usable,
     };
 
     fn variant(bandwidth: u64, resolution: Option<(u64, u64)>, uri: &str) -> HlsVariant {
@@ -6150,27 +6080,54 @@ mod tests {
         assert!(!resume_is_usable(3, 100, 120, 10, false, true));
     }
 
+    /// 清单引出的每个请求都以用户清单 URL 为凭据锚点：Cookie 发往同站主机（含子域与其他
+    /// 端口），Authorization 只发往同源；跨站与 https → http 降级两者都不带。
     #[test]
-    fn credential_headers_only_go_to_manifest_origin() {
-        let mut headers = std::collections::HashMap::new();
-        headers.insert("Authorization".to_string(), "Bearer t".to_string());
-        headers.insert("cookie".to_string(), "a=b".to_string());
-        headers.insert("Proxy-Authorization".to_string(), "Basic x".to_string());
-        headers.insert("X-Token".to_string(), "keep".to_string());
-        let manifest = "https://site.example/master.m3u8";
+    fn segment_credentials_follow_manifest_scope() {
+        let mut identity = crate::downloader::RequestSpec::empty_get();
+        identity.cookies = "sid=1".to_string();
+        identity
+            .extra_headers
+            .insert("Authorization".to_string(), "Bearer t".to_string());
+        identity
+            .extra_headers
+            .insert("Proxy-Authorization".to_string(), "Basic x".to_string());
+        identity
+            .extra_headers
+            .insert("X-Token".to_string(), "keep".to_string());
+        let spec = crate::downloader::DownloadSpec::new(identity.clone());
+        let ctx = HlsRequestCtx {
+            spec: &spec,
+            header_origin_url: "https://www.site.example/master.m3u8",
+        };
+        let client = reqwest::Client::new();
+        let sent = |url: &str| {
+            let request = ctx.get(&client, url, &identity).first_hop();
+            let has = |name: &str| request.headers().contains_key(name);
+            (
+                has("cookie"),
+                has("authorization") && has("proxy-authorization"),
+                has("x-token"),
+            )
+        };
 
-        let same = extra_headers_for_origin(manifest, "https://site.example/seg0.ts", &headers);
-        assert_eq!(same.len(), 4);
-
-        for other in [
-            "https://cdn.example/seg0.ts",
-            "http://site.example/seg0.ts",
-            "https://site.example:8443/seg0.ts",
-        ] {
-            let filtered = extra_headers_for_origin(manifest, other, &headers);
-            assert_eq!(filtered.len(), 1, "{other}");
-            assert_eq!(filtered.get("X-Token").map(String::as_str), Some("keep"));
-        }
+        assert_eq!(sent("https://www.site.example/seg0.ts"), (true, true, true));
+        assert_eq!(
+            sent("https://cdn.site.example/seg0.ts"),
+            (true, false, true)
+        );
+        assert_eq!(
+            sent("https://www.site.example:8443/seg0.ts"),
+            (true, false, true)
+        );
+        assert_eq!(
+            sent("https://cdn.other.example/seg0.ts"),
+            (false, false, true)
+        );
+        assert_eq!(
+            sent("http://www.site.example/seg0.ts"),
+            (false, false, true)
+        );
     }
 
     #[test]
@@ -6260,7 +6217,6 @@ v360.m3u8\n\
             crate::downloader::DownloadSpec::new(crate::downloader::RequestSpec::empty_get());
         let ctx = HlsRequestCtx {
             spec: &spec,
-            cookie_base_url: &url,
             header_origin_url: &url,
         };
         let transport = SegmentTransport {

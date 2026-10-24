@@ -1361,11 +1361,15 @@ impl SubscriptionProvider for BuiltinRssProvider {
 async fn fetch_feed(req: &FetchRequest) -> Result<ParsedFeed, String> {
     let client = downloader::build_client(&req.proxy, &req.user_agent)
         .map_err(|e| format!("failed to build http client: {e}"))?;
-    let mut request = client.get(&req.url).timeout(FETCH_TIMEOUT);
-    if !req.cookies.is_empty() {
-        request = request.header(reqwest::header::COOKIE, &req.cookies);
-    }
-    let resp = request.send().await.map_err(|e| e.to_string())?;
+    let spec = downloader::RequestSpec {
+        cookies: req.cookies.clone(),
+        ..downloader::RequestSpec::empty_get()
+    };
+    let resp = downloader::build_request(&client, &req.url, reqwest::Method::GET, &spec)
+        .timeout(FETCH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("HTTP {status}"));
@@ -1389,14 +1393,16 @@ async fn fetch_feed(req: &FetchRequest) -> Result<ParsedFeed, String> {
 async fn fetch_torrent(req: &FetchRequest, referrer: &str) -> Result<Vec<u8>, String> {
     let client = downloader::build_client(&req.proxy, &req.user_agent)
         .map_err(|e| format!("failed to build http client: {e}"))?;
-    let mut request = client.get(&req.url).timeout(FETCH_TIMEOUT);
-    if !req.cookies.is_empty() {
-        request = request.header(reqwest::header::COOKIE, &req.cookies);
-    }
-    if !referrer.is_empty() {
-        request = request.header(reqwest::header::REFERER, referrer);
-    }
-    let resp = request.send().await.map_err(|e| e.to_string())?;
+    let spec = downloader::RequestSpec {
+        cookies: req.cookies.clone(),
+        referrer: referrer.to_string(),
+        ..downloader::RequestSpec::empty_get()
+    };
+    let resp = downloader::build_request(&client, &req.url, reqwest::Method::GET, &spec)
+        .timeout(FETCH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("HTTP {status}"));

@@ -43,6 +43,8 @@ export const changelog = defineMessages({
       other: "Other",
       rpm: "RPM package",
       unsigned: "unsigned",
+      storeSigned: "store-signed · auto-updates",
+      unpacked: "unpacked · developer mode",
     },
   },
   zh: {
@@ -84,6 +86,8 @@ export const changelog = defineMessages({
       other: "其他",
       rpm: "RPM 包",
       unsigned: "未签名",
+      storeSigned: "商店签名 · 自动更新",
+      unpacked: "解压包 · 开发者模式",
     },
   },
 });

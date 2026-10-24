@@ -443,8 +443,13 @@ fn without_urls(msg: &str) -> String {
 }
 
 /// 判断错误信息是否属于可自动重试的瞬时网络错误。
-/// 排除永久性错误（404、403、checksum 等），仅重试网络层问题。
+/// 排除永久性错误（404、403、checksum 等），仅重试网络层问题。HTTP 下载器
+/// 的文案带类型化分类标签（平台 / 语言无关），有标签即以标签为准；无标签
+/// 的文案（其余协议、旧库存量）回退英文关键词。
 pub(crate) fn is_retriable_error(msg: &str) -> bool {
+    if let Some(failure) = crate::net_failure::tag_of(msg) {
+        return failure.retriable_same_path();
+    }
     if let Some(status) = extract_http_status(msg)
         && is_retriable_http_status(status)
     {
@@ -481,6 +486,42 @@ pub(crate) fn is_retriable_error(msg: &str) -> bool {
 /// 速率先验须 ≥ 直连先验 × 该值。起飞路径只影响首批连接与单流下载，多段
 /// 下载中其余路径仍由 coordinator 同窗实测调度，误判代价有界。
 const AUTO_START_PROXY_RATIO: f64 = 1.5;
+
+/// 纯函数：Auto 起飞路径选择。`paths[0]` 恒为直连，其余为候选代理（按候选
+/// 顺序：手动在前、系统在后）；`blocked[i]` = 该路径近期断在传输层
+/// （[`crate::route_health::path_blocked`]）。
+///
+/// - 直连可用：最快的可用代理先验 ≥ 直连先验 × [`AUTO_START_PROXY_RATIO`]
+///   （直连无先验视为 0）才以代理起飞，否则直连——保留多 CDN 聚合资格；
+/// - 直连近期走不通：在可用代理里按先验择优（无先验视为 0，同分取候选顺序
+///   靠前者）——不再每个任务都先撞一次被墙的直连；
+/// - 全部路径都走不通：失败记录不可区分优劣，回到无阻断时的先验规则。
+fn pick_auto_takeoff(paths: &[crate::auto_proxy::PathCandidate], blocked: &[bool]) -> usize {
+    let is_blocked = |i: usize| blocked.get(i).copied().unwrap_or(false);
+    let all_blocked = (0..paths.len()).all(is_blocked);
+    let usable = |i: usize| all_blocked || !is_blocked(i);
+    let best_proxy = |require_prior: bool| {
+        paths
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(i, _)| usable(*i))
+            .filter_map(|(i, p)| match p.prior_bps {
+                Some(bps) => Some((i, bps)),
+                None if !require_prior => Some((i, 0.0)),
+                None => None,
+            })
+            // 同分保留候选顺序靠前者：max_by 在相等时取后者，故反向比较索引。
+            .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+    };
+    if usable(0) {
+        let direct_prior = paths.first().and_then(|p| p.prior_bps).unwrap_or(0.0);
+        return best_proxy(true)
+            .filter(|(_, bps)| *bps >= direct_prior * AUTO_START_PROXY_RATIO)
+            .map_or(0, |(i, _)| i);
+    }
+    best_proxy(false).map_or(0, |(i, _)| i)
+}
 
 /// `ProxyMode::Auto` 一次性备用链路的目标。手动代理、系统代理和直连在
 /// 一个自动恢复周期内各尝试至多一次，避免坏链路之间无限震荡。
@@ -1606,13 +1647,32 @@ async fn probe_start_meta(params: &mut DownloadParams) -> crate::meta_prober::Pr
             ) => r,
         };
     }
-    let resolved = tokio::select! {
-        _ = params.cancel_token.cancelled() => return crate::meta_prober::ProbedMeta::default(),
-        r = downloader::resolve_file_info_held_get(
-            &params.client,
-            &params.url,
-            &params.spec,
-        ) => r,
+    let resolved = if crate::auto_probe::applies(params) {
+        // Auto 多路径：起飞路径不及时应答 / 断在传输层时并行放出备选路径，
+        // 胜出路径就地接管 params（client、代理配置、路由上下文与标签）。
+        match crate::auto_probe::race_probe(params, downloader::ProbeKind::HeldGet).await {
+            Err(downloader::DownloadError::Cancelled) => {
+                return crate::meta_prober::ProbedMeta::default();
+            }
+            Ok(downloader::PreprobedInfo {
+                info,
+                adapted,
+                held: Some(held),
+            }) => Ok((info, adapted, held)),
+            Ok(_) => Err(downloader::DownloadError::Other(
+                "single GET probe returned no response".to_string(),
+            )),
+            Err(error) => Err(error),
+        }
+    } else {
+        tokio::select! {
+            _ = params.cancel_token.cancelled() => return crate::meta_prober::ProbedMeta::default(),
+            r = downloader::resolve_file_info_held_get(
+                &params.client,
+                &params.url,
+                &params.spec,
+            ) => r,
+        }
     };
     match resolved {
         Ok((info, adapted, held)) => {
@@ -2078,6 +2138,8 @@ struct HttpFamilyRun {
     spawn_gen: u64,
     /// resolver 下发的请求补丁；每次运行起跑前应用。
     resolver_patch: Option<(String, crate::intercept::RequestPatch)>,
+    /// 系统 PAC 路由（见 [`crate::pac_route`]）；每次运行起跑前按链接修正出口。
+    pac_routing: crate::pac_route::PacRouting,
 }
 
 async fn send_task_done(done_tx: &mpsc::Sender<TaskDone>, done: TaskDone) -> bool {
@@ -2223,6 +2285,7 @@ async fn run_http_family_task(run: HttpFamilyRun) {
         done_tx,
         spawn_gen,
         resolver_patch,
+        pac_routing,
     } = run;
     let task_id = params.task_id.clone();
     let panic_db = params.db.clone();
@@ -2235,6 +2298,18 @@ async fn run_http_family_task(run: HttpFamilyRun) {
         send_task_done(&done_tx, TaskDone::finished(task_id, spawn_gen, None)).await;
         return;
     }
+    // 系统 PAC：在 resolver 补丁定下最终链接之后、任何网络请求之前修正出口。
+    // 被取消时直接放行，由下载器在自己的取消检查点走正常终态。
+    let pac_proxy = if use_ed2k {
+        None
+    } else {
+        let cancel = params.cancel_token.clone();
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            used = crate::pac_route::apply(&mut params, pac_routing) => used,
+        }
+    };
     if let Some(ctx) = prelude.as_mut() {
         ctx.support = ask_support(
             &params.url,
@@ -2359,6 +2434,9 @@ async fn run_http_family_task(run: HttpFamilyRun) {
             if let Err(panic_info) = result {
                 let msg = panic_message(&panic_info);
                 handle_task_panic(&task_id, msg, &panic_db, &panic_progress_tx).await;
+            }
+            if let Some(used) = &pac_proxy {
+                crate::pac_route::report_outcome(&panic_db, &task_id, used).await;
             }
             reserved_temp_path
         }
@@ -6983,19 +7061,39 @@ impl DownloadManager {
                 && !is_ed2k_url(&task.url)
                 && let Some(host) = crate::segment_coordinator::extract_host(&task.url)
             {
-                let proxy_failed = task.auto_route.starts_with("proxy")
-                    && crate::auto_proxy::is_route_transport_error(&task.error_message);
-                if proxy_failed {
-                    log_info!(
-                        "[manager] auto-proxy: task {} host {} 代理传输失败，作废该 host 代理先验",
-                        task_id,
-                        host
-                    );
-                    crate::route_health::clear_proxy_prior(&host, &self.db);
+                let transport_failed =
+                    crate::auto_proxy::is_route_transport_error(&task.error_message);
+                let network_reachable = crate::route_health::network_reachable();
+                // 失败归因到具体路径（整机断网与路径无关，不记）：该路径近期
+                // 不再被选作起飞路径，也不再作为备用链路目标。旧库裸 `proxy:*`
+                // 标签无法确定是哪条代理，沿用作废两条代理先验的旧语义。
+                if transport_failed && network_reachable {
+                    match crate::auto_proxy::route_of_label(&task.auto_route) {
+                        Some(route) => {
+                            log_info!(
+                                "[manager] auto-proxy: task {} host {} 路径 {:?} 传输失败，记入路径失败权重",
+                                task_id,
+                                host,
+                                route
+                            );
+                            crate::route_health::record_path_failure(&host, route, &self.db);
+                        }
+                        None if task.auto_route.starts_with("proxy") => {
+                            crate::route_health::clear_proxy_prior(&host, &self.db);
+                        }
+                        None => {}
+                    }
                 }
 
-                // 备用链路顺序：先验更快的代理优先。
+                // 备用链路顺序：先验更快的代理优先；近期走不通的路径（含探测
+                // 竞速里刚失败的）不再作为目标。
                 let mut candidates = crate::auto_proxy::resolve_candidates(&self.proxy_config);
+                candidates.retain(|c| {
+                    !crate::route_health::path_blocked(
+                        &host,
+                        crate::auto_proxy::RoutePath::Proxy(c.source),
+                    )
+                });
                 candidates.sort_by(|a, b| {
                     let bps = |c: &crate::auto_proxy::ProxyCandidate| {
                         crate::route_health::path_prior(
@@ -7013,7 +7111,11 @@ impl DownloadManager {
                     .iter()
                     .map(|candidate| candidate.source)
                     .collect();
-                let network_reachable = crate::route_health::network_reachable();
+                let direct_usable = network_reachable
+                    && !crate::route_health::path_blocked(
+                        &host,
+                        crate::auto_proxy::RoutePath::Direct,
+                    );
                 let attempts = self
                     .auto_failover_attempts
                     .entry(task_id.to_string())
@@ -7022,7 +7124,7 @@ impl DownloadManager {
                     &task.auto_route,
                     &task.error_message,
                     &candidate_sources,
-                    network_reachable,
+                    direct_usable,
                     attempts,
                 );
 
@@ -8837,6 +8939,7 @@ impl DownloadManager {
                     &user_agent,
                     &queue_id,
                     ignore_tls_errors,
+                    None,
                 );
                 let probe_spec = downloader::RequestSpec::from_captured(
                     method.as_deref(),
@@ -8947,6 +9050,7 @@ impl DownloadManager {
                     &queued.user_agent,
                     &queued.queue_id,
                     queued.ignore_tls_errors,
+                    None,
                 );
                 (spec, client, proxy)
             });
@@ -9036,6 +9140,20 @@ impl DownloadManager {
         }
     }
 
+    /// 本任务的系统 PAC 路由：任务级代理优先（不参与）；全局 System / Auto 时
+    /// 由 spawned task 起跑前按链接修正出口（[`crate::pac_route`]）。
+    fn pac_routing(&self, task_proxy_url: &str) -> crate::pac_route::PacRouting {
+        use crate::pac_route::PacRouting;
+        if !task_proxy_url.is_empty() {
+            return PacRouting::Off;
+        }
+        match self.proxy_config.mode {
+            ProxyMode::System => PacRouting::System,
+            ProxyMode::Auto => PacRouting::Auto,
+            ProxyMode::None | ProxyMode::Manual => PacRouting::Off,
+        }
+    }
+
     /// 折算多网卡聚合的任务级输入：全局开关关闭 → `None`（多段路径零行为
     /// 变化）。任务走代理（任务级/全局级，含 System 解析结果）或持有 Auto
     /// 多路径上下文时出口是代理，标记 `blocked_by_proxy`，coordinator 只上报
@@ -9061,11 +9179,13 @@ impl DownloadManager {
     /// `ProxyMode::Auto` 的启动期路由决策（每任务一次）。
     ///
     /// 常规启动构造多路径上下文：直连与全部候选代理都是节点池里的路径，
-    /// 按跨任务折扣先验选起飞路径（代理先验须领先直连
-    /// [`AUTO_START_PROXY_RATIO`] 倍才以代理起飞），其余路径作为备选由
-    /// coordinator 同窗实测调度。局部续传同样适用——每个分段请求都经
-    /// validator 校验，路径不一致在写盘前被拒绝。`forced_route` 来自一次性
-    /// 备用链路：它独立于通用自动重试配额、优先于先验，且只走单一路径。
+    /// 按跨任务先验选起飞路径（[`pick_auto_takeoff`]：近期走不通的路径不
+    /// 起飞；代理先验须领先直连 [`AUTO_START_PROXY_RATIO`] 倍才以代理起飞），
+    /// 其余路径作为备选——探测阶段由 [`crate::auto_probe`] 错峰竞速，多段
+    /// 下载中由 coordinator 同窗实测调度。局部续传同样适用——每个分段请求
+    /// 都经 validator 校验，路径不一致在写盘前被拒绝。`forced_route` 来自
+    /// 一次性备用链路：它独立于通用自动重试配额、优先于先验，且只走单一路径
+    /// （仍带无备选的上下文，使该路径的实测速率回写跨任务先验）。
     fn auto_route_decision(
         &self,
         url: &str,
@@ -9081,8 +9201,26 @@ impl DownloadManager {
         if self.proxy_config.mode != ProxyMode::Auto {
             return None;
         }
+        let host = crate::segment_coordinator::extract_host(url);
+        // 单路径上下文：无备选，仅用于把该路径的实测速率回写先验。
+        let single_path = |route: RoutePath, label: &'static str| {
+            host.clone().filter(|_| !ignore_tls_errors).map(|host| {
+                Arc::new(AutoProxyCtx {
+                    start_prior_bps: crate::route_health::path_prior(&host, route).map(|p| p.bps),
+                    host,
+                    user_agent: user_agent.to_string(),
+                    start_route: route,
+                    start_label: label,
+                    alternates: Vec::new(),
+                })
+            })
+        };
         if forced_route == Some(AutoFailoverTarget::Direct) {
-            return Some((ProxyConfig::default(), route::DIRECT_FAILOVER, None));
+            return Some((
+                ProxyConfig::default(),
+                route::DIRECT_FAILOVER,
+                single_path(RoutePath::Direct, route::DIRECT_FAILOVER),
+            ));
         }
         let candidates = auto_proxy::resolve_candidates(&self.proxy_config);
         if candidates.is_empty() {
@@ -9093,15 +9231,20 @@ impl DownloadManager {
                 .iter()
                 .find(|candidate| candidate.source == source)
             {
+                let label = route::with_source(route::PROXY_FAILOVER, source);
                 return Some((
                     candidate.config.clone(),
-                    route::with_source(route::PROXY_FAILOVER, source),
-                    None,
+                    label,
+                    single_path(RoutePath::Proxy(source), label),
                 ));
             }
-            return Some((ProxyConfig::default(), route::DIRECT_FAILOVER, None));
+            return Some((
+                ProxyConfig::default(),
+                route::DIRECT_FAILOVER,
+                single_path(RoutePath::Direct, route::DIRECT_FAILOVER),
+            ));
         }
-        let Some(host) = crate::segment_coordinator::extract_host(url) else {
+        let Some(host) = host else {
             return Some((ProxyConfig::default(), route::DIRECT, None));
         };
         // validator 不一致（代理命中不同 CDN edge）的 host：只走直连。
@@ -9109,12 +9252,11 @@ impl DownloadManager {
             return Some((ProxyConfig::default(), route::DIRECT, None));
         }
         let prior = |route: RoutePath| crate::route_health::path_prior(&host, route).map(|p| p.bps);
-        let direct_prior = prior(RoutePath::Direct);
         let mut paths: Vec<PathCandidate> = Vec::with_capacity(candidates.len() + 1);
         paths.push(PathCandidate {
             route: RoutePath::Direct,
             config: ProxyConfig::default(),
-            prior_bps: direct_prior,
+            prior_bps: prior(RoutePath::Direct),
         });
         for candidate in candidates {
             let route = RoutePath::Proxy(candidate.source);
@@ -9124,17 +9266,11 @@ impl DownloadManager {
                 prior_bps: prior(route),
             });
         }
-        // 起飞路径：先验最快的代理显著领先直连（直连无先验视为 0）时以代理
-        // 起飞——单流下载（不支持 Range）也因此走对路径；否则直连起飞，
-        // 保留多 CDN 聚合资格。
-        let start_index = paths
+        let blocked: Vec<bool> = paths
             .iter()
-            .enumerate()
-            .skip(1)
-            .filter_map(|(i, p)| p.prior_bps.map(|bps| (i, bps)))
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .filter(|(_, bps)| *bps >= direct_prior.unwrap_or(0.0) * AUTO_START_PROXY_RATIO)
-            .map_or(0, |(i, _)| i);
+            .map(|p| crate::route_health::path_blocked(&host, p.route))
+            .collect();
+        let start_index = pick_auto_takeoff(&paths, &blocked);
         let start = paths.remove(start_index);
         let label = match start.route {
             // Auto 候选只含直连与代理；网卡链路只由多网卡聚合在 coordinator 挂入。
@@ -9188,7 +9324,8 @@ impl DownloadManager {
     ///
     /// 返回三元组的第三项是 `ProxyMode::Auto` 的启动期决策产物
     /// `(路由标签, 多路径上下文)`——非 Auto 模式恒为 `("", None)`，
-    /// meta-probe 等只关心 client 的调用方可直接忽略。
+    /// meta-probe 等只关心 client 的调用方可直接忽略。`forced_route` 为已
+    /// 排程的一次性备用链路（仅任务启动路径消费），client 与标签同源于它。
     fn task_http_context(
         &self,
         url: &str,
@@ -9196,6 +9333,7 @@ impl DownloadManager {
         user_agent: &str,
         queue_id: &str,
         ignore_tls_errors: bool,
+        forced_route: Option<AutoFailoverTarget>,
     ) -> (
         Client,
         ProxyConfig,
@@ -9209,9 +9347,7 @@ impl DownloadManager {
         let resolved_ua = self.resolved_task_ua(user_agent, queue_id);
         // ProxyMode::Auto 启动期决策（per-task 代理优先级更高，非空时跳过）。
         let auto = if proxy_url.is_empty() {
-            // do_start_task 只走首次启动（resume 由 do_resume_task 承接），
-            // meta-probe 不写路由——两类调用方均无局部数据。
-            self.auto_route_decision(url, resolved_ua, ignore_tls_errors, None)
+            self.auto_route_decision(url, resolved_ua, ignore_tls_errors, forced_route)
         } else {
             None
         };
@@ -9852,18 +9988,17 @@ impl DownloadManager {
                 return;
             }
         } else {
-            let (task_client, task_proxy, (auto_route, auto_ctx)) =
-                self.task_http_context(&url, &proxy_url, &user_agent, &queue_id, ignore_tls_errors);
+            let forced_route = self.auto_failover_pending.remove(&task_id);
+            let (task_client, task_proxy, (auto_route, auto_ctx)) = self.task_http_context(
+                &url,
+                &proxy_url,
+                &user_agent,
+                &queue_id,
+                ignore_tls_errors,
+                forced_route,
+            );
             // ProxyMode::Auto 可追溯性：启动基线路由落库（非 Auto 写空串清除
             // 旧标签），非空时广播给客户端原位刷新详情面板「链路」行。
-            let auto_route = match self.auto_failover_pending.remove(&task_id) {
-                Some(AutoFailoverTarget::Proxy(source)) => crate::auto_proxy::route::with_source(
-                    crate::auto_proxy::route::PROXY_FAILOVER,
-                    source,
-                ),
-                Some(AutoFailoverTarget::Direct) => crate::auto_proxy::route::DIRECT_FAILOVER,
-                None => auto_route,
-            };
             if let Err(e) = self.db.set_task_auto_route(&task_id, auto_route).await {
                 log_info!("[manager] task {} auto_route 落库失败: {}", task_id, e);
             }
@@ -9903,7 +10038,9 @@ impl DownloadManager {
             let multi_nic = self.multi_nic_input(
                 ignore_tls_errors,
                 &task_proxy,
-                auto_ctx.is_some(),
+                auto_ctx
+                    .as_ref()
+                    .is_some_and(|ctx| !ctx.alternates.is_empty()),
                 self.resolved_task_ua(&user_agent, &queue_id),
             );
             let task_unattended = self.db.is_task_unattended(&task_id).await.unwrap_or(false);
@@ -9983,6 +10120,7 @@ impl DownloadManager {
                     done_tx,
                     spawn_gen,
                     resolver_patch,
+                    pac_routing: self.pac_routing(&proxy_url),
                 })
                 .instrument(task_span),
             )
@@ -11438,7 +11576,9 @@ impl DownloadManager {
             let multi_nic = self.multi_nic_input(
                 task.ignore_tls_errors,
                 &task_proxy,
-                auto_ctx.is_some(),
+                auto_ctx
+                    .as_ref()
+                    .is_some_and(|ctx| !ctx.alternates.is_empty()),
                 &resume_user_agent,
             );
             let task_unattended = self.db.is_task_unattended(&tid).await.unwrap_or(false);
@@ -11544,6 +11684,7 @@ impl DownloadManager {
                     done_tx,
                     spawn_gen,
                     resolver_patch,
+                    pac_routing: self.pac_routing(&task.proxy_url),
                 })
                 .instrument(task_span),
             )
@@ -14040,7 +14181,7 @@ impl DownloadManager {
         &self,
         url: String,
     ) -> impl Future<Output = crate::meta_prober::LinkProbe> + Send + use<> {
-        let client = self.task_http_context(&url, "", "", "", false).0;
+        let client = self.task_http_context(&url, "", "", "", false, None).0;
         async move {
             let lower = url.get(..8).unwrap_or(&url).to_ascii_lowercase();
             if !(lower.starts_with("http://") || lower.starts_with("https://")) {
@@ -15642,10 +15783,63 @@ mod tests {
             .expect("auto mode should return a route decision");
         assert_eq!(selected_proxy.port, 7890);
         assert_eq!(route, crate::auto_proxy::route::PROXY_FAILOVER_MANUAL);
+        let ctx = ctx.expect("forced route keeps a single-path context for prior learning");
         assert!(
-            ctx.is_none(),
-            "forced failover must not start another probe"
+            ctx.alternates.is_empty(),
+            "forced failover must stay on the one path (no probe race, no multipath)"
         );
+        assert_eq!(
+            ctx.start_route,
+            crate::auto_proxy::RoutePath::Proxy(crate::auto_proxy::CandidateSource::ManualFields)
+        );
+    }
+
+    #[test]
+    fn auto_takeoff_avoids_recently_failed_paths() {
+        use crate::auto_proxy::{CandidateSource, PathCandidate, RoutePath};
+        let path = |route, prior_bps| PathCandidate {
+            route,
+            config: ProxyConfig::default(),
+            prior_bps,
+        };
+        let manual = RoutePath::Proxy(CandidateSource::ManualFields);
+        let system = RoutePath::Proxy(CandidateSource::System);
+
+        // 直连可用：代理先验须领先 1.5× 才以代理起飞。
+        let paths = [
+            path(RoutePath::Direct, Some(1e6)),
+            path(manual, Some(1.4e6)),
+            path(system, Some(1.6e6)),
+        ];
+        assert_eq!(pick_auto_takeoff(&paths, &[false; 3]), 2);
+        let slow_proxies = [
+            path(RoutePath::Direct, Some(1e6)),
+            path(manual, Some(1.4e6)),
+            path(system, None),
+        ];
+        assert_eq!(pick_auto_takeoff(&slow_proxies, &[false; 3]), 0);
+        // 领先的代理近期走不通：不以它起飞。
+        assert_eq!(pick_auto_takeoff(&paths, &[false, false, true]), 0);
+
+        // 直连近期走不通（被墙）：无先验的代理也优先于再撞一次直连，同分取
+        // 候选顺序靠前者；有先验的更快代理优先。
+        let cold = [
+            path(RoutePath::Direct, Some(5e6)),
+            path(manual, None),
+            path(system, None),
+        ];
+        assert_eq!(pick_auto_takeoff(&cold, &[true, false, false]), 1);
+        assert_eq!(pick_auto_takeoff(&cold, &[true, true, false]), 2);
+        let warm = [
+            path(RoutePath::Direct, None),
+            path(manual, Some(1e5)),
+            path(system, Some(2e6)),
+        ];
+        assert_eq!(pick_auto_takeoff(&warm, &[true, false, false]), 2);
+
+        // 全部走不通：失败记录无区分度，回到先验规则。
+        assert_eq!(pick_auto_takeoff(&paths, &[true; 3]), 2);
+        assert_eq!(pick_auto_takeoff(&cold, &[true; 3]), 0);
     }
 
     /// 构造一个刚以可重试错误失败、已排程自动重试的任务（#947 场景）。

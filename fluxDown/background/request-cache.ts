@@ -5,6 +5,7 @@
  */
 import { browser } from "wxt/browser";
 import type { Browser } from "wxt/browser";
+import { logWarn } from "@/utils/error-log";
 
 // 请求头缓存（Cookie / Authorization）；兼作「该 URL 确有网络请求」的证据（见 sawNetworkRequest）。
 export const requestHeaderCache = new Map<
@@ -229,7 +230,7 @@ export function installRequestCache(): void {
       "[FluxDown] webRequest.onBeforeRequest listener registered (with requestBody)",
     );
   } catch (e) {
-    console.warn(
+    logWarn(
       "[FluxDown] Failed to register onBeforeRequest listener:",
       e,
     );
@@ -282,7 +283,7 @@ export function installRequestCache(): void {
         "[FluxDown] webRequest.onSendHeaders listener registered (without extraHeaders)",
       );
     } catch (e) {
-      console.warn(
+      logWarn(
         "[FluxDown] Failed to register webRequest.onSendHeaders listener:",
         e,
       );

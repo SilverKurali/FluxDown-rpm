@@ -272,7 +272,7 @@ export const legal = defineMessages({
           title: "Other platforms",
           body: "",
           items: [
-            'macOS: artifacts are currently unsigned; users should obtain artifacts only from the official GitHub Releases page. See <a href="{gatekeeper}">macOS Gatekeeper instructions</a>.',
+            "macOS: the app and DMG are signed with an Apple Developer ID (Hardened Runtime) and notarized by Apple; the notarization ticket is stapled, so Gatekeeper verifies them even offline.",
             "Linux: artifacts (AppImage / deb / Arch / portable) are currently not cryptographically signed; obtain them only from the official GitHub Releases page.",
           ],
         },
@@ -543,7 +543,7 @@ export const legal = defineMessages({
           title: "其他平台",
           body: "",
           items: [
-            'macOS：产物目前未签名，请仅从官方 GitHub Releases 页面获取。参见 <a href="{gatekeeper}">macOS Gatekeeper 说明</a>。',
+            "macOS：应用与 DMG 使用 Apple Developer ID 签名（Hardened Runtime）并经 Apple 公证，公证票据已装订（staple），离线时 Gatekeeper 也能校验。",
             "Linux：产物（AppImage / deb / Arch / 便携版）目前未做加密签名，请仅从官方 GitHub Releases 页面获取。",
           ],
         },

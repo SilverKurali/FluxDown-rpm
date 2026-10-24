@@ -17,11 +17,13 @@
  *   published_at: "2025-01-01T00:00:00Z",
  *   total_downloads: 12345,
  *   extension_version: "0.2.3",   // 浏览器扩展版本（取自所在 release 的 tag），无扩展 release 时为 undefined
+ *   extension_crx_version: "0.2.2", // 商店签名 CRX 的版本（审核通过后才补传，可能落后于 extension_version）
  *   assets: {
  *     setup: { name, size, download_url },
  *     portable: { name, size, download_url },
- *     extension: { name, size, download_url },        // Chrome zip
+ *     extension: { name, size, download_url },        // Chrome 解压包 zip（开发者模式加载，不自动更新）
  *     firefox_extension: { name, size, download_url }, // Firefox XPI
+ *     chrome_crx: { name, size, download_url },       // 商店签名 CRX 原件（.github/workflows/cws-crx.yml 补传）
  *   },
  *   server: {
  *     version: "0.1.51",
@@ -192,6 +194,14 @@ export const GET: APIRoute = async ({ url, request, clientAddress }) => {
     const extensionVersion = extensionRelease
       ? releaseVersion(extensionRelease.tag_name)
       : undefined;
+    // 商店签名 CRX 在审核通过后才由 cws-crx.yml 补传到同版本 release：取最近一个带它的
+    // 稳定 release，不跟 extensionRelease 绑定（新版审核期间仍提供上一版，装好后由商店自动更新）。
+    const crxRelease = published.find((r) =>
+      r.assets.some((a) => a.name.endsWith("-chrome.crx")),
+    );
+    const chromeCrxAsset = crxRelease?.assets.find((a) =>
+      a.name.endsWith("-chrome.crx"),
+    );
     // macOS 资产
     const macosDmgArm64Asset = appAssets.find((a) =>
       a.name.endsWith("-macos-arm64.dmg"),
@@ -303,6 +313,9 @@ export const GET: APIRoute = async ({ url, request, clientAddress }) => {
       published_at: latest.published_at,
       total_downloads: totalDownloads,
       extension_version: extensionVersion,
+      extension_crx_version: crxRelease
+        ? releaseVersion(crxRelease.tag_name)
+        : undefined,
       assets: {
         setup: formatAsset(setupAsset, appTag),
         portable: formatAsset(portableAsset, appTag),
@@ -313,6 +326,7 @@ export const GET: APIRoute = async ({ url, request, clientAddress }) => {
           firefoxExtensionAsset,
           extensionRelease?.tag_name,
         ),
+        chrome_crx: formatAsset(chromeCrxAsset, crxRelease?.tag_name),
         macos_dmg_arm64: formatAsset(macosDmgArm64Asset, appTag),
         macos_dmg_x64: formatAsset(macosDmgX64Asset, appTag),
         macos_tarball_arm64: formatAsset(macosTarballArm64Asset, appTag),

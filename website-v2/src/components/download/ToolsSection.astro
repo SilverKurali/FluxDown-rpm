@@ -39,7 +39,7 @@ const android: RowSpec[] = [
       <Fragment slot="icon"><SquareTerminal size={16} strokeWidth={1.75} /></Fragment>
       <a class="link mt-auto self-start text-[13px]" href={withBase(`/docs/${lang}/api/cli/`)}>{t.cli.docs}</a>
     </AssetGroup>
-    <AssetGroup lang={lang} id="android" os="android" title={t.android.title} desc={t.android.desc} versionPath="mobile.version" fallback={fallback} rows={android} notifyHref="#subscribe">
+    <AssetGroup lang={lang} id="android" os="android" title={t.android.title} desc={t.android.desc} versionPath="mobile.version" fallback={fallback} rows={android}>
       <Fragment slot="icon"><BrandIcon name="android" size={16} /></Fragment>
     </AssetGroup>
     <AssetGroup lang={lang} id="ios" os="ios" title={t.ios.title} desc={t.ios.desc} fallback={fallback} rows={[]}>

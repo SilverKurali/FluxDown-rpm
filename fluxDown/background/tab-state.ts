@@ -23,6 +23,7 @@ import { computeConfidence, isWorthShowing } from "./resource-policy";
 import { getEngine } from "./rules-store";
 import { mergeRestoredTab } from "./tab-restore";
 import type { PersistedTab } from "./tab-restore";
+import { logWarn } from "@/utils/error-log";
 
 const CONFIDENCE_ORDER: Record<ConfidenceLevel, number> = { high: 3, medium: 2, low: 1 };
 
@@ -783,7 +784,7 @@ async function persistTab(tabId: number): Promise<void> {
     // QUOTA_BYTES：删掉最旧 tab 的键再重试一次。
     const victim = persistedOrder.find((id) => id !== tabId);
     if (victim === undefined) {
-      console.warn("[FluxDown] persist tab state failed:", e);
+      logWarn("[FluxDown] persist tab state failed:", e);
       return;
     }
     persistedOrder.splice(persistedOrder.indexOf(victim), 1);
@@ -791,7 +792,7 @@ async function persistTab(tabId: number): Promise<void> {
       await session.remove(`${SESSION_KEY_PREFIX}${victim}`);
       await session.set(entry);
     } catch (retryError) {
-      console.warn("[FluxDown] persist tab state failed after eviction:", retryError);
+      logWarn("[FluxDown] persist tab state failed after eviction:", retryError);
       return;
     }
   }
@@ -834,7 +835,7 @@ export async function restoreTabState(): Promise<void> {
       for (const listener of changeListeners) listener(tabId);
     }
   } catch (e) {
-    console.warn("[FluxDown] restore tab state failed:", e);
+    logWarn("[FluxDown] restore tab state failed:", e);
   }
 }
 

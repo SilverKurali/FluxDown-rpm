@@ -10,6 +10,7 @@ import { browser } from "wxt/browser";
 import type { Browser } from "wxt/browser";
 import { hostOf } from "@/rules/url";
 import { installConnectionDiagnostics } from "@/utils/connection-diagnostics-background";
+import { ERROR_LOG_TYPES, handleErrorLogMessage } from "@/utils/error-log-background";
 import { checkRemoteAvailable, effectiveRemoteMode } from "@/utils/download-dispatch";
 import {
   nmhOpenFile,
@@ -608,6 +609,9 @@ export function installMessages(): void {
   async function handleMessage(message: TypedMessage, sender: Sender): Promise<unknown> {
     if (message.type === "diagnostics-record" || message.type === "diagnostics-export") {
       return handleDiagnostics({ type: message.type, event: message.event }, sender);
+    }
+    if (typeof message.type === "string" && ERROR_LOG_TYPES.includes(message.type)) {
+      return handleErrorLogMessage(message, sender);
     }
     const typed = await handleTypeMessage(message);
     if (typed !== undefined) return typed;

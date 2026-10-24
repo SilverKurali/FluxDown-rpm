@@ -18,6 +18,7 @@ export interface ReleaseInfo {
   published_at: string;
   total_downloads: number;
   extension_version?: string;
+  extension_crx_version?: string;
   assets: Assets<
     | "setup"
     | "portable"
@@ -25,6 +26,7 @@ export interface ReleaseInfo {
     | "portable_arm64"
     | "extension"
     | "firefox_extension"
+    | "chrome_crx"
     | "macos_dmg_arm64"
     | "macos_dmg_x64"
     | "macos_tarball_arm64"

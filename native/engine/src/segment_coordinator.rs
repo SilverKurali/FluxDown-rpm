@@ -922,6 +922,49 @@ const RETRY_TOTAL_CEILING_FACTOR: u32 = 4;
 /// 网络抖动），失败即上抛交给节点池切换。
 const PINNED_NODE_MAX_RETRIES: u32 = 2;
 
+/// 限速器饱和判据：本窗口吞吐至少达到适用限速的该比例才算被限速器钳住。
+/// 令牌耗尽的偶发等待（刚改限速、尾部微段）不足以说明样本受限速器支配。
+const LIMITER_SATURATION_FLOOR: f64 = 0.5;
+
+/// 本窗口是否 app-limited（BBR 语义）：限速已启用、窗口内限速器确实让连接
+/// 等过令牌（`throttle_waits_delta > 0`），且任务吞吐已贴近限速值。直连比
+/// 限速值还慢时令牌恒有余量、不会等待，连接受链路而非限速器约束，此时仍应
+/// 采样并探索代理。
+fn window_app_limited(limit_bps: u64, throttle_waits_delta: u64, throughput_bps: f64) -> bool {
+    limit_bps > 0
+        && throttle_waits_delta > 0
+        && throughput_bps >= LIMITER_SATURATION_FLOOR * limit_bps as f64
+}
+
+/// SYS 租约是否具备「传输失败快速放手」资格：Auto 多路径下存在与 SYS 不同的
+/// 存活备选路径、改道配额未耗尽（`sys_fallback_available`），且该段不是
+/// 开放式首段 / plain GET 生命线（配额型端点只允许留在起飞路径、重连可能
+/// 被拒，永远保持完整预算）。
+fn sys_fast_release(sys_fallback_available: bool, open_ended: bool, no_range: bool) -> bool {
+    sys_fallback_available && !open_ended && !no_range
+}
+
+/// 一次段内失败所适用的重试预算。
+///
+/// - 非 SYS 租约（钉定节点 / 备选路径）：恒 [`PINNED_NODE_MAX_RETRIES`]，失败
+///   快速上抛交给节点池切换；
+/// - SYS 租约默认 [`MAX_RETRIES`]（单路径时段内重试是唯一自愈手段）。具备
+///   快放手资格（`fast_release`）且本次是传输层失败时收紧为
+///   [`PINNED_NODE_MAX_RETRIES`]——节点池会改道接手，坐等 ~80s 退避只会拖死
+///   已坏的路径。HTTP 类瞬时错误（503 等）换路修不好，保持原预算，不因
+///   Auto 降低容错。
+fn segment_retry_budget(
+    attributable_lease: bool,
+    fast_release: bool,
+    transport_error: bool,
+) -> u32 {
+    if attributable_lease || (fast_release && transport_error) {
+        PINNED_NODE_MAX_RETRIES
+    } else {
+        MAX_RETRIES
+    }
+}
+
 /// 单段瞬时失败隔离次数上限：段内重试耗尽后、其它连接仍健康时，同一段最多
 /// 回队列重派这么多次；再失败按原语义上抛（整任务失败交由自动重试）。
 const SEGMENT_TRANSIENT_REQUEUE_MAX: u32 = 3;
@@ -2273,6 +2316,7 @@ pub async fn run_coordinated_download(
     let mut proven_scale: usize = 0;
     // ramp 独立采样窗口（与上方 min_split 采样解耦，互不污染窗口边界）。
     let mut ramp_last_bytes = total_downloaded.load(Ordering::Relaxed);
+    let mut ramp_last_throttle_waits = speed_limiter.throttle_waits();
     let mut ramp_last_time = Instant::now();
     let mut ramp_interval = tokio::time::interval(Duration::from_secs(RAMP_TICK_SECS));
     ramp_interval.tick().await; // consume the immediate first tick
@@ -3407,6 +3451,11 @@ pub async fn run_coordinated_download(
                     0.0
                 };
                 ramp_last_bytes = bytes;
+                // 与吞吐同窗：本窗口内限速器令牌耗尽的等待次数增量。
+                let limiter_waits_now = speed_limiter.throttle_waits();
+                let limiter_waits_delta =
+                    limiter_waits_now.saturating_sub(ramp_last_throttle_waits);
+                ramp_last_throttle_waits = limiter_waits_now;
                 ramp_last_time = now;
 
                 // Soft 冷却计时：仅完整 tick 累加（短窗口不进此路径）。
@@ -3424,7 +3473,13 @@ pub async fn run_coordinated_download(
                 // 慢于最优路径完成时间判据的在途连接在当前字节处被抢占交接。
                 let range_ok_now =
                     range_verdict.load(Ordering::Relaxed) == RANGE_VERDICT_SUPPORTED;
-                let limiter_active = speed_limiter.limit() > 0;
+                // app-limited 判定：只有限速器真正在节流的窗口，样本才反映
+                // 限速器而非链路；限速值高于链路速率时连接并非 app-limited。
+                let limiter_throttled = window_app_limited(
+                    speed_limiter.limit(),
+                    limiter_waits_delta,
+                    throughput,
+                );
                 sync_downloaded_from_shared(&mut segments, &seg_states);
                 // 多网卡聚合：后台规划完成后在本窗挂入额外链路（冷路径，随后
                 // 由下方探索逻辑各放 1 条真实分段连接实测）。
@@ -3434,10 +3489,10 @@ pub async fn run_coordinated_download(
                     &mut segments,
                     now,
                     &multipath::TickGuards {
-                        sampling: !limiter_active,
+                        sampling: !limiter_throttled,
                         may_reroute: range_ok_now
                             && !serial_mode
-                            && !limiter_active
+                            && !limiter_throttled
                             && !conn_sensitive.load(Ordering::Relaxed)
                             && !reconnect_hostile.load(Ordering::Relaxed),
                         remaining_total: effective_total_bytes.saturating_sub(bytes),
@@ -5106,14 +5161,14 @@ fn spawn_worker(
                 assignment.seg_end,
                 assignment.open_ended,
                 assignment.no_range,
-                // 非 SYS 租约（钉定节点 / 备选路径）收紧段内重试预算：失败
-                // 快速上抛交给节点池切换；SYS 租约保持原 5 次预算（唯一数据流，
-                // 耐心自愈 == 现状）。
-                if lease.is_attributable() {
-                    PINNED_NODE_MAX_RETRIES
-                } else {
-                    MAX_RETRIES
-                },
+                // SYS 租约在 Auto 多路径（有存活备选路径、非生命线段）下对传输层
+                // 失败快速放手交给节点池改道；段内每次失败的预算按错误类别选取
+                // （见 `segment_retry_budget`），钉定节点 / 备选路径恒收紧。
+                sys_fast_release(
+                    nodes.sys_fallback_available(),
+                    assignment.open_ended,
+                    assignment.no_range,
+                ),
                 !lease.is_attributable(),
                 lease.client(),
                 &seg_cancel,
@@ -5229,12 +5284,10 @@ fn spawn_worker(
                     // Auto 多路径：SYS 路径的传输层失败（连接重置/超时/停滞）在
                     // 仍有其它路径存活时同样回收重派——直连被中途阻断时由代理
                     // 接手，而不是整个任务失败。HTTP 状态/校验类错误保持原语义
-                    // （源站拒绝学习、清盘回退）。
+                    // （源站拒绝学习、清盘回退）。判据是类型化传输失败分类
+                    // （Io/Db 永不归类），与 OS 本地化文本无关。
                     let sys_transport_fallback = !lease_attributable
-                        && !matches!(e, DownloadError::Io(_) | DownloadError::Db(_))
-                        && crate::auto_proxy::is_route_transport_error(
-                            &crate::downloader::download_error_chain_text(&e),
-                        )
+                        && crate::net_failure::classify_download_error(&e).is_some()
                         && nodes.try_sys_transport_fallback();
                     let e = if (lease_attributable && attributable) || sys_transport_fallback {
                         log_info!(
@@ -5319,9 +5372,10 @@ async fn do_segment_with_retry(
     mut seg_end: i64,
     open_ended: bool,
     no_range: bool,
-    // 段内瞬时错误重试预算：SYS 租约 = MAX_RETRIES，钉定租约 =
-    // PINNED_NODE_MAX_RETRIES（快速上抛交给节点池切换）。
-    max_retries: u32,
+    // SYS 租约是否在传输层失败时快速放手（Auto 多路径有存活备选路径、非
+    // 生命线段）：为真时传输失败按 PINNED_NODE_MAX_RETRIES 上抛交给节点池
+    // 改道；HTTP 类错误不受影响。非 SYS 租约恒按 PINNED_NODE_MAX_RETRIES。
+    fast_release: bool,
     sys_lease: bool,
     client: &Client,
     cancel: &CancellationToken,
@@ -5525,6 +5579,13 @@ async fn do_segment_with_retry(
                     attempts = 0;
                 }
                 attempts += 1;
+                // 预算按本次错误类别选取（见 `segment_retry_budget`）：快放手只对
+                // 传输层失败生效，HTTP 类瞬时错误仍按原预算段内重试。
+                let max_retries = segment_retry_budget(
+                    !sys_lease,
+                    fast_release,
+                    crate::net_failure::classify_download_error(&e).is_some(),
+                );
                 if attempts >= max_retries
                     || total_failures >= max_retries.saturating_mul(RETRY_TOTAL_CEILING_FACTOR)
                 {
@@ -5676,14 +5737,13 @@ async fn do_segment(
         if plain_first && let Some(held) = spec.take_held_response() {
             break held;
         }
-        // 仅任务 URL 经凭据刷新改写；重定向终点 `direct` 保持不变。
-        let routed = if direct.is_none() {
-            spec.route_url(url)
-        } else {
-            None
-        };
-        let target = direct.as_deref().or(routed.as_deref()).unwrap_or(url);
-        let mut req = crate::downloader::build_request(client, target, reqwest::Method::GET, &used);
+        // 仅任务 URL 经凭据刷新改写；重定向终点 `direct` 保持不变。凭据锚点恒为（改写后的）
+        // 任务 URL：直连终点与经跳转链抵达终点携带完全相同的 Cookie / Authorization。
+        let routed = spec.route_url(url);
+        let origin_target = routed.as_deref().unwrap_or(url);
+        let target = direct.as_deref().unwrap_or(origin_target);
+        let mut req = crate::downloader::build_request(client, target, reqwest::Method::GET, &used)
+            .anchor(origin_target);
         if !plain_first {
             req = req.header("Range", &range);
         }
@@ -5751,11 +5811,7 @@ async fn do_segment(
     };
     let resp = resp.error_for_status()?;
     spec.confirm(&used);
-    if reuse_redirect
-        && direct.is_none()
-        && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT
-        && request_path::reuse_is_safe(url, resp.url(), &used)
-    {
+    if reuse_redirect && direct.is_none() && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         request_path.learn_redirect(url, resp.url().as_str());
     }
 
@@ -7306,6 +7362,75 @@ mod tests {
     fn is_tail_absolute_boundary_excludes_equal() {
         assert!(!is_tail(32 * MB, 16, 5600 * MB));
         assert!(is_tail(32 * MB - 1, 16, 5600 * MB));
+    }
+
+    /// 直连比限速值慢：令牌恒有余量，限速器不等待 → 窗口不算 app-limited，
+    /// 即使限速已启用（旧逻辑任何限速都整体关闭多路径）。
+    #[test]
+    fn window_below_limit_without_throttle_waits_is_not_app_limited() {
+        let limit = 10 * 1024 * 1024;
+        assert!(!super::window_app_limited(limit, 0, 2.0 * 1024.0 * 1024.0));
+        // 吞吐恰在限速值上但限速器从未让连接等待：链路自己跑满，不是限速器。
+        assert!(!super::window_app_limited(limit, 0, limit as f64));
+    }
+
+    /// 限速器饱和窗口（有节流等待且吞吐贴近限速值）才被判为 app-limited。
+    #[test]
+    fn saturated_window_with_throttle_waits_is_app_limited() {
+        let limit = 10 * 1024 * 1024;
+        assert!(super::window_app_limited(limit, 1, limit as f64));
+        assert!(super::window_app_limited(limit, 500, 0.95 * limit as f64));
+    }
+
+    /// 边界：未限速永不 app-limited；偶发等待但吞吐远低于限速（刚改限速、
+    /// 令牌桶冷启动）不算；吞吐恰为饱和下限算。
+    #[test]
+    fn app_limited_boundaries() {
+        assert!(!super::window_app_limited(0, 100, 1e9), "limit=0 即未限速");
+        let limit = 1_000_000u64;
+        let floor = super::LIMITER_SATURATION_FLOOR * limit as f64;
+        assert!(super::window_app_limited(limit, 1, floor));
+        assert!(!super::window_app_limited(limit, 1, floor - 1.0));
+        assert!(!super::window_app_limited(limit, 1, 0.0));
+    }
+
+    /// 快放手资格：需存活备选 + 改道配额，且生命线段（open_ended / no_range）排除。
+    #[test]
+    fn sys_fast_release_needs_live_alternate_and_excludes_lifeline_segments() {
+        use super::sys_fast_release;
+        assert!(sys_fast_release(true, false, false));
+        assert!(
+            !sys_fast_release(false, false, false),
+            "无存活备选 / 配额耗尽"
+        );
+        assert!(!sys_fast_release(true, true, false), "open_ended 生命线");
+        assert!(!sys_fast_release(true, false, true), "no_range 生命线");
+    }
+
+    /// SYS 租约快放手只对传输层失败生效：HTTP 类瞬时错误（503 等）保持原预算；
+    /// 无资格时传输失败同样保持原预算；非 SYS 租约恒收紧。
+    #[test]
+    fn sys_lease_fast_release_applies_to_transport_errors_only() {
+        use super::{MAX_RETRIES, PINNED_NODE_MAX_RETRIES, segment_retry_budget};
+        // 有资格 + 传输失败 → 快速放手。
+        assert_eq!(
+            segment_retry_budget(false, true, true),
+            PINNED_NODE_MAX_RETRIES
+        );
+        // 有资格 + HTTP 类错误 → 原耐心（换路修不好服务器错误）。
+        assert_eq!(segment_retry_budget(false, true, false), MAX_RETRIES);
+        // 无资格：传输失败也保持原预算。
+        assert_eq!(segment_retry_budget(false, false, true), MAX_RETRIES);
+        assert_eq!(segment_retry_budget(false, false, false), MAX_RETRIES);
+        // 非 SYS 租约恒收紧，不论错误类别。
+        assert_eq!(
+            segment_retry_budget(true, false, false),
+            PINNED_NODE_MAX_RETRIES
+        );
+        assert_eq!(
+            segment_retry_budget(true, false, true),
+            PINNED_NODE_MAX_RETRIES
+        );
     }
 
     /// 中段真实惩罚（59MB/s→2MB/s、已到 cap、alive==allowed）仍应收缩。

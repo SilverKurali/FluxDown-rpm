@@ -9,6 +9,8 @@
  */
 import { browser } from "wxt/browser";
 import { initI18n, t } from "@/utils/i18n";
+import { logWarn } from "@/utils/error-log";
+import { installBackgroundErrorLog } from "@/utils/error-log-background";
 import { loadSettings, persistSettings } from "@/utils/settings";
 import type { ContentMessage } from "./protocol";
 import { restoreBreakerState } from "./breaker";
@@ -52,7 +54,7 @@ function applyInterceptState(): void {
       setInterceptListenersActive(s.enabled);
     })
     .catch((e) => {
-      console.warn("[FluxDown] Settings cache warmup failed (non-fatal):", e);
+      logWarn("[FluxDown] Settings cache warmup failed (non-fatal):", e);
     });
 }
 
@@ -69,6 +71,8 @@ function broadcastPageConfigChanged(): void {
 }
 
 export function startBackground(): void {
+  // 第一步：之后 background 的错误 / 未捕获异常都记入扩展错误日志，不进浏览器的扩展错误列表。
+  installBackgroundErrorLog();
   console.log("[FluxDown] Background service worker started");
 
   installSettingsCacheListener();
@@ -105,7 +109,7 @@ export function startBackground(): void {
       if (windowId !== undefined && typeof browser.sidePanel?.open === "function") {
         browser.sidePanel
           .open({ windowId })
-          .catch((e) => console.warn("[FluxDown] open side panel failed:", e));
+          .catch((e) => logWarn("[FluxDown] open side panel failed:", e));
       }
       return;
     }
@@ -132,6 +136,6 @@ export function startBackground(): void {
   initI18n()
     .then(() => createContextMenus())
     .catch((e) => {
-      console.warn("[FluxDown] i18n init failed (non-fatal):", e);
+      logWarn("[FluxDown] i18n init failed (non-fatal):", e);
     });
 }

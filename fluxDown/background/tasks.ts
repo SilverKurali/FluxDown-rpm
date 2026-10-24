@@ -5,6 +5,7 @@ import { t } from "@/utils/i18n";
 import { nmhListTasks, nmhOpenFile, nmhRevealFile } from "@/utils/native-messaging";
 import type { TaskBrief } from "@/utils/native-messaging";
 import { loadSettings } from "@/utils/settings";
+import { logWarn } from "@/utils/error-log";
 
 // ──────────────────────────────────────────────────────────────
 // 任务面板：完成通知轮询（chrome.alarms）
@@ -36,7 +37,7 @@ async function ensureTaskPollAlarm(): Promise<void> {
       periodInMinutes: TASK_POLL_ALARM_PERIOD_MIN,
     });
   } catch (e) {
-    console.warn("[FluxDown] ensureTaskPollAlarm failed:", e);
+    logWarn("[FluxDown] ensureTaskPollAlarm failed:", e);
   }
 }
 
@@ -139,7 +140,7 @@ function notifyTaskCompleted(task: TaskBrief): void {
       browser.notifications.create(notificationId, opts as any),
     ).catch(() => {});
   } catch (e) {
-    console.warn("[FluxDown] notifyTaskCompleted: failed to create:", e);
+    logWarn("[FluxDown] notifyTaskCompleted: failed to create:", e);
   }
 }
 
@@ -237,7 +238,7 @@ export function installTaskListeners(): void {
         return processTasksPollResult(result.tasks);
       })
       .catch((e) => {
-        console.warn("[FluxDown] task poll alarm handler failed:", e);
+        logWarn("[FluxDown] task poll alarm handler failed:", e);
       });
   });
 }

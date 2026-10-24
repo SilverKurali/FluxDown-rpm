@@ -14,6 +14,7 @@ import type { CandidateRow } from "@/background/protocol";
 import type { PageConfig } from "@/page/bridge";
 import { isMediaTag, minTargetSize, type MediaTracker, type TrackedMedia } from "@/page/media-tracker";
 import { loadSiteProfiles, profileFor, saveSiteProfile } from "@/utils/site-profiles";
+import { contentCss } from "@/ui/content-css";
 import { Icon } from "@/ui/components/Icon";
 import { ToastHost, showToast } from "@/ui/components/Toast";
 import { useT } from "@/ui/i18n";
@@ -25,6 +26,7 @@ import { variantLabel } from "./labels";
 import "@/ui/theme/tokens.css";
 import "@/ui/theme/base.css";
 import "./float.css";
+import { logWarn } from "@/utils/error-log";
 
 export interface FloatButtonController {
   /** 配置变化：决定是否启用、触发方式。 */
@@ -487,6 +489,7 @@ export function createFloatButton(deps: FloatButtonDeps): FloatButtonController 
       await initI18n();
       const created = await createShadowRootUi<HTMLElement>(ctx, {
         name: "fluxdown-float",
+        css: contentCss(),
         position: "inline",
         anchor: () => hostAnchor(),
         append: "last",
@@ -509,7 +512,7 @@ export function createFloatButton(deps: FloatButtonDeps): FloatButtonController 
       ui = created;
       ui.mount();
     } catch (e) {
-      console.warn("[FluxDown] float button mount failed:", e);
+      logWarn("[FluxDown] float button mount failed:", e);
     } finally {
       creating = false;
     }

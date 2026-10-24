@@ -38,6 +38,7 @@ import { createFloatButton, type FloatButtonController } from "@/ui/features/Flo
 import { createDownloadNotice } from "@/ui/features/DownloadNotice";
 import { normalizeDashManifest, parseDashManifestText } from "@/utils/dash-manifest";
 import { isHttpUrl } from "@/utils/media-sniff";
+import { installErrorCapture } from "@/utils/error-log";
 import { sendAction } from "@/utils/messaging";
 import { isPageChange } from "@/utils/page-nav";
 import { normalizeHlsPlaylist } from "@/utils/hls-playlist";
@@ -88,8 +89,8 @@ export default defineContentScript({
   matches: ["<all_urls>"],
   runAt: "document_start",
   allFrames: true,
-  // 浮钮样式只进 Shadow DOM（createShadowRootUi），不得注入页面
-  cssInjectionMode: "ui",
+  // 浮钮 / 下载提示样式构建期内联进脚本（ui/content-css.ts），只进 Shadow DOM，不得注入页面
+  cssInjectionMode: "manual",
   matchAboutBlank: true,
 
   async main(ctx) {
@@ -100,6 +101,7 @@ export default defineContentScript({
     const shared = globalThis as { __fluxdownSensorAlive?: () => boolean };
     if (!top && shared.__fluxdownSensorAlive?.() === true) return;
     shared.__fluxdownSensorAlive = () => !ctx.isInvalid;
+    installErrorCapture("content");
     // 收到 PageConfig 前用随包规则；之后换成用户实际生效的 classifier。
     let classify = compileBundled().classify;
 

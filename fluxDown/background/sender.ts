@@ -17,6 +17,7 @@ import { getCachedProfiles, getCachedSettings } from "./settings-cache";
 import { incrementStat } from "./stats";
 import { maybeArmTaskPollForChannel } from "./tasks";
 import { getEngine } from "./rules-store";
+import { logError, logWarn } from "@/utils/error-log";
 
 /**
  * 补上 request 阶段 headers 规则为该 URL 声明的请求头，只补缺失的名字（浏览器真实请求头优先）。
@@ -126,7 +127,7 @@ export async function openProtocolUrl(
     }, 4000);
     return true;
   } catch (e) {
-    console.warn("[FluxDown] failed to open fluxdown:// URL:", e);
+    logWarn("[FluxDown] failed to open fluxdown:// URL:", e);
     return false;
   }
 }
@@ -190,7 +191,7 @@ export async function sendToFluxDown(input: SendInput): Promise<SendOutcome> {
       ]);
       cookieString = cookiesResult.map((c) => `${c.name}=${c.value}`).join("; ");
     } catch (e) {
-      console.warn("[FluxDown] Failed/timeout to extract cookies via API:", e);
+      logWarn("[FluxDown] Failed/timeout to extract cookies via API:", e);
     }
   }
 
@@ -249,7 +250,7 @@ export async function sendToFluxDown(input: SendInput): Promise<SendOutcome> {
   }
 
   await incrementStat("failed");
-  console.warn("[FluxDown] sendToFluxDown failed:", response.message, "url:", url);
+  logWarn("[FluxDown] sendToFluxDown failed:", response.message, "url:", url);
   if (notifyOk) {
     notify(t("notify.sendFailed"), describeSendError(response.message));
   }
@@ -365,7 +366,7 @@ export async function fallbackToBrowserDownload(
     await browser.downloads.download(opts);
     console.log("[FluxDown] Fallback: re-initiated browser download:", url);
   } catch (e) {
-    console.error(
+    logError(
       "[FluxDown] Fallback: failed to re-initiate browser download:",
       e,
     );
@@ -416,7 +417,7 @@ export async function fallbackAfterSendFailure(
       notify(t("notify.sendFailed"), describeSendError(rejection.message));
     }
     if (!fallbackOnReject) return;
-    console.warn(
+    logWarn(
       "[FluxDown] Send rejected by FluxDown — falling back to browser download:",
       rejection.message,
       url,

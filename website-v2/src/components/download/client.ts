@@ -351,67 +351,11 @@ function init(root: HTMLElement) {
     });
   }
 
-  /* ── Subscribe ── */
-  const form = $<HTMLFormElement>("[data-subscribe]");
-  if (form) initSubscribe(form);
-
-  function initSubscribe(form: HTMLFormElement) {
-    const fields = form.querySelector<HTMLFieldSetElement>("[data-subscribe-fields]")!;
-    const select = form.querySelector<HTMLSelectElement>("[data-subscribe-platform]")!;
-    const email = form.querySelector<HTMLInputElement>("input[name=email]")!;
-    const label = form.querySelector("[data-subscribe-label]")!;
-    const out = form.querySelector<HTMLElement>("[data-subscribe-status]")!;
-    fields.disabled = false;
-
-    const say = (text: string, tone?: "ok" | "error") => {
-      out.textContent = text;
-      if (tone) out.dataset.tone = tone;
-      else delete out.dataset.tone;
-    };
-
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (!email.value.trim() || !email.checkValidity()) {
-        email.reportValidity();
-        return;
-      }
-      fields.disabled = true;
-      label.textContent = t.subscribe.loading;
-      say("");
-      try {
-        const res = await fetch(withBase("/api/subscribe"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: email.value.trim(), platform: select.value }),
-        });
-        if (res.status === 429) say(t.subscribe.rateLimited, "error");
-        else if (!res.ok) say(t.subscribe.error, "error");
-        else {
-          const data = (await res.json()) as { message?: string };
-          if (data.message === "already_subscribed") say(t.subscribe.duplicate, "ok");
-          else {
-            say(t.subscribe.success, "ok");
-            email.value = "";
-          }
-        }
-      } catch {
-        say(t.subscribe.error, "error");
-      } finally {
-        fields.disabled = false;
-        label.textContent = t.subscribe.submit;
-      }
-    });
-  }
-
   /* ── Boot ── */
   void load();
   void detectPlatform().then((result) => {
     platform = result;
     detected = true;
-    const preset: Partial<Record<Os, string>> = { macos: "macos", linux: "linux", android: "mobile" };
-    const select = $<HTMLSelectElement>("[data-subscribe-platform]");
-    const value = result.os ? preset[result.os] : undefined;
-    if (select && value) select.value = value;
     renderHero();
   });
 }

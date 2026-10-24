@@ -173,7 +173,8 @@ function classify(name: string, t: T): { group: string; sub: string } {
   if (n.endsWith(".pkg.tar.zst")) return { group: "Linux", sub: "Arch Linux" };
   if (n.endsWith(".rpm")) return { group: "Linux", sub: t.asset.rpm };
   if (/-linux-(x64|arm64)\.tar\.gz$/.test(n)) return { group: "Linux", sub: `${arch} ${t.asset.archive}` };
-  if (n.endsWith("-chrome.zip") || n.endsWith("-extension.zip")) return { group: "extension", sub: "Chrome / Edge" };
+  if (n.endsWith("-chrome.crx")) return { group: "extension", sub: `Chrome ${t.asset.storeSigned}` };
+  if (n.endsWith("-chrome.zip") || n.endsWith("-extension.zip")) return { group: "extension", sub: `Chrome / Edge ${t.asset.unpacked}` };
   if (n.endsWith("-firefox.xpi")) return { group: "extension", sub: "Firefox" };
   if (n.endsWith("-firefox-unsigned.zip")) return { group: "extension", sub: `Firefox ${t.asset.unsigned}` };
   return { group: "other", sub: name };
