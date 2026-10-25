@@ -472,10 +472,12 @@ export interface CustomCategoryDto {
   id: string;
   name: string;
   icon: string;
-  /** `extension` | `regex`。 */
+  /** `extension` | `regex` | `url`。 */
   matchMode: string;
   extensions: string[];
   regexPattern: string;
+  /** `url` 模式的通配符模式（`*` 任意串、`?` 单字符、不分大小写、完整匹配整个网址）。 */
+  urlPattern: string;
   position: number;
   visible: boolean;
   isBuiltin: boolean;
@@ -493,10 +495,12 @@ export interface CategoryRouteDto {
 
 /** `CategoryRouteDto.rules` 的单条普通分类。 */
 export interface CategoryRuleDto {
-  /** `extension` | `regex`。 */
+  /** `extension` | `regex` | `url`。 */
   matchMode: string;
   extensions?: string[];
   regexPattern?: string;
+  /** `url` 模式的通配符模式。 */
+  urlPattern?: string;
   /** 缺省 = 不改变落点，只阻止「其他」兜底。 */
   saveDir?: string;
 }

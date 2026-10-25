@@ -535,6 +535,7 @@ mod tests {
                 match_mode: "extension".to_owned(),
                 extensions: vec!["jpg".to_owned()],
                 regex_pattern: String::new(),
+                url_pattern: String::new(),
                 save_dir: "/pictures".to_owned(),
             }],
             other_dir: String::new(),

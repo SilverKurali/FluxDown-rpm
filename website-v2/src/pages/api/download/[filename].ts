@@ -1,10 +1,11 @@
 /**
  * Release 下载入口（仅 302，不代理文件流量）。
- * 下载源优先级：123 云盘 CDN（中国大陆访客与应用内更新）→ dl-cn 镜像（中国大陆访客）→ GitHub。
+ * 下载源优先级：123 云盘直链（仅应用内更新）→ dl-cn 镜像（中国大陆访客）→ GitHub。
  * 两个镜像都不能回退 GitHub，302 前必须确认镜像有该资产且大小与 GitHub 资产一致。
  * 镜像只发给像正常客户端的请求（24 小时内读过发布清单、非脚本 User-Agent，见 download-gate.ts）；
- * 大陆按 Cloudflare 判定的访客国家（X-Client-Country = CN，见 client-ip.ts）判定，
- * 应用内更新按 User-Agent（isAppUpdaterUserAgent）判定。
+ * 大陆按 Cloudflare 判定的访客国家（X-Client-Country = CN，见 client-ip.ts）判定。
+ * 123 另外要求（不分地区）：≥ 0.6.0 更新器 User-Agent（isPan123Updater）、资产在当前更新清单里
+ * （isUpdateAsset）、该 IP 未超签发配额（hasPan123Quota）；官网浏览器下载不走 123。
  * source=github：仅 GitHub；source=oss：大陆准入访客在镜像都不可用时返回 503，其余同 auto。
  */
 import type { APIRoute } from "astro";
@@ -12,7 +13,7 @@ import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 import { getCached, setCached } from "@/lib/api-cache";
 import { getClientCountry, getClientIp } from "@/lib/client-ip";
 import { recordDownload } from "@/lib/download-ban";
-import { isAppUpdaterUserAgent, mayUseMirror } from "@/lib/download-gate";
+import { hasPan123Quota, isPan123Updater, isUpdateAsset, mayUseMirror, recordPan123Link } from "@/lib/download-gate";
 import { cdnConfigured, cdnDownloadUrl, ossConfigured, presignOssHeadUrl, releaseObjectKey } from "@/lib/oss";
 import { DownloadLookupCache } from "@/lib/download-cache";
 import { createOssProbe } from "@/lib/download-probe";
@@ -123,7 +124,7 @@ export const GET: APIRoute = async ({ params, url, request, clientAddress }) => 
   const userAgent = request.headers.get("user-agent");
   const admitted = source !== "github" && mayUseMirror(ip, userAgent);
   const wantsMirror = admitted && getClientCountry(request) === "CN";
-  const wantsPan123 = admitted && (wantsMirror || isAppUpdaterUserAgent(userAgent));
+  const wantsPan123 = admitted && isPan123Updater(userAgent);
 
   try {
     const { value: releases, stale } = await releaseCache().lookup(
@@ -145,9 +146,12 @@ export const GET: APIRoute = async ({ params, url, request, clientAddress }) => 
     // 过期缓存只允许 GitHub 公共 URL：撤回/转草稿后由 GitHub 自身拒绝访问。
     if (!stale && (wantsPan123 || wantsMirror)) {
       const key = releaseObjectKey(release.tag_name, asset.name);
-      if (wantsPan123 && pan123Configured) {
+      if (wantsPan123 && pan123Configured && isUpdateAsset(release.tag_name, asset.name) && hasPan123Quota(ip)) {
         const link = await pan123DownloadUrl(key, asset.size);
-        if (link) return downloadRedirect(link, "pan123");
+        if (link) {
+          recordPan123Link(ip);
+          return downloadRedirect(link, "pan123");
+        }
       }
       if (wantsMirror && cdnConfigured && ossConfigured && await ossHasAsset(key, asset.size)) {
         return downloadRedirect(cdnDownloadUrl(key), "cdn");

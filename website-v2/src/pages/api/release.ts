@@ -45,7 +45,7 @@ import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 import { getCached, setCached } from "../../lib/api-cache";
 import { withBase } from "@/lib/base";
 import { getClientIp } from "@/lib/client-ip";
-import { markReleaseViewer } from "@/lib/download-gate";
+import { markReleaseViewer, recordUpdateAssets } from "@/lib/download-gate";
 import {
   desktopAssets,
   IOS_SIDELOAD_SUFFIX,
@@ -473,6 +473,16 @@ export const GET: APIRoute = async ({ url, request, clientAddress }) => {
           }
         : null,
     };
+
+    // 应用内更新只取桌面 / 服务器 / Android 资产（native/agent/src/update/install）：只有当前清单里的
+    // 这些资产能拿 123 直链，历史版本、扩展、CLI 与 iOS 侧载包不给。
+    const updateEntries = (tag: string, assets: Record<string, { name: string } | null>, skip: string[] = []) =>
+      Object.entries(assets).flatMap(([kind, asset]) => asset && !skip.includes(kind) ? [{ tag, name: asset.name }] : []);
+    recordUpdateAssets(channel, [
+      ...updateEntries(latest.tag_name, data.assets, ["extension", "firefox_extension", "chrome_crx"]),
+      ...(serverRelease && data.server ? updateEntries(serverRelease.tag_name, data.server.assets) : []),
+      ...(mobileRelease && data.mobile ? updateEntries(mobileRelease.tag_name, data.mobile.assets) : []),
+    ]);
 
     // 更新缓存
     setCached(cacheKey, data);

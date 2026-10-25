@@ -2322,8 +2322,8 @@ jobs:
           if-no-files-found: warn
 
   # ── 123 云盘镜像：发布成功后经东京服务器中转（pan123-upload.yml）──
-  # GitHub runner 直传 123 极慢，所以不在 upload-* 里做；发布已完成，这里失败只影响大陆 123 下载源
-  # （官网回落 dl-cn），补救：gh workflow run pan123-upload.yml -f tag=<tag>。远端已有同大小文件跳过。
+  # GitHub runner 直传 123 极慢，所以不在 upload-* 里做；发布已完成，这里失败只影响应用内更新的 123 下载源
+  # （回落 dl-cn / GitHub），补救：gh workflow run pan123-upload.yml -f tag=<tag>。远端已有同大小文件跳过。
   mirror-pan123:
     name: Mirror to 123pan
     needs: [changes, publish-release]

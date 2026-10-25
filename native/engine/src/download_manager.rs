@@ -4583,7 +4583,11 @@ impl DownloadManager {
             let (new_save_dir, item_route) = match &route {
                 Some(route) if item.path.is_empty() => (
                     route
-                        .save_dir_for(&item.name, &task.url)
+                        .save_dir_for(
+                            &item.name,
+                            &task.url,
+                            crate::category_route::source_address(&task.origin_url, &task.url),
+                        )
                         .unwrap_or(manifest_base)
                         .to_owned(),
                     route_column.as_str(),
@@ -8762,7 +8766,11 @@ impl DownloadManager {
                 };
                 let output = crate::category_route::output_name(known, link);
                 let initial = route
-                    .save_dir_for(output.as_deref().unwrap_or(known), link)
+                    .save_dir_for(
+                        output.as_deref().unwrap_or(known),
+                        link,
+                        crate::category_route::source_address(&origin_url, &db_url),
+                    )
                     .map(str::to_owned);
                 route.base_dir = save_dir;
                 let column = match route.to_column() {

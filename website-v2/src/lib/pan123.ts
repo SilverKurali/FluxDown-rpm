@@ -14,7 +14,12 @@ import {
   PAN123_WEBDAV_USER,
 } from "astro:env/server";
 import { createPan123Probe, signDirectLink } from "@/lib/download-pan123";
-import { DOWNLOAD_URL_TTL_SEC } from "@/lib/oss";
+
+/**
+ * 123 直链有效期：更新器（≥ 0.6.0）拿到 302 立即单连接下载，每次续传 / 重试都重新请求
+ * /api/download，所以只需覆盖「签发 → 发起请求」加两端时钟偏差；签了不绑 IP，越短转发价值越低。
+ */
+const PAN123_URL_TTL_SEC = 10 * 60;
 
 export const pan123Configured =
   !!(PAN123_WEBDAV_USER && PAN123_WEBDAV_PASSWORD && PAN123_UID && PAN123_AUTH_KEY);
@@ -29,9 +34,9 @@ const direct = {
 };
 
 /**
- * 对象键（releaseObjectKey）对应资产的 123 直链（鉴权签名，有效期同 dl-cn 的 DOWNLOAD_URL_TTL_SEC）；
+ * 对象键（releaseObjectKey）对应资产的 123 直链（鉴权签名，PAN123_URL_TTL_SEC 后过期）；
  * 资产缺失、大小不符或 123 不可用时为 null。调用前须保证 `pan123Configured`。
  */
 export async function pan123DownloadUrl(key: string, size: number): Promise<string | null> {
-  return await hasAsset(key, size) ? signDirectLink(direct, key, DOWNLOAD_URL_TTL_SEC) : null;
+  return await hasAsset(key, size) ? signDirectLink(direct, key, PAN123_URL_TTL_SEC) : null;
 }

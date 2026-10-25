@@ -238,7 +238,7 @@ export default defineConfig({
         optional: true,
       }),
       // 123 云盘下载源（src/lib/pan123.ts）：.github/scripts/pan123_mirror.sh 经 WebDAV 上传到同一对象键；
-      // 中国大陆访客与应用内更新（均须通过下载准入）优先 302 到 123 直链（URL 鉴权签名），失败再走 dl-cn / GitHub。
+      // 仅 ≥ 0.6.0 的应用内更新（规则见 download-gate.ts::isPan123Updater）优先 302 到 123 直链（10 分钟有效），失败再走 dl-cn / GitHub；官网浏览器下载不走 123。
       // WebDAV 账号 / 应用密码（只授权发布目录）用于 PROPFIND 确认资产；UID + 鉴权密钥用于签直链。缺任一项则关闭。
       PAN123_WEBDAV_URL: envField.string({
         context: "server",

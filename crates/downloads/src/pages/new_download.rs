@@ -8,6 +8,7 @@ mod category;
 mod hints;
 mod preview;
 mod probe;
+mod url_rule;
 
 use hints::HintAutofill;
 use probe::LinkProbe;
@@ -113,6 +114,8 @@ pub struct NewDownloadContext {
     pub category_route: Option<fluxdown_protocol::CategoryRouteDto>,
     /// 保存目录分类下拉的候选（同一偏好投影：可见、非 `all`、配置了目录的分类，按 `position`）。
     pub category_options: Vec<NewDownloadCategory>,
+    /// 偏好 `custom_categories` 的原始列表（快捷添加网址规则时在其上追加再整体写回）。
+    pub custom_categories: Vec<fluxdown_protocol::CustomCategoryDto>,
     /// 「下载到」候选：账号其他设备 + 已配对设备（本机始终可选，不在其中）；空 = 不显示选择器。
     pub targets: Vec<DeviceEntry>,
     /// 「下载到」初值：设备本地偏好里上次的目标（目标已不存在则为本机）。
@@ -220,6 +223,7 @@ pub(crate) fn build_new_download_context(
         manual_proxy_url: manual_proxy_url(config),
         category_route: fluxdown_protocol::CategoryRouteDto::from_categories(&categories),
         category_options: category_options(&categories),
+        custom_categories: categories,
         initial_urls: Vec::new(),
         targets,
         target,
@@ -872,6 +876,7 @@ impl NewDownloadView {
             queues,
             category_route,
             category_options,
+            custom_categories,
             manual_proxy_url,
             ..
         } = context;
@@ -902,6 +907,7 @@ impl NewDownloadView {
         self.context.queues = queues;
         self.context.category_route = category_route;
         self.context.category_options = category_options;
+        self.context.custom_categories = custom_categories;
         if let CategoryMode::Category(id) = &self.category_mode
             && !self
                 .context

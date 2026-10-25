@@ -163,6 +163,7 @@ pub fn install_captures(cx: &mut App) {
                         .map(|session| session.user.id.as_str()),
                 );
                 sync_targets(cx);
+                sync_categories(cx, body);
                 refresh_provisional_context(cx, body);
                 sync_captures(cx, &body.pending_captures);
             }
@@ -237,6 +238,27 @@ fn cache_devices(
         Vec::new()
     };
     dispatch.linked_devices = linked.to_vec();
+}
+
+/// 把快照里最新的分类列表推给已打开的新建下载表单（快捷添加网址规则以它为写回基准）。
+fn sync_categories(cx: &mut App, snapshot: &AgentSnapshot) {
+    let form = cx
+        .global::<CaptureDispatch>()
+        .form
+        .as_ref()
+        .and_then(WeakEntity::upgrade);
+    let (Some(form), Some(handle)) = (form, WindowRegistry::handle(cx, &WindowKey::NewDownload))
+    else {
+        return;
+    };
+    let categories = new_download_context_from_snapshot(snapshot).custom_categories;
+    if let Err(error) = handle.update(cx, |_, window, cx| {
+        form.update(cx, |form, cx| {
+            form.set_custom_categories(categories, window, cx)
+        });
+    }) {
+        log::debug!("view or window released before lifecycle update: {error:#}");
+    }
 }
 
 /// 把最新设备名册（在线状态 / 默认目录 / 设备增减）推给已打开的新建下载表单。

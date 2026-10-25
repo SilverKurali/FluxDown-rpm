@@ -46,12 +46,70 @@ export function isScriptUserAgent(userAgent: string | null): boolean {
   return !!userAgent && SCRIPT_USER_AGENT.test(userAgent);
 }
 
+/** 能拿 123 直链的最低客户端版本：此后的更新器 UA 固定为 `fluxdown-<agent|android>/<版本>`。 */
+const PAN123_MIN_VERSION = [0, 6, 0] as const;
+const PAN123_UPDATER_USER_AGENT = /^fluxdown-(?:agent|android)\/v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.+-]*)?$/;
+
 /**
- * 是否为应用内更新的下载请求：更新器 User-Agent 为 `fluxdown-<产品>/<版本>`
- * （native/agent/src/update/mod.rs），旧版客户端的更新器不带 User-Agent。
+ * 是否为可以拿 123 直链的应用内更新：User-Agent 严格匹配 `fluxdown-agent/<版本>`（桌面 / 服务器）
+ * 或 `fluxdown-android/<版本>`（native/agent/src/update/mod.rs::build），且版本核心号 ≥ 0.6.0。
+ * 不带 User-Agent 的旧版更新器不再给 123（大陆回落 dl-cn，其余 GitHub）。
  */
-export function isAppUpdaterUserAgent(userAgent: string | null): boolean {
-  return !userAgent || /^fluxdown-[a-z0-9-]+\//i.test(userAgent);
+export function isPan123Updater(userAgent: string | null): boolean {
+  const match = userAgent ? PAN123_UPDATER_USER_AGENT.exec(userAgent) : null;
+  if (!match) return false;
+  for (let i = 0; i < PAN123_MIN_VERSION.length; i++) {
+    const part = Number(match[i + 1]);
+    if (part !== PAN123_MIN_VERSION[i]) return part > PAN123_MIN_VERSION[i];
+  }
+  return true;
+}
+
+/** `/api/release` 各渠道当前下发给更新器的资产（`<tag>/<文件名>`）；只有它们能拿 123 直链。 */
+const updateAssets = new Map<string, ReadonlySet<string>>();
+
+/** `/api/release` 生成某渠道清单时整体替换该渠道的可更新资产（桌面 / 服务器 / Android）。 */
+export function recordUpdateAssets(channel: string, assets: Iterable<{ tag: string; name: string }>): void {
+  updateAssets.set(channel, new Set(Array.from(assets, (a) => `${a.tag}/${a.name}`)));
+}
+
+/** 该资产是否在某渠道当前的更新清单里：历史版本与非更新组件（扩展 / CLI / iOS）不给 123。 */
+export function isUpdateAsset(tag: string, name: string): boolean {
+  const key = `${tag}/${name}`;
+  for (const assets of updateAssets.values()) {
+    if (assets.has(key)) return true;
+  }
+  return false;
+}
+
+/** 同一 IP 24 小时内最多签发的 123 直链数：覆盖同一出口下几台设备各自更新与断点重试。 */
+const PAN123_LINKS_PER_IP = 10;
+const PAN123_WINDOW_MS = 24 * 3600 * 1000;
+const pan123Issued = new Map<string, number[]>();
+
+function recentIssued(ip: string, now: number): number[] {
+  const issued = (pan123Issued.get(ip) ?? []).filter((at) => now - at < PAN123_WINDOW_MS);
+  if (issued.length) pan123Issued.set(ip, issued);
+  else pan123Issued.delete(ip);
+  return issued;
+}
+
+/** 该 IP 是否还能拿 123 直链（超额回落 dl-cn / GitHub，不报错）。 */
+export function hasPan123Quota(ip: string, now = Date.now()): boolean {
+  return recentIssued(ip, now).length < PAN123_LINKS_PER_IP;
+}
+
+/** 记一次 123 直链签发。 */
+export function recordPan123Link(ip: string, now = Date.now()): void {
+  const issued = recentIssued(ip, now);
+  issued.push(now);
+  pan123Issued.delete(ip);
+  pan123Issued.set(ip, issued);
+  while (pan123Issued.size > MAX_VIEWERS) {
+    const oldest = pan123Issued.keys().next();
+    if (oldest.done) break;
+    pan123Issued.delete(oldest.value);
+  }
 }
 
 /** 该请求能否使用 CDN 镜像。 */
@@ -62,4 +120,6 @@ export function mayUseMirror(ip: string, userAgent: string | null, now = Date.no
 /** 测试用：清空记录。 */
 export function resetReleaseViewers(): void {
   viewers.clear();
+  updateAssets.clear();
+  pan123Issued.clear();
 }

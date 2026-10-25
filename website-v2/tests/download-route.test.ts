@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { bustApiCaches } from "../src/lib/api-cache";
-import { markReleaseViewer, resetReleaseViewers } from "../src/lib/download-gate";
+import { markReleaseViewer, recordUpdateAssets, resetReleaseViewers } from "../src/lib/download-gate";
 import { resetDownloadBans } from "../src/lib/download-ban";
 
 let configured = true;
@@ -206,48 +206,76 @@ test("size mismatch: mainland falls back to GitHub, forced OSS returns 503 witho
   expect(signatures).toEqual(["HEAD"]);
 });
 
+/** 开启 123，并把当前 `v${sequence}/app.zip` 登记为更新清单资产（/api/release 生成清单时登记）。 */
 function enablePan123(link: string | null = "https://pan.example/app.zip") {
   pan123Configured = true;
   pan123Link = link;
   mock.module("../src/lib/pan123", pan123Mock);
+  recordUpdateAssets("stable", [{ tag: `v${sequence}`, name: "app.zip" }]);
 }
 
-test("admitted mainland visitors prefer the verified 123pan link over the OSS mirror", async () => {
+test("mainland: only >=0.6.0 updaters get 123pan; browsers and UA-less old updaters keep dl-cn", async () => {
   enablePan123();
-  for (const ua of ["", "Mozilla/5.0 (Windows NT 10.0)", "fluxdown-agent/0.6.0"]) {
-    const response = await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, ua);
-    expect(response.headers.get("X-Download-Source")).toBe("pan123");
-    expect(response.headers.get("Location")).toBe("https://pan.example/app.zip");
+  for (const ua of ["Mozilla/5.0 (Windows NT 10.0)", ""]) {
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, ua)).headers.get("X-Download-Source")).toBe("cdn");
   }
-  expect(signatures.every((s) => s === `PAN123 v${sequence}/app.zip 12`)).toBe(true);
-  // 123 不可用（缺资产 / 大小不符 / 超时）时回落 dl-cn 镜像，镜像也不行才是 GitHub。
-  enablePan123(null);
+  expect(signatures).toEqual(["HEAD", "CDN", "CDN"]);
   signatures.length = 0;
-  expect((await get("auto")).headers.get("X-Download-Source")).toBe("cdn");
-  expect(signatures).toEqual([`PAN123 v${sequence}/app.zip 12`, "HEAD", "CDN"]);
+  const response = await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, "fluxdown-agent/0.6.0");
+  expect(response.headers.get("X-Download-Source")).toBe("pan123");
+  expect(response.headers.get("Location")).toBe("https://pan.example/app.zip");
+  // 123 不可用（缺资产 / 大小不符 / 超时）时大陆更新器回落 dl-cn 镜像，镜像也不行才是 GitHub。
+  enablePan123(null);
+  expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, "fluxdown-agent/0.6.0")).headers.get("X-Download-Source"))
+    .toBe("cdn");
+  expect(signatures).toEqual([`PAN123 v${sequence}/app.zip 12`, `PAN123 v${sequence}/app.zip 12`, "CDN"]);
   headSize = "11";
   sequence++;
-  expect((await get("auto")).headers.get("X-Download-Source")).toBe("github");
-  expect((await get("oss")).status).toBe(503);
+  enablePan123(null);
+  expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, "fluxdown-agent/0.6.0")).headers.get("X-Download-Source"))
+    .toBe("github");
+  expect((await get("oss", `v${sequence}`, "app.zip", MAINLAND_IP, "fluxdown-agent/0.6.0")).status).toBe(503);
 });
 
-test("in-app updates outside mainland China use 123pan; browsers there keep GitHub", async () => {
+test("outside mainland: 123pan needs a strict >=0.6.0 updater User-Agent", async () => {
   enablePan123();
   markReleaseViewer("8.8.8.8");
-  for (const ua of ["fluxdown-agent/0.6.0", "fluxdown-android/0.6.0", ""]) {
-    const response = await get("", `v${sequence}`, "app.zip", "8.8.8.8", ua);
-    expect(response.headers.get("X-Download-Source")).toBe("pan123");
+  for (const ua of ["fluxdown-agent/0.6.0", "fluxdown-android/0.6.0", "fluxdown-agent/0.6.0-rc.1", "fluxdown-android/1.0.0"]) {
+    expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", ua)).headers.get("X-Download-Source")).toBe("pan123");
   }
   signatures.length = 0;
-  expect((await get("auto", `v${sequence}`, "app.zip", "8.8.8.8", "Mozilla/5.0")).headers.get("X-Download-Source"))
-    .toBe("github");
+  for (const ua of [
+    "", "Mozilla/5.0", "fluxdown-agent/0.5.9", "fluxdown-cli/0.6.0", "fluxdown-test/0.6.0",
+    "fluxdown-agent/0.6", "fluxdown-agent/0.6.0 Mozilla/5.0", "Mozilla/5.0 fluxdown-agent/0.6.0",
+  ]) {
+    expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", ua)).headers.get("X-Download-Source")).toBe("github");
+  }
+  expect(signatures).toEqual([]);
   // 123 不可用时非大陆更新器直接 GitHub，不消耗付费镜像；source=oss 也不返回 503。
   enablePan123(null);
-  expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", "fluxdown-agent/0.6.0")).headers.get("X-Download-Source"))
-    .toBe("github");
   expect((await get("oss", `v${sequence}`, "app.zip", "8.8.8.8", "fluxdown-agent/0.6.0")).headers.get("X-Download-Source"))
     .toBe("github");
-  expect(signatures).toEqual([`PAN123 v${sequence}/app.zip 12`, `PAN123 v${sequence}/app.zip 12`]);
+  expect(signatures).toEqual([`PAN123 v${sequence}/app.zip 12`]);
+});
+
+test("123pan only signs assets in the current update manifest, within the per-IP quota", async () => {
+  enablePan123();
+  markReleaseViewer("8.8.8.8");
+  const updater = "fluxdown-agent/0.6.0";
+  // 历史版本 / 非更新组件不在清单：不签 123。
+  expect((await get("", `v${sequence}`, "other.zip", "8.8.8.8", updater)).status).toBe(404);
+  recordUpdateAssets("stable", [{ tag: `v${sequence + 100}`, name: "app.zip" }]);
+  expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", updater)).headers.get("X-Download-Source")).toBe("github");
+  expect(signatures).toEqual([]);
+  // 另一渠道的清单同样有效。
+  recordUpdateAssets("frontier", [{ tag: `v${sequence}`, name: "app.zip" }]);
+  for (let i = 0; i < 10; i++) {
+    expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", updater)).headers.get("X-Download-Source")).toBe("pan123");
+  }
+  // 同一 IP 24 小时内签满 10 条后回落：非大陆 GitHub，大陆 dl-cn。
+  expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", updater)).headers.get("X-Download-Source")).toBe("github");
+  expect((await get("", `v${sequence}`, "app.zip", MAINLAND_IP, updater)).headers.get("X-Download-Source")).toBe("pan123");
+  expect(signatures.filter((s) => s.startsWith("PAN123")).length).toBe(11);
 });
 
 test("123pan obeys the download gate, source=github and stale metadata", async () => {
@@ -256,19 +284,20 @@ test("123pan obeys the download gate, source=github and stale metadata", async (
   // 下载元数据缓存在首个请求时创建并捕获 Date.now：必须先替换。
   Date.now = () => now;
   try {
-    enablePan123();
     resetReleaseViewers();
-    expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", "fluxdown-agent/0.6.0")).headers.get("X-Download-Source"))
-      .toBe("github");
-    expect((await get("auto")).headers.get("X-Download-Source")).toBe("github");
+    enablePan123();
+    const updater = "fluxdown-agent/0.6.0";
+    expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", updater)).headers.get("X-Download-Source")).toBe("github");
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, updater)).headers.get("X-Download-Source")).toBe("github");
     markReleaseViewer(MAINLAND_IP, now);
     expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, "curl/8.7.1")).headers.get("X-Download-Source"))
       .toBe("github");
-    expect((await get("github")).headers.get("X-Download-Source")).toBe("github");
+    expect((await get("github", `v${sequence}`, "app.zip", MAINLAND_IP, updater)).headers.get("X-Download-Source"))
+      .toBe("github");
     expect(signatures).toEqual([]);
     now += 120_001;
     status = 503;
-    const fallback = await get("auto");
+    const fallback = await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, updater);
     expect(fallback.headers.get("X-Download-Source")).toBe("github");
     expect(fallback.headers.get("X-Download-Metadata")).toBe("stale");
     expect(signatures).toEqual([]);

@@ -48,6 +48,7 @@ pub fn category_route_to_engine(
                 match_mode: rule.match_mode,
                 extensions: rule.extensions,
                 regex_pattern: rule.regex_pattern,
+                url_pattern: rule.url_pattern,
                 save_dir: rule.save_dir,
             })
             .collect(),
