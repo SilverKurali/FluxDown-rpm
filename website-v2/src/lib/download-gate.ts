@@ -46,6 +46,14 @@ export function isScriptUserAgent(userAgent: string | null): boolean {
   return !!userAgent && SCRIPT_USER_AGENT.test(userAgent);
 }
 
+/**
+ * 是否为应用内更新的下载请求：更新器 User-Agent 为 `fluxdown-<产品>/<版本>`
+ * （native/agent/src/update/mod.rs），旧版客户端的更新器不带 User-Agent。
+ */
+export function isAppUpdaterUserAgent(userAgent: string | null): boolean {
+  return !userAgent || /^fluxdown-[a-z0-9-]+\//i.test(userAgent);
+}
+
 /** 该请求能否使用 CDN 镜像。 */
 export function mayUseMirror(ip: string, userAgent: string | null, now = Date.now()): boolean {
   return !isScriptUserAgent(userAgent) && recentViewer(ip, now);

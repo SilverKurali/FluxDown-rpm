@@ -39,6 +39,6 @@ interruptMode: never
 |架构缝 / 不变式（`AGENTS.md` §3–§4）|`.omp/knowledge/*` 对应附录；需要编辑期提醒的落路径规则，需要执行期拦截的进 `guard.ts`|
 |镜像契约（`mirror-*` 规则）|规则的 `globs` 覆盖两侧所有文件；`AGENTS.md` §5 索引表同步增删|
 |任何 `.omp/{RULES.md,WATCHDOG.md,rules,agents,skills}`|运行 `python3 .augment/sync_from_omp.py` 重新生成 `.augment/{rules,agents,skills}`（Auggie 用；`--check` 校验漂移）；`.augment/hooks/ttsr.sh` 运行时直接读 `.omp/rules`，无需同步。`rule://<名>` 即 `.omp/rules/<名>.md`|
-|红线 / 授权 / 禁用命令|`.omp/RULES.md`、`.omp/rules/forbidden-commands.md`（TTSR 提示，Auggie 钩子同读）、`.omp/hooks/pre/guard.ts`（执行前硬拦截：tag 推送确认、`--no-verify`、强推、测试 `--workspace`、子代理全量门禁）、`.omp/WATCHDOG.md`（严重级映射）|
+|红线 / 授权 / 禁用命令|`.omp/RULES.md`、`.omp/rules/forbidden-commands.md`（TTSR 提示，Auggie 钩子同读）、`.omp/hooks/pre/guard.ts`（执行前硬拦截：tag 推送（CI + 同名演练全绿自动放行，否则确认）、`--no-verify`、强推、测试 `--workspace`、子代理全量门禁）、`.omp/WATCHDOG.md`（严重级映射）|
 |CI 触发路径（`ci.yml` 的 `changes.filters`）、新增 crate / path 依赖 / `include_*!` / TS 跨目录引用|`python3 .github/scripts/check_ci_paths.py` 必须通过（CI `ci-paths` job 同跑）|
 |`AGENTS.md` 章节编号 / 标题（`guard.ts`、skills、rules、knowledge 都按 `§N` 引用）|`grep "AGENTS.md"` 扫 `.omp/`、`.augment/`、源码注释，修掉悬空引用|

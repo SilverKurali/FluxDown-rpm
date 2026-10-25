@@ -6,11 +6,13 @@ import { resetDownloadBans } from "../src/lib/download-ban";
 let configured = true;
 let cdnConfigured = true;
 const MAINLAND_IP = "114.114.114.114";
+const MAINLAND_IPV6 = "2408:8207:78ae:7a51:f55e:4f2f:261d:ccc9";
+/** 反代按 Cloudflare 的 CF-IPCountry 写入的 X-Client-Country。 */
+const COUNTRY: Record<string, string> = {
+  [MAINLAND_IP]: "CN", [MAINLAND_IPV6]: "CN", "8.8.8.8": "US", "1.1.1.1": "HK",
+};
 const signatures: string[] = [];
 mock.module("astro:env/server", () => ({ GITHUB_TOKEN: "", GITHUB_REPO: "owner/repo" }));
-// mock.module 在 bun test 进程内全局生效且不会被 mock.restore 撤销：必须保留真实导出，否则后运行的 geoip.test.ts 取不到 Ip2RegionV4。
-const realGeoip = await import("../src/lib/geoip");
-mock.module("../src/lib/geoip", () => ({ ...realGeoip, isMainlandChinaIp: (ip: string) => ip === MAINLAND_IP }));
 const ossMock = () => ({
   ossConfigured: configured,
   cdnConfigured,
@@ -25,6 +27,16 @@ const ossMock = () => ({
   },
 });
 mock.module("../src/lib/oss", ossMock);
+let pan123Configured = false;
+let pan123Link: string | null = "https://pan.example/app.zip";
+const pan123Mock = () => ({
+  pan123Configured,
+  pan123DownloadUrl: async (key: string, size: number) => {
+    signatures.push(`PAN123 ${key} ${size}`);
+    return pan123Link;
+  },
+});
+mock.module("../src/lib/pan123", pan123Mock);
 const { GET } = await import("../src/pages/api/download/[filename]");
 const originalFetch = globalThis.fetch;
 let draft = false;
@@ -42,6 +54,9 @@ beforeEach(() => {
   configured = true;
   cdnConfigured = true;
   mock.module("../src/lib/oss", ossMock);
+  pan123Configured = false;
+  pan123Link = "https://pan.example/app.zip";
+  mock.module("../src/lib/pan123", pan123Mock);
   prerelease = false;
   status = 200;
   headSize = "12";
@@ -69,10 +84,19 @@ async function get(source = "", tag = `v${sequence}`, filename = "app.zip", clie
   if (tag) url.searchParams.set("tag", tag);
   const headers: Record<string, string> = {};
   if (clientIp) headers["x-client-ip"] = clientIp;
+  if (COUNTRY[clientIp]) headers["x-client-country"] = COUNTRY[clientIp];
   if (userAgent) headers["user-agent"] = userAgent;
   const request = new Request(url, { headers });
   return GET({ params: { filename }, url, request, clientAddress: "10.0.0.1" } as Parameters<typeof GET>[0]);
 }
+
+test("mainland is Cloudflare's country code, so IPv6 visitors count and HK / unknown do not", async () => {
+  for (const [ip, expected] of [[MAINLAND_IPV6, "cdn"], ["1.1.1.1", "github"], ["10.9.9.9", "github"]]) {
+    markReleaseViewer(ip);
+    const response = await get("auto", `v${sequence}`, "app.zip", ip, "Mozilla/5.0");
+    expect(response.headers.get("X-Download-Source")).toBe(expected);
+  }
+});
 
 test("github never signs or probes OSS, even for mainland visitors", async () => {
   const response = await get("github", `v${sequence}`, "app.zip", MAINLAND_IP);
@@ -180,6 +204,77 @@ test("size mismatch: mainland falls back to GitHub, forced OSS returns 503 witho
   expect(response.status).toBe(503);
   expect(response.headers.has("Location")).toBe(false);
   expect(signatures).toEqual(["HEAD"]);
+});
+
+function enablePan123(link: string | null = "https://pan.example/app.zip") {
+  pan123Configured = true;
+  pan123Link = link;
+  mock.module("../src/lib/pan123", pan123Mock);
+}
+
+test("admitted mainland visitors prefer the verified 123pan link over the OSS mirror", async () => {
+  enablePan123();
+  for (const ua of ["", "Mozilla/5.0 (Windows NT 10.0)", "fluxdown-agent/0.6.0"]) {
+    const response = await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, ua);
+    expect(response.headers.get("X-Download-Source")).toBe("pan123");
+    expect(response.headers.get("Location")).toBe("https://pan.example/app.zip");
+  }
+  expect(signatures.every((s) => s === `PAN123 v${sequence}/app.zip 12`)).toBe(true);
+  // 123 不可用（缺资产 / 大小不符 / 超时）时回落 dl-cn 镜像，镜像也不行才是 GitHub。
+  enablePan123(null);
+  signatures.length = 0;
+  expect((await get("auto")).headers.get("X-Download-Source")).toBe("cdn");
+  expect(signatures).toEqual([`PAN123 v${sequence}/app.zip 12`, "HEAD", "CDN"]);
+  headSize = "11";
+  sequence++;
+  expect((await get("auto")).headers.get("X-Download-Source")).toBe("github");
+  expect((await get("oss")).status).toBe(503);
+});
+
+test("in-app updates outside mainland China use 123pan; browsers there keep GitHub", async () => {
+  enablePan123();
+  markReleaseViewer("8.8.8.8");
+  for (const ua of ["fluxdown-agent/0.6.0", "fluxdown-android/0.6.0", ""]) {
+    const response = await get("", `v${sequence}`, "app.zip", "8.8.8.8", ua);
+    expect(response.headers.get("X-Download-Source")).toBe("pan123");
+  }
+  signatures.length = 0;
+  expect((await get("auto", `v${sequence}`, "app.zip", "8.8.8.8", "Mozilla/5.0")).headers.get("X-Download-Source"))
+    .toBe("github");
+  // 123 不可用时非大陆更新器直接 GitHub，不消耗付费镜像；source=oss 也不返回 503。
+  enablePan123(null);
+  expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", "fluxdown-agent/0.6.0")).headers.get("X-Download-Source"))
+    .toBe("github");
+  expect((await get("oss", `v${sequence}`, "app.zip", "8.8.8.8", "fluxdown-agent/0.6.0")).headers.get("X-Download-Source"))
+    .toBe("github");
+  expect(signatures).toEqual([`PAN123 v${sequence}/app.zip 12`, `PAN123 v${sequence}/app.zip 12`]);
+});
+
+test("123pan obeys the download gate, source=github and stale metadata", async () => {
+  const originalNow = Date.now;
+  let now = originalNow();
+  // 下载元数据缓存在首个请求时创建并捕获 Date.now：必须先替换。
+  Date.now = () => now;
+  try {
+    enablePan123();
+    resetReleaseViewers();
+    expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", "fluxdown-agent/0.6.0")).headers.get("X-Download-Source"))
+      .toBe("github");
+    expect((await get("auto")).headers.get("X-Download-Source")).toBe("github");
+    markReleaseViewer(MAINLAND_IP, now);
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, "curl/8.7.1")).headers.get("X-Download-Source"))
+      .toBe("github");
+    expect((await get("github")).headers.get("X-Download-Source")).toBe("github");
+    expect(signatures).toEqual([]);
+    now += 120_001;
+    status = 503;
+    const fallback = await get("auto");
+    expect(fallback.headers.get("X-Download-Source")).toBe("github");
+    expect(fallback.headers.get("X-Download-Metadata")).toBe("stale");
+    expect(signatures).toEqual([]);
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("unconfigured OSS is explicit 503", async () => {

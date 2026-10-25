@@ -15,12 +15,13 @@ node dist/server/entry.mjs
 
 ## 下载策略
 
-- 官网下载页与更新日志使用 `/api/download/<filename>?source=auto&tag=<release>`：先由 GitHub 发布元数据验证非草稿 release 与精确资产再 302。中国大陆访客（`src/lib/geoip.ts` 用 ip2region 按反代写入的 `X-Client-IP` 判定，港澳台不算）先 HEAD 私有 OSS 确认资产存在且大小一致（结果缓存 1h），再 302 到下载镜像 `CN_CDN_BASE`（`dl-cn.fluxdown.com`，URL 鉴权 A，3 小时有效）；其余访客与 OSS 缺资产时 302 到 GitHub。镜像现为 Cloudflare Worker `cdn/oss-proxy.js`（边缘缓存 + 私有 OSS 回源，部署 `cd cdn && bunx wrangler deploy`），ICP 备案后改回阿里云 CDN 中国内地加速，签名格式不变。
+- 官网下载页与更新日志使用 `/api/download/<filename>?source=auto&tag=<release>`：先由 GitHub 发布元数据验证非草稿 release 与精确资产再 302。中国大陆访客由 Cloudflare 按访客真实出口网络判定（IPv4 / IPv6 均可）：反代只采信 Cloudflare 网段带来的 `CF-IPCountry`，以 `X-Client-Country` 覆盖写给官网（`src/lib/client-ip.ts::getClientCountry`），`CN` 为大陆，港澳台是 HK / MO / TW。大陆访客先 HEAD 私有 OSS 确认资产存在且大小一致（结果缓存 1h），再 302 到下载镜像 `CN_CDN_BASE`（`dl-cn.fluxdown.com`，URL 鉴权 A，3 小时有效）；其余访客与 OSS 缺资产时 302 到 GitHub。镜像现为 Cloudflare Worker `cdn/oss-proxy.js`（边缘缓存 + 私有 OSS 回源，部署 `cd cdn && bunx wrangler deploy`），ICP 备案后改回阿里云 CDN 中国内地加速，签名格式不变。
+- 123 云盘（`src/lib/pan123.ts` + `src/lib/download-pan123.ts`）优先于 dl-cn：**中国大陆访客与应用内更新**（更新器 User-Agent `fluxdown-<产品>/<版本>`，旧版不带 User-Agent，见 `download-gate.ts::isAppUpdaterUserAgent`，不分地区）通过准入后，先 WebDAV `PROPFIND` 确认 `<OSS_RELEASE_PREFIX>/<版本>/<组件>/<文件>` 存在且大小一致（缓存：存在 1h、缺失 60s），再本地签发直链空间链接 `https://<UID>.cdn.123clouddisk.cn/<UID>/fd-release/<对象键>?auth_key=<过期>-<rand>-<UID>-<md5>`（123「URL 鉴权」，签名用解码后的路径，有效期同 dl-cn 3 小时），`X-Download-Source: pan123`。直链不绑 IP；WebDAV GET 的 302 链接只认生成它的出口 IP（东京服务器生成后用户 403 / 50002），不能用。123 侧另设流量上限：全站每日 200GB、单 IP 每日 5GB（「直链流量包 → 流量设置」）。123 缺资产 / 不可用时大陆访客回落 dl-cn，非大陆更新器直接 GitHub。资产在 release 发布成功后由 `pan123-upload.yml` 经东京服务器中转上传（GitHub runner 直传 123 极慢），上传期间（约半小时）大陆访客仍走 dl-cn。
 - 准入（`src/lib/download-gate.ts`）：只有同一访客 IP 在 24 小时内读过 `/api/release` 或 `/api/changelog`（官网下载页、首页、更新日志页与应用内更新都会先读清单）、且 User-Agent 不是常见脚本 / HTTP 库时才发 CDN 链接；直接批量请求 `/api/download` 的脚本一律 302 GitHub。记录在进程内存，重启后清空。
 - 封禁（`src/lib/download-ban.ts`）：同一 IP 15 分钟内超过 20 次下载即封禁 12 小时，期间 `/api/download` 一律 429（`Retry-After` 为剩余秒数）。同一 IP 60 秒内重复请求同一文件只算一次（多线程下载器的分段连接与重试）。状态在进程内存，重启后清空。
-- 显式 `source=github` 只用 GitHub；`source=oss` 对可走镜像的访客只用已验证的 CDN 镜像，不可用为 503，其余访客同 `auto`（GitHub）。缺省/未知 source 与 `auto` 相同。GitHub 仅有过期缓存时只允许 GitHub 直链，不签发 CDN 链接。
+- 显式 `source=github` 只用 GitHub；`source=oss` 对可走镜像的大陆访客只用已验证的镜像（123 云盘或 dl-cn），都不可用为 503，其余访客同 `auto`。缺省/未知 source 与 `auto` 相同。GitHub 仅有过期缓存时只允许 GitHub 直链，不签发任何镜像链接。
 - 阿里云 OSS 默认域名禁止分发 `.apk` / `.ipa`：桶内存为 `<name>.bin`（Content-Type 须为 octet-stream），镜像回源时换成 `.bin` 并覆盖 APK 的 Content-Type / Content-Disposition；规则见 `src/lib/oss-storage.ts`，上传侧在 `.github/actions/oss-upload`。
-- 本地回归：`bun test tests/download-backend.test.ts tests/download-route.test.ts tests/download-source.test.ts tests/geoip.test.ts`，完整静态与构建检查：`bun run build`。这些测试替换外部 fetch 与归属地库，不代表真实 CDN 回源演练。
+- 本地回归：`bun test tests/download-backend.test.ts tests/download-route.test.ts tests/download-source.test.ts`，完整静态与构建检查：`bun run build`。这些测试替换外部 fetch 与反代头，不代表真实 CDN 回源演练。
 
 ## 结构
 

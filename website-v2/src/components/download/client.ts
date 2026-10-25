@@ -233,6 +233,9 @@ function init(root: HTMLElement) {
           date: null,
         };
       }
+      case "ios":
+        // 主按钮恒为 TestFlight 公测(renderHero 的 iOS 分支);未签名侧载 IPA 作为备选下载。
+        return { ...base, asset: null, label: t.ios.join, alt: alt(data?.ios?.assets.sideload_ipa, t.ios.sideloadAlt) };
       default:
         return { ...base, asset: null, label: t.hero.allPlatforms, alt: null };
     }

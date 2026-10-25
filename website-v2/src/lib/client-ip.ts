@@ -9,3 +9,14 @@ export function getClientIp(request: Request, clientAddress?: string | null): st
   if (ip && ip.length <= 45 && /^[0-9a-fA-F:.]+$/.test(ip)) return ip;
   return clientAddress || "unknown";
 }
+
+/**
+ * 访客国家/地区（大写 ISO 3166-1 两位码）：反代只在请求来自 Cloudflare 网段时把 `CF-IPCountry`
+ * 写进 `X-Client-Country`（覆盖访客自带的同名头），其余为空。由 Cloudflare 按访客真实出口网络
+ * （IPv4 / IPv6 均可）判定，港澳台分别为 HK / MO / TW；未知（XX）、Tor（T1）与缺头返回 null。
+ * 规则在服务器 `conf.d/fluxdown-client-ip.conf` + 各站点 `proxy/download.conf`。
+ */
+export function getClientCountry(request: Request): string | null {
+  const country = request.headers.get("x-client-country")?.trim().toUpperCase();
+  return country && /^[A-Z]{2}$/.test(country) && country !== "XX" ? country : null;
+}

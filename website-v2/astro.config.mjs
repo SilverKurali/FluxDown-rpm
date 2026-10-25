@@ -198,7 +198,7 @@ export default defineConfig({
 
       // ── 可选：阿里云 OSS 发布资产 + dl-cn 下载镜像（/api/download，见 src/lib/oss.ts）──
       // 对象布局 `<OSS_RELEASE_PREFIX>/<tag>/<file>`，与 .github/actions/oss-upload 一致。
-      // bucket 私有：官网用 AK/SK 只做 HEAD 存在性探测；中国大陆访客（src/lib/geoip.ts）与 source=oss
+      // bucket 私有：官网用 AK/SK 只做 HEAD 存在性探测；中国大陆访客（Cloudflare 国家码，client-ip.ts）与 source=oss
       // 302 到 CN_CDN_BASE（URL 鉴权 A），其余访客走 GitHub。AK/SK 或 CN_CDN_AUTH_KEY 缺失时全部走 GitHub。
       OSS_ACCESS_KEY_ID: envField.string({
         context: "server",
@@ -236,6 +236,47 @@ export default defineConfig({
         context: "server",
         access: "secret",
         optional: true,
+      }),
+      // 123 云盘下载源（src/lib/pan123.ts）：.github/scripts/pan123_mirror.sh 经 WebDAV 上传到同一对象键；
+      // 中国大陆访客与应用内更新（均须通过下载准入）优先 302 到 123 直链（URL 鉴权签名），失败再走 dl-cn / GitHub。
+      // WebDAV 账号 / 应用密码（只授权发布目录）用于 PROPFIND 确认资产；UID + 鉴权密钥用于签直链。缺任一项则关闭。
+      PAN123_WEBDAV_URL: envField.string({
+        context: "server",
+        access: "secret",
+        default: "https://webdav.123pan.cn/webdav",
+      }),
+      PAN123_WEBDAV_USER: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      PAN123_WEBDAV_PASSWORD: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      PAN123_UID: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      // 123「直链管理 → URL 鉴权」密钥（1–16 位字母数字）
+      PAN123_AUTH_KEY: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      // 空 = https://<PAN123_UID>.cdn.123clouddisk.cn（备用域名 123clouddisk.com）
+      PAN123_DIRECT_BASE: envField.string({
+        context: "server",
+        access: "secret",
+        default: "",
+      }),
+      // 已启用直链空间的根目录文件夹（即 WebDAV 授权目录）
+      PAN123_DIRECT_FOLDER: envField.string({
+        context: "server",
+        access: "secret",
+        default: "fd-release",
       }),
 
       // ── 赞助名录（Sponsor Wall）──

@@ -34,7 +34,8 @@ export const ossConfigured = !!(OSS_ACCESS_KEY_ID && OSS_ACCESS_KEY_SECRET);
  * 目录由 release tag 推导：`v0.4.8` → `v0.4.8/app/`（历史目录名；统一 release 起
  * 该目录承载这个 vX.Y.Z release 的全部组件资产），历史组件 release `extension-v…` /
  * `server-v…` / `cli-v…` / `mobile-v…` → 同名组件目录；版本目录保留 `v` 前缀。
- * 同一套规则在 .github/actions/oss-upload/action.yml 的 bash 里复刻，改一处须同步另一处。
+ * 同一套规则在 .github/actions/oss-upload 与 .github/scripts/pan123_mirror.sh 的 bash 里各复刻一份
+ * （123 云盘用同一对象键），改一处须同步另外两处。
  */
 export function releaseObjectKey(tag: string, filename: string): string {
   const m = /^(?:([a-z]+)-)?(v.+)$/.exec(tag);
