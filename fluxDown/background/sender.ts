@@ -11,8 +11,9 @@ import { t } from "@/utils/i18n";
 import { allowBypass, claimAppDownNotice, markAppDown, markAppUp, probeAppReachable } from "./breaker";
 import { notify } from "./notify";
 import type { SendChannel, SendResult } from "./protocol";
-import { extractAuthFromCache, lookupRequestRecord, requestHeaderCache, requestRecordCache, withBrowserUserAgent } from "./request-cache";
-import type { CapturedBody } from "./request-cache";
+import { extractAuthFromCache, requestHeaderCache, requestRecordCache, withBrowserUserAgent } from "./request-cache";
+import { lookupRequestRecord } from "./request-record";
+import type { CapturedBody } from "./request-record";
 import { getCachedProfiles, getCachedSettings } from "./settings-cache";
 import { incrementStat } from "./stats";
 import { maybeArmTaskPollForChannel } from "./tasks";
@@ -208,11 +209,12 @@ export async function sendToFluxDown(input: SendInput): Promise<SendOutcome> {
   extraHeaders = withBrowserUserAgent(extraHeaders) ?? extraHeaders;
 
   // 反查浏览器原始 method 与 body —— 修复 form-POST 触发的下载（uupdump 等）。
-  const reqRecord = lookupRequestRecord(url, originalUrl);
+  // 只认下载 URL 自身的记录：307/308 跳转已由 onBeforeRedirect 把事务带到目标
+  // URL；301/302/303 后浏览器改发 GET，跳转前的 POST 不属于这次下载。
+  const reqRecord = lookupRequestRecord(requestRecordCache, url);
   if (reqRecord.method || reqRecord.body) {
     // 用过即清——避免下次同 URL 复用旧 record
     requestRecordCache.delete(url);
-    if (originalUrl && originalUrl !== url) requestRecordCache.delete(originalUrl);
   }
 
   const request: DownloadRequest = {

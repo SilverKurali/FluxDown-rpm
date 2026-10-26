@@ -80,6 +80,7 @@
 
 另见 AGENTS.md §4：插件页面脚本只经浏览器 `userScripts` API 执行。
 
+- **表单 POST 的 method / body 不得经重定向回退到下载 URL**：表单 POST 经 301 / 302 / 303 跳到直链后浏览器改发 GET，旧逻辑按 `originalUrl` 回查请求事务，把跳转前的 POST 体安到直链上；`file.xiecdn.com` 这类 CDN 对 POST 直接断连（`connection closed before message completed`），而 POST 任务恢复被引擎拒绝，任务必失败（0.6.0 靠改发 GET 的自动重试掩盖）。只认下载 URL 自身的记录，307 / 308 由 `onBeforeRedirect` 把事务带到目标 URL → `fluxDown/background/request-record.ts::carryAcrossRedirect`。
 - **共享 NMH 端口是一问一答串行的，队首卡死必须断开换新端口，但「排在合法慢请求后面而超时」不得回收**：中继与 agent 连接串行，队首卡住后排队请求全部超时，原先超时不换端口会让任务面板与能力探测一直「未连接」直到 SW 重启；旧端口迟到的断开事件也不得波及新端口 → `fluxDown/utils/nmh-shared.ts::createSharedChannel`、回归 `fluxDown/utils/nmh-shared.test.ts`（三条用例：队首卡死回收 / 慢请求之后不回收 / 迟到断开不波及新端口）。
 - **扩展必须跳过自己配置的远端 FluxDown 服务发起的「下载到本地」请求**：否则扩展拦截该下载、再回投同一远端，形成持续创建任务的死循环；判定依据含 referrer / URL 的 origin 与 server 文件导出端点路径（覆盖反代 / 不同主机名访问 Web UI） → `fluxDown/utils/settings.ts::isFluxDownServerDownload`、测试 `fluxDown/utils/settings.test.ts`。
 - **`contextMenus.create` 必须带回调读 `runtime.lastError`，且「removeAll 后重建」要在失败时整体再建一次**：create 的失败不抛错也不 reject，不读就报 `Unchecked runtime.lastError`；浏览器启动 / 启用扩展时 Chrome 异步恢复上次持久化的菜单（`MenuManager::ReadFromStorage`），落在 removeAll 与 create 之间就报 `Cannot create item with duplicate id` 并残留旧项，恢复每次加载只发生一次 → `fluxDown/background/menu-build.ts::rebuildMenus`（最多 2 轮）、适配 `background/menus.ts::browserMenus`、回归 `background/menu-build.test.ts`。
