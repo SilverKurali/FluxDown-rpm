@@ -246,6 +246,11 @@ async fn run_agent(
             }
         });
     }
+    // 桌面宿主：自身程序文件消失（App Translocation 副本回收、AppImage 卸载、App 被删除）后
+    // 完全退出，避免无界面的幽灵实例占住端口。
+    let bundle_watch_task = server
+        .is_none()
+        .then(|| crate::bundle_watch::spawn(lifecycle.clone(), cancel.clone()));
     let shell = ShellState::new(host.availability, daemon.clone(), events.clone());
     let power = Arc::new(PowerService::new(events.clone()));
     let power_task = tokio::spawn(power.clone().run(cancel.clone()));
@@ -576,6 +581,20 @@ async fn run_agent(
             }
             Err(error) => {
                 tracing::error!(task, error = %error, "agent background task panicked");
+                if result.is_ok() {
+                    result = Err(error.into());
+                }
+            }
+        }
+    }
+    if let Some(handle) = bundle_watch_task {
+        match handle.await {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {
+                tracing::debug!("bundle watch task cancelled during shutdown");
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "bundle watch task panicked");
                 if result.is_ok() {
                     result = Err(error.into());
                 }

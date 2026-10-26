@@ -1436,7 +1436,7 @@
   "updateManualNotWritable": "FluxDown's folder is not writable, so it can't update itself. Move it to a writable folder or download the update manually.",
   "updateManualNoAsset": "No update package is published for this system yet. Download the update manually.",
   "updateManualElevation": "Installing this package needs administrator rights, but no graphical authorization prompt is available. Install the update with your package manager.",
-  "updateManualReadOnly": "FluxDown is running from a read-only location. Move FluxDown.app to the Applications folder, then update.",
+  "updateManualReadOnly": "FluxDown is running from a read-only copy (macOS randomizes the path of quarantined apps, or the app is running from a disk image). Quit FluxDown, run xattr -dr com.apple.quarantine /Applications/FluxDown.app in Terminal (or drag the app out of Applications and back in Finder), then reopen it and update.",
   "updateManualUnofficial": "This is not an official signed build, so it can't update itself.",
   "updateManualUnsupported": "Automatic updates are not supported on this system. Download the update manually.",
   "updateFailedNetwork": "Couldn't reach the update server. Check your network and try again.",

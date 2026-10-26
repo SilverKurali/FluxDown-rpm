@@ -59,6 +59,7 @@
 - **server 模式 Origin 同源校验：Host 不带端口时只比主机，带端口时必须等于 Origin 的有效端口，非 http(s) Origin 一律拒绝**：nginx `Host $host` 与 Nginx Proxy Manager 会丢掉对外非默认端口，严格比端口会把反代部署整体挡掉 → `native/agent/src/server_mode.rs::origin_allowed`、回归 `origin_must_match_host_when_present`。
 - **跨进程文件锁争用要识别 Windows 的 `ERROR_LOCK_VIOLATION`**：std 不把它映射为 `WouldBlock`，只看 `kind()` 会把「已有写入者」误当 IO 故障 → `native/engine/src/db.rs::acquire_engine_file_lease`、`native/agent/src/state.rs::is_lock_contended`。
 - **系统托盘：macOS 不挂常驻菜单、不设 tooltip，Linux 托盘 id 固定**：`NSStatusItem` 一旦挂菜单，任何点击都直接弹菜单，左键「显示窗口」失效，故右键时经事件循环投递 `ShowMenu` 由主线程临时挂菜单弹出；macOS 27 的状态栏 tooltip 收不到移出事件会常驻（#953），倒计时改显示在菜单项；Linux SNI Id 不能随 PID 变（GNOME 顶栏扩展靠它记位置），图标临时文件按进程分目录，避免并存实例退出时删掉对方仍引用的图标 → `native/agent/src/shell/host.rs`（`HostEvent::ShowMenu` / `pop_up_menu` / `TRAY_ID` / `linux::IconDir::for_process`）、`native/agent/src/shell/tray_model.rs::COUNTDOWN_IN_MENU`。
+- **残留的旧版 / 无主 agent、daemon 会被新版本复用**：macOS 带 quarantine 的 App（如经 FluxDown 自己下载的 DMG 拖出，引擎按 `mark_of_the_web` 打 `…;FluxDown;` 标记）启动时被系统挪到只读随机路径运行，副本回收后旧 agent 仍占端口，`desktop_executable()` 找不到同级桌面，扩展唤不醒；新桌面复用它时更新状态来自旧版本（关于页「当前 v0.6.3」却提示「发现新版本 v0.6.3」）。同类还有 Linux AppImage 挂载卸载、系统包卸载，以及 agent 单独退出后 daemon 按设计存活、被升级后的新 agent 复用。修复两层、全平台一致：握手时对端应用版本**确定更旧**就请求其 `system.shutdown` 并重拉同级进程（桌面 → agent、agent → daemon，只换更旧的，避免降级已迁移的 DB；比较只在 protocol 一处）；桌面宿主 agent 每 30s 重新解析自身程序路径，连续两次缺失即完全退出（server 模式不启用）→ `native/protocol/src/rpc.rs::is_older_app_version`、`crates/app/src/agent_client.rs`（`ConnectError::Outdated`）、`native/agent/src/daemon_client.rs`（`ConnectError::Outdated`）、`native/agent/src/bundle_watch.rs`。
 
 ## GPUI（gpui-fast 保留模式）
 
@@ -96,6 +97,7 @@
 - **FileProvider 要声明 `root-path` 覆盖 `/storage/`**：可移动存储卡上的文件（`/storage/6BF9-89B3/...`）否则生成不了 content URI，打开已下载文件会崩；文件不在声明根内时提示失败而不是抛异常 → `mobile/Android/app/src/main/res/xml/file_paths.xml`（`storage_volumes`）。
 - **叠层返回键的优先级：菜单 / 对话框在 Sheet 之上**：后注册的 Sheet 返回处理器会抢先，菜单打开时返回键应交给 `FluxOverlayHost` → `mobile/Android/fluxui/src/main/java/com/fluxdown/fluxui/overlay/FluxSheet.kt`（`canGoBack` 条件）。
 - **应用自更新不用 `PackageInstaller` 会话，交给「打开 APK」的默认安装程序，且只在界面可见时拉起**：会话的确认界面固定由系统安装器处理，无视用户设定的默认安装程序（小米机上总是小米安装器）；部分国行 MIUI 安装器对第三方会话直接回 `INSTALL_FAILED_ABORTED`（用户什么都没点，旧映射显示「已取消安装」）；从 `BroadcastReceiver` 拉确认界面在后台被系统静默拦截，状态永远停在「正在安装」。未持有 `UPDATE_PACKAGES_WITHOUT_USER_ACTION` 时会话本来也要确认。安装包经 FileProvider `app_update` 根（`../no_backup/updates/`，不可信应用不能硬链接）只读授权 → `mobile/Android/app/src/main/java/com/fluxdown/app/update/ApkInstaller.kt`、`UpdateEffects.kt`（交接 `LaunchedEffect`）、`res/xml/file_paths.xml`。
+- **「打开文件」要区分「当前查看的主机」与「任务所属的引擎」**：远端主机的 `saveDir` 是主机磁盘路径，`fileMissing` 也由主机 daemon 按主机磁盘算，只看 `Completed && !fileMissing` 会给远端任务显示「打开」并按本机路径报「文件不存在」；反过来，完成提示 / 通知里的本机任务（含 PC 下发到本机的）在用户正查看远端主机时仍须能打开，不能套当前主机门控 → `mobile/Android/app/src/main/java/com/fluxdown/app/actions/TaskActions.kt`（`hasLocalFile` / `open` 走当前主机门控，`openLocalFile` 供本机任务来源调用）、`feature/downloads/DownloadsView.kt::localHost`（行环钮文案），iOS 同规则见 `TaskActions.swift::hasLocalFile`、`DownloadsRowText.swift::ringAction`。
 
 ## iOS
 

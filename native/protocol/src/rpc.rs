@@ -45,6 +45,45 @@ pub const APP_VERSION: &str = match option_env!("FLUXDOWN_APP_VERSION") {
     _ => env!("CARGO_PKG_VERSION"),
 };
 
+/// 握手对端自报的产品版本 `running` 是否**确定**旧于本进程的 `own`（`主.次.修[-预发布]`，
+/// 忽略 `+构建`）。任一方无法解析（开发版等）返回 `false`：拿不准时不替换。
+///
+/// 本机客户端据此替换残留的旧版服务进程（桌面 → agent、agent → daemon），只替换更旧的：
+/// 更新的 daemon 可能已迁移数据库，换回旧版本等于降级。
+///
+/// ```
+/// use fluxdown_protocol::is_older_app_version;
+/// assert!(is_older_app_version("0.6.2", "0.6.3"));
+/// assert!(!is_older_app_version("0.6.3", "0.6.3"));
+/// assert!(!is_older_app_version("dev", "0.6.3"));
+/// ```
+#[must_use]
+pub fn is_older_app_version(running: &str, own: &str) -> bool {
+    fn parse(version: &str) -> Option<([u64; 3], Option<&str>)> {
+        let version = version.trim().trim_start_matches('v');
+        let version = version.split_once('+').map_or(version, |(core, _)| core);
+        let (core, pre) = match version.split_once('-') {
+            Some((core, pre)) => (core, Some(pre)),
+            None => (version, None),
+        };
+        let mut parts = core.split('.');
+        let mut triple = [0_u64; 3];
+        for slot in &mut triple {
+            *slot = parts.next()?.parse().ok()?;
+        }
+        parts.next().is_none().then_some((triple, pre))
+    }
+    let (Some((running, running_pre)), Some((own, own_pre))) = (parse(running), parse(own)) else {
+        return false;
+    };
+    match running.cmp(&own) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        // 同一版本号：预发布旧于正式版；两个预发布之间不作判断。
+        std::cmp::Ordering::Equal => running_pre.is_some() && own_pre.is_none(),
+    }
+}
+
 /// 本机服务在 FluxDown 架构中的职责。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -474,5 +513,22 @@ mod tests {
         assert!(parse["id"].is_null());
         assert_eq!(parse["error"]["code"], -32700);
         Ok(())
+    }
+
+    /// 只认定确定更旧的版本：更新的服务可能已迁移数据库，开发版等无法解析时不替换。
+    #[test]
+    fn only_a_strictly_older_app_version_counts_as_older() {
+        use super::is_older_app_version;
+        assert!(is_older_app_version("0.6.2", "0.6.3"));
+        assert!(is_older_app_version("v0.5.9", "0.6.3"));
+        assert!(is_older_app_version("0.6.3-rc.2", "0.6.3"));
+        assert!(!is_older_app_version("0.6.3", "0.6.3"));
+        assert!(!is_older_app_version("0.6.4", "0.6.3"));
+        assert!(!is_older_app_version("0.6.3", "0.6.3-rc.1"));
+        assert!(!is_older_app_version("0.6.3-rc.1", "0.6.3-rc.2"));
+        assert!(!is_older_app_version("0.6.3+build.1", "0.6.3"));
+        assert!(!is_older_app_version("dev", "0.6.3"));
+        assert!(!is_older_app_version("0.6.2", "dev"));
+        assert!(!is_older_app_version("0.6", "0.6.3"));
     }
 }

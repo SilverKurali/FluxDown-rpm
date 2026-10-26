@@ -1436,7 +1436,7 @@
   "updateManualNotWritable": "FluxDown 所在目录不可写，无法自行更新。请移动到可写目录，或手动下载更新。",
   "updateManualNoAsset": "暂未发布适用于本系统的更新包，请手动下载更新。",
   "updateManualElevation": "安装此软件包需要管理员权限，但当前没有可用的图形授权对话框。请用包管理器安装更新。",
-  "updateManualReadOnly": "FluxDown 正在只读位置运行。请先把 FluxDown.app 移到「应用程序」文件夹，再进行更新。",
+  "updateManualReadOnly": "FluxDown 正在 macOS 的只读副本中运行（App 带有隔离标记时系统会随机化路径，或正从磁盘映像运行）。请退出 FluxDown，在「终端」执行 xattr -dr com.apple.quarantine /Applications/FluxDown.app（或在访达中把 App 拖出再拖回「应用程序」文件夹），然后重新打开再更新。",
   "updateManualUnofficial": "当前不是官方签名的正式版本，无法自行更新。",
   "updateManualUnsupported": "当前系统不支持自动更新，请手动下载更新。",
   "updateFailedNetwork": "无法连接更新服务器，请检查网络后重试。",

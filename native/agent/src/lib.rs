@@ -6,6 +6,7 @@
 pub mod analytics;
 pub mod api_host;
 pub mod background_effects;
+mod bundle_watch;
 pub mod capture;
 mod category_dir;
 pub mod cdn_worker;

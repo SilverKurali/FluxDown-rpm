@@ -14,6 +14,7 @@
 
 mod archive;
 mod detect;
+pub(crate) use detect::current_exe_path;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

@@ -237,7 +237,9 @@ private fun ExternalDownloadStage(
     val scope = rememberCoroutineScope()
     val haptics = FluxTheme.haptics
     val actions = remember(overlays, haptics) {
-        TaskActions(context.applicationContext, scope, { container.session }, container.store, overlays, nav, haptics)
+        TaskActions(context.applicationContext, scope, { container.session }, container.store, overlays, nav, haptics) {
+            container.host.value is HostRef.Local
+        }
     }
     val close by rememberUpdatedState(onClosed)
     CompositionLocalProvider(LocalFluxOverlays provides overlays, LocalTaskActions provides actions) {
