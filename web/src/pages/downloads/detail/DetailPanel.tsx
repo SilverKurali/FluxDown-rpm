@@ -13,36 +13,42 @@ import { SpeedTab } from './SpeedTab'
 import { GroupOverview } from './GroupOverview'
 import { useSpeedHistory } from './useSpeedHistory'
 import type { DownloadTaskView } from '../model/task'
+import { ShareTaskButton, TransferDiagnosticsTab, useShareTaskFacts } from '../../share'
 
 /** 内置 tab 或插件 tab（`plugin:<identity>:<viewId>`）。 */
 type DetailTab = string
 
-function TaskDetail({ view }: { view: DownloadTaskView }) {
+function TaskDetail({ view, mode }: { view: DownloadTaskView; mode: 'docked' | 'sheet' }) {
   const t = useT()
   const [tab, setTab] = useState<DetailTab>('general')
+  const hasShareDiagnostics = useShareTaskFacts(view.taskId)?.isShareReceive === true
   const isBt = view.protocol === 'bt'
   const pluginTabs = usePluginDetailTabs()
   const pluginTab = pluginTabs.find((item) => item.value === tab)
-  // 插件 tab 随插件卸载 / 禁用消失时回到常规；seeding 仅 BT 任务有。
-  const active: DetailTab = (tab === 'seeding' && !isBt) || (tab.startsWith('plugin:') && !pluginTab) ? 'general' : tab
+  // 插件 tab 随插件卸载 / 禁用消失时回到常规；seeding 仅 BT 任务有；传输诊断仅快传接收任务有。
+  const active: DetailTab =
+    (tab === 'seeding' && !isBt) || (tab === 'shareDiag' && !hasShareDiagnostics) || (tab.startsWith('plugin:') && !pluginTab) ? 'general' : tab
   const speedHistory = useSpeedHistory(view.taskId, view.state === 'downloading', active === 'speed')
   const items = [
     { value: 'general' as const, label: t('detailTabGeneral') },
     { value: 'speed' as const, label: t('detailTabSpeed') },
     ...(isBt ? [{ value: 'seeding' as const, label: t('tabSeeding') }] : []),
+    ...(hasShareDiagnostics ? [{ value: 'shareDiag' as const, label: t('detailTabShareDiagnostics') }] : []),
     { value: 'log' as const, label: t('detailTabLog') },
     { value: 'advanced' as const, label: t('detailTabAdvanced') },
     ...pluginTabs.map((item) => ({ value: item.value, label: item.view.title })),
   ]
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 px-3 pt-3">
+      <div className="flex shrink-0 items-center gap-2 px-3 pt-3">
         <SegmentedTabs items={items} value={active} onValueChange={setTab} />
+        {mode === 'sheet' ? <ShareTaskButton views={[view]} iconOnly={false} /> : null}
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-3">
         {active === 'general' ? <GeneralTab view={view} /> : null}
         {active === 'speed' ? <SpeedTab view={view} history={speedHistory} /> : null}
         {active === 'seeding' ? <SeedingTab view={view} /> : null}
+        {active === 'shareDiag' ? <TransferDiagnosticsTab taskId={view.taskId} taskState={view.state} /> : null}
         {active === 'log' ? <LogTab taskId={view.taskId} /> : null}
         {active === 'advanced' ? <AdvancedTab view={view} /> : null}
         {pluginTab && active === pluginTab.value ? (
@@ -67,6 +73,7 @@ export function DetailPanel({ mode }: { mode: 'docked' | 'sheet' }) {
       {mode === 'docked' ? (
         <div className="flex min-h-control shrink-0 items-center gap-1 border-b border-hairline bg-chrome py-0.5 pl-3 pr-1">
           <div className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{t('detail')}</div>
+          {view && overviewGroupId === null ? <ShareTaskButton views={[view]} /> : null}
           <Tooltip content={placementLabel}>
             <Button
               variant="ghost"
@@ -87,7 +94,7 @@ export function DetailPanel({ mode }: { mode: 'docked' | 'sheet' }) {
       {overviewGroupId !== null ? (
         <GroupOverview key={overviewGroupId} groupId={overviewGroupId} />
       ) : view ? (
-        <TaskDetail key={view.taskId} view={view} />
+        <TaskDetail key={view.taskId} view={view} mode={mode} />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6">
           <File strokeWidth={1.5} className="text-text-tertiary" style={{ width: 32, height: 32 }} />

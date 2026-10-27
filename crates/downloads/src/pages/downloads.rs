@@ -33,6 +33,7 @@ use crate::{
         file_rescan::{RescanDecision, RescanThrottle},
         group_tree::{GroupMeta, member_dir},
         refresh_gate::{RefreshGate, RefreshPlan, RefreshTrigger},
+        share::ShareHostCaps,
         view_prefs::{DetailPlacement, VIEW_PREFS_KEY, ViewPrefs},
     },
     pages::new_download::{NewDownloadContext, build_new_download_context},
@@ -85,6 +86,7 @@ pub enum PageCommand {
     CycleGroupBy,
     CycleSort,
     ToggleDetailPanel,
+    ShareSelected,
 }
 
 /// 宿主注入的「新建下载」入口：由 app 打开独立对话框窗口。
@@ -103,6 +105,10 @@ pub type UserStartHook = Rc<dyn Fn(UserStartIntent, &mut App)>;
 pub type PluginCommandRunner = Rc<dyn Fn(String, String, Vec<String>, &mut Window, &mut App)>;
 /// 构造插件详情 tab 视图：`(tab 下标, task_id)`。
 pub type PluginTabViewFactory = Rc<dyn Fn(u16, String, &mut Window, &mut App) -> AnyView>;
+/// 分享任务：参数为任务 id 列表，由宿主打开分享面板。
+pub type ShareTasksOpener = Rc<dyn Fn(Vec<String>, &mut Window, &mut App)>;
+/// 构造某任务的快传「传输诊断」页签内容（宿主按任务缓存视图由详情面板负责）。
+pub type ShareDiagnosticsViewFactory = Rc<dyn Fn(String, &mut Window, &mut App) -> AnyView>;
 
 /// 插件贡献的任务右键命令。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,6 +153,16 @@ pub struct DownloadHostActions {
     pub run_plugin_command: Option<PluginCommandRunner>,
     /// 取插件详情 tab 内容：`(tab 下标, 任务 id)`；同一 `(下标, 任务)` 的视图由详情面板缓存。
     pub plugin_tab_view: Option<PluginTabViewFactory>,
+    /// 分享入口（右键菜单 / 选择条 / 详情面板 / `PageCommand::ShareSelected`）：参数为任务
+    /// id 列表。`None` 时全部分享入口隐藏。
+    pub share_tasks: Option<ShareTasksOpener>,
+    /// 快传接收任务角标上的「切换桥接」：参数为任务 id。`None` 时不显示该动作。
+    pub share_switch_to_bridge: Option<IdOpener>,
+    /// 快传接收任务详情「传输诊断」页签内容；`None` 时不显示该页签。
+    pub share_diagnostics_view: Option<ShareDiagnosticsViewFactory>,
+    /// 新建下载对话框识别出分享链接后打开接收确认：参数为链接原文。
+    /// 对话框是独立窗口，由 app 经 [`crate::NewDownloadView::set_open_share_receive`] 注入。
+    pub open_share_receive: Option<IdOpener>,
 }
 
 /// 一个进行中的大批量导入：进度只在分块边界更新，取消不回滚已创建的任务。
@@ -385,6 +401,10 @@ impl DownloadView {
 
     /// 注入宿主入口（新建下载 / 任务窗口 / 队列管理…）。
     pub fn set_host_actions(&mut self, host: DownloadHostActions) {
+        self.controller.store().set_share_host(ShareHostCaps {
+            send: host.share_tasks.is_some(),
+            switch_bridge: host.share_switch_to_bridge.is_some(),
+        });
         self.host = host;
     }
 
@@ -2264,6 +2284,7 @@ impl DownloadView {
             PageCommand::ToggleDetailPanel => {
                 self.mutate_prefs(|prefs| prefs.detail_open = !prefs.detail_open, cx);
             }
+            PageCommand::ShareSelected => self.share_selected(window, cx),
         }
     }
 
@@ -2428,6 +2449,28 @@ impl DownloadView {
             |this, window, cx| this.on_pop_out_detail(window, cx),
             cx,
         );
+        let detail_task_id = (!showing_group)
+            .then(|| {
+                self.detail
+                    .as_ref()
+                    .map(|detail| detail.read(cx).task_id().to_owned())
+            })
+            .flatten();
+        let share = detail_task_id.and_then(|task_id| {
+            let control = self
+                .controller
+                .store()
+                .share_control(&[RowKey::Local(task_id.clone())]);
+            self.share_button(
+                "detail-panel-share",
+                control,
+                icon_size,
+                move |this, window, cx| {
+                    this.share_keys(&[RowKey::Local(task_id.clone())], window, cx);
+                },
+                cx,
+            )
+        });
         let close = self.icon_action(
             "detail-panel-close",
             close_label,
@@ -2464,6 +2507,7 @@ impl DownloadView {
                         h_flex()
                             .gap(tokens.spacing.xxs)
                             .child(toggle_position)
+                            .children(share)
                             .child(pop_out)
                             .child(close),
                     ),
@@ -2544,6 +2588,7 @@ impl Render for DownloadView {
             .on_action(cx.listener(Self::on_change_selected_url))
             .on_action(cx.listener(Self::on_change_selected_segments))
             .on_action(cx.listener(Self::on_verify_selected))
+            .on_action(cx.listener(Self::on_share_selected))
             .on_action(cx.listener(Self::on_toggle_detail_panel))
             .on_drop(cx.listener(Self::on_paths_dropped))
             .drag_over::<ExternalPaths>(|style, _, _, cx| {

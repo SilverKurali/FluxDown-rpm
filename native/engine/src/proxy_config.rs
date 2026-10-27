@@ -434,6 +434,42 @@ pub fn normalize_no_proxy(list: &str) -> String {
     out.join(",")
 }
 
+/// 环回地址恒直连：本机适配器 / 本地服务绝不能被转发到外部代理。
+const LOOPBACK_NO_PROXY: [&str; 3] = ["localhost", "127.0.0.0/8", "::1"];
+
+/// 安装 `reqwest::Proxy` 时使用的绕过列表：环回名单 + 归一化后的用户名单
+/// （用户名单为空也保留环回；已含的条目不重复）。
+pub fn loopback_no_proxy(user_list: &str) -> String {
+    let mut out: Vec<String> = LOOPBACK_NO_PROXY.iter().map(|e| (*e).to_string()).collect();
+    for entry in normalize_no_proxy(user_list).split(',') {
+        if !entry.is_empty() && !out.iter().any(|e| e.eq_ignore_ascii_case(entry)) {
+            out.push(entry.to_string());
+        }
+    }
+    out.join(",")
+}
+
+/// 仅供集成测试：用环回假代理 + 环回假源站模拟「远端源站走代理」的场景时关闭环回直连。
+/// 进程级开关，生产代码不得调用；测试应按 nextest 的每测试一进程模型使用。
+static LOOPBACK_BYPASS_DISABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 见 [`LOOPBACK_BYPASS_DISABLED`]。
+#[doc(hidden)]
+pub fn disable_loopback_bypass_for_tests() {
+    LOOPBACK_BYPASS_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `build_client_builder` 为 `reqwest::Proxy` 装配的绕过列表：恒含环回（见
+/// [`loopback_no_proxy`]），测试开关打开时退回纯用户名单。
+pub(crate) fn proxy_bypass_list(user_list: &str) -> String {
+    if LOOPBACK_BYPASS_DISABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        normalize_no_proxy(user_list)
+    } else {
+        loopback_no_proxy(user_list)
+    }
+}
+
 /// Detect the system-level proxy from Windows registry.
 ///
 /// Reads `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`:
@@ -1851,6 +1887,16 @@ mod tests {
         assert!(local.contains("localhost") && local.contains("192.168.0.0/16"));
         // 幂等：已归一化的列表再次归一化不变。
         assert_eq!(normalize_no_proxy(&local), local);
+    }
+
+    #[test]
+    fn loopback_no_proxy_always_included_and_merged() {
+        use super::loopback_no_proxy;
+        assert_eq!(loopback_no_proxy(""), "localhost,127.0.0.0/8,::1");
+        assert_eq!(
+            loopback_no_proxy("*.corp.com;LOCALHOST;10.0.0.5"),
+            "localhost,127.0.0.0/8,::1,.corp.com,10.0.0.5"
+        );
     }
 
     use super::{

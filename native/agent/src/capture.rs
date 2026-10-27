@@ -175,6 +175,8 @@ pub struct CaptureService {
     shell: Arc<ShellState>,
     /// 最近的事务结局（最新在队尾）；std 锁只在内存操作期间短持有，不跨 await。
     outcomes: std::sync::Mutex<VecDeque<(String, CaptureOutcome)>>,
+    /// 分享链接（`fluxdown://share/…`、`https://fluxdown.com/s/…`）的出口。
+    share_links: Option<Arc<dyn crate::share_link::ShareLinkSink>>,
 }
 
 impl CaptureService {
@@ -186,7 +188,18 @@ impl CaptureService {
             pending: Mutex::new(VecDeque::new()),
             shell,
             outcomes: std::sync::Mutex::new(VecDeque::new()),
+            share_links: None,
         }
+    }
+
+    /// 接入分享链接出口（快传服务）；缺省没有，分享链接按「快传不可用」拒绝。
+    #[must_use]
+    pub fn with_share_links(
+        mut self,
+        sink: Option<Arc<dyn crate::share_link::ShareLinkSink>>,
+    ) -> Self {
+        self.share_links = sink;
+        self
     }
 
     fn record_outcome(&self, id: &str, outcome: CaptureOutcome) {
@@ -251,6 +264,27 @@ impl CaptureService {
             .into_iter()
             .flat_map(split_batch)
             .collect::<Vec<_>>();
+        // 分享链接不是下载地址：交给快传服务解析，等 UI 确认后才建任务；绝不落成下载任务。
+        let (share_requests, requests): (Vec<_>, Vec<_>) = requests
+            .into_iter()
+            .partition(|request| fluxdown_protocol::capture_link::is_share_link(&request.url));
+        for request in &share_requests {
+            match &self.share_links {
+                Some(sink) => sink
+                    .open_link(&request.url)
+                    .await
+                    .map_err(CaptureError::Share)?,
+                None => {
+                    return Err(CaptureError::Share(
+                        RpcErrorData::new(ApplicationErrorCode::Unavailable, false)
+                            .with_reason(fluxdown_protocol::ErrorReason::ShareUnavailable),
+                    ));
+                }
+            }
+        }
+        if requests.is_empty() {
+            return Ok(json!({ "taskIds": [], "share": !share_requests.is_empty() }));
+        }
         if origin == CaptureOrigin::Direct {
             return self.create_all(requests, None, true, None).await;
         }
@@ -872,6 +906,8 @@ pub enum CaptureError {
     InvalidGroup,
     #[error("daemon capture create failed: {0:?}")]
     Daemon(fluxdown_protocol::RpcErrorData),
+    #[error("share link was not accepted: {0:?}")]
+    Share(fluxdown_protocol::RpcErrorData),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]

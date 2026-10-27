@@ -6,6 +6,7 @@ use fluxdown_ui_account::{AccountView, ReferralView};
 use fluxdown_ui_extensions::{ExtensionsEvent, ExtensionsView};
 use fluxdown_ui_i18n::keys;
 use fluxdown_ui_settings::{SettingsContentSlots, SettingsTarget, SettingsView, VisibleSlot};
+use fluxdown_ui_share::ShareSettingsView;
 use fluxdown_ui_shell::{AuxiliaryWindowView, auxiliary_window_options};
 use gpui::{App, AppContext as _, px, size};
 use gpui_component::Root;
@@ -27,6 +28,7 @@ pub fn open(cx: &mut App) {
     let settings_store = desktop.settings_store.clone();
     let account_host = desktop.account_host.clone();
     let referral_visibility = desktop.referral_visibility.clone();
+    let share_hub = desktop.share_hub.clone();
     let title = translator.read(cx).text(keys::SETTINGS).to_owned();
     let mut options = auxiliary_window_options(title);
     options.window_min_size = Some(size(px(1000.), px(600.)));
@@ -43,6 +45,7 @@ pub fn open(cx: &mut App) {
             cx.new(|cx| AccountView::new(translator.clone(), account_host.clone(), window, cx));
         let extensions = cx.new(|cx| ExtensionsView::new(translator.clone(), extensions_port, cx));
         let referral = cx.new(|cx| ReferralView::new(account_host.clone(), window, cx));
+        let share = cx.new(|cx| ShareSettingsView::new(share_hub, window, cx));
         let settings = cx.new(|cx| {
             SettingsView::new(
                 translator.clone(),
@@ -50,6 +53,7 @@ pub fn open(cx: &mut App) {
                 SettingsContentSlots {
                     account: Some(account.clone().into()),
                     extensions: Some(extensions.clone().into()),
+                    share: Some(share.clone().into()),
                     referral: Some(VisibleSlot {
                         view: referral.clone().into(),
                         visible: referral_visibility,

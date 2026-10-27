@@ -9,18 +9,21 @@ use std::path::Path;
 
 use fluxdown_logfile::Level;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer as _;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::SubscriberExt as _;
 
 use crate::runtime::AgentResult;
 
 /// 一等公民 crate：默认按用户级别输出；第三方（hyper / reqwest / tungstenite / axum）只保留 warn+。
 /// 嵌入模式下 daemon 与 agent 同进程，daemon 事件也写进这份日志。
-const FIRST_PARTY_TARGETS: [&str; 5] = [
+const FIRST_PARTY_TARGETS: [&str; 6] = [
     "fluxdown_agent",
     "fluxdown_daemon",
     "fluxdown_link",
     "fluxdown_api",
     "fluxdown_protocol",
+    "fluxdown_share",
 ];
 
 /// 初始化桌面模式日志；初始化失败时向现有订阅者与 stderr 报告，不替换已有订阅者。
@@ -57,15 +60,17 @@ fn init_at(agent_data_dir: &Path, engine_data_dir: &Path) {
         }
     };
     fluxdown_logfile::install_panic_hook();
-    let subscriber = tracing_subscriber::fmt()
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .without_time()
         .with_level(false)
         .with_target(true)
         .with_writer(LogFileWriter)
-        .with_env_filter(build_filter())
-        .finish();
-    // 已有全局订阅者时保持原样。
+        .with_filter(build_filter());
+    let subscriber = tracing_subscriber::registry().with(fmt_layer);
+    // iroh / 快传 tracing 另走内存环形缓冲（诊断页），不受上面主输出过滤的影响。
+    #[cfg(feature = "share-p2p")]
+    let subscriber = subscriber.with(crate::share::logs::layer());
     if let Err(error) = tracing::subscriber::set_global_default(subscriber) {
         log.log_unthrottled(
             Level::Warn,
@@ -269,7 +274,7 @@ mod tests {
     fn default_filter_keeps_third_party_quiet() {
         assert_eq!(
             default_directives(Level::Info),
-            "warn,fluxdown_agent=info,fluxdown_daemon=info,fluxdown_link=info,fluxdown_api=info,fluxdown_protocol=info"
+            "warn,fluxdown_agent=info,fluxdown_daemon=info,fluxdown_link=info,fluxdown_api=info,fluxdown_protocol=info,fluxdown_share=info"
         );
         assert_eq!(default_directives(Level::Error), "error");
     }

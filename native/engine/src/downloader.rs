@@ -1375,11 +1375,9 @@ pub(crate) fn build_client_builder(
                         if !sys_proxy.username.is_empty() {
                             proxy = proxy.basic_auth(&sys_proxy.username, &sys_proxy.password);
                         }
-                        if !sys_proxy.no_proxy_list.is_empty() {
-                            proxy = proxy.no_proxy(reqwest::NoProxy::from_string(
-                                &crate::proxy_config::normalize_no_proxy(&sys_proxy.no_proxy_list),
-                            ));
-                        }
+                        proxy = proxy.no_proxy(reqwest::NoProxy::from_string(
+                            &crate::proxy_config::proxy_bypass_list(&sys_proxy.no_proxy_list),
+                        ));
                         builder = builder.proxy(proxy);
                     } else {
                         log_info!("[build_client] system proxy enabled but no URL resolved");
@@ -1400,11 +1398,9 @@ pub(crate) fn build_client_builder(
                 if !proxy_config.username.is_empty() {
                     proxy = proxy.basic_auth(&proxy_config.username, &proxy_config.password);
                 }
-                if !proxy_config.no_proxy_list.is_empty() {
-                    proxy = proxy.no_proxy(reqwest::NoProxy::from_string(
-                        &crate::proxy_config::normalize_no_proxy(&proxy_config.no_proxy_list),
-                    ));
-                }
+                proxy = proxy.no_proxy(reqwest::NoProxy::from_string(
+                    &crate::proxy_config::proxy_bypass_list(&proxy_config.no_proxy_list),
+                ));
                 builder = builder.proxy(proxy);
             } else {
                 log_info!("[build_client] manual proxy: incomplete config, using direct");
@@ -6462,6 +6458,51 @@ mod tests {
         assert_eq!(parse_http_date("2025-01-01T00:00:00Z"), None);
         // Unix 纪元之前的时间无法表示为 SystemTime 偏移，须整体放弃。
         assert_eq!(parse_http_date("Wed, 01 Jan 1902 00:00:00 GMT"), None);
+    }
+
+    /// 手动代理（用户名单为空）也不得截走环回请求：代理端口已关闭，若请求被转发
+    /// 给它则必然失败。
+    #[tokio::test]
+    async fn manual_proxy_never_captures_loopback_requests() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dead_proxy_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = server.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = server.accept().await {
+                let mut buf = [0u8; 1024];
+                if socket.read(&mut buf).await.is_ok() {
+                    let reply =
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                    if let Err(error) = socket.write_all(reply).await {
+                        tracing::debug!("loopback test server write failed: {error}");
+                    }
+                }
+            }
+        });
+        let config = crate::proxy_config::ProxyConfig {
+            mode: crate::proxy_config::ProxyMode::Manual,
+            host: "127.0.0.1".to_string(),
+            port: dead_proxy_port,
+            ..Default::default()
+        };
+        let client = super::build_client_builder(&config, "", false)
+            .unwrap()
+            .build()
+            .unwrap();
+        let body = client
+            .get(format!("http://127.0.0.1:{port}/f"))
+            .send()
+            .await
+            .expect("loopback must bypass the proxy")
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "ok");
     }
 
     #[test]

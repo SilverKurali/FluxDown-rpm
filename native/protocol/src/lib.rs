@@ -17,6 +17,7 @@ pub mod method;
 pub mod plugin_view;
 pub mod rpc;
 pub mod settings;
+pub mod share;
 pub mod shell_open;
 pub mod shortcuts;
 pub mod sound;
@@ -142,6 +143,20 @@ pub use settings::{
     custom_theme_id, custom_theme_key, daemon_config_to_value, is_custom_theme_id,
     is_icon_pack_ref, setting_spec, setting_value_kind, sync_scope_key, validate_value,
     value_to_daemon_config,
+};
+pub use share::{
+    SHARE_STATE_RECEIVE_RECORDS, ShareCloudState, ShareConfigDto, ShareConnectionMode,
+    ShareConvertToCloudParams, ShareCreateParams, ShareDiagnosticsDto, ShareDiagnosticsParams,
+    ShareDismissPendingParams, ShareDto, ShareExitBehavior, ShareFileDto, ShareHashingDto,
+    ShareHomeRelayDto, ShareIdParams, ShareLocalConfigDto, ShareLogLevel, ShareLogLineDto,
+    ShareLogsDto, ShareLogsParams, ShareMode, ShareNatType, ShareNetReportDto, ShareNetSnapshotDto,
+    ShareNetStatusDto, SharePathEventDto, SharePathKind, SharePathSummaryDto,
+    SharePolicySummaryDto, ShareProgressDto, ShareReceiveParams, ShareReceiveRecordDto,
+    ShareReceiveRecordsPage, ShareReceiveRecordsParams, ShareReceiveResultDto, ShareReceiveStatus,
+    ShareReceiverDto, ShareRelayDto, ShareResolveDto, ShareResolveParams, ShareSessionBytesDto,
+    ShareSessionDetailDto, ShareSessionKillParams, ShareSessionRole, ShareSessionSampleDto,
+    ShareSessionSummaryDto, ShareSourcesDto, ShareStateDto, ShareStatus, ShareSwitchToBridgeParams,
+    ShareTaskFactsDto, ShareTierDto, ShareUpdateParams, ShareUploadDto, ShareUploadStatus,
 };
 pub use table_sync::{
     InvalidPageCursor, LoadedTables, TABLE_SYNC_BACKLOG_LIMIT, TASK_PAGE_DEFAULT_LIMIT,

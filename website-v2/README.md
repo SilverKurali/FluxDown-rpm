@@ -23,6 +23,16 @@ node dist/server/entry.mjs
 - 阿里云 OSS 默认域名禁止分发 `.apk` / `.ipa`：桶内存为 `<name>.bin`（Content-Type 须为 octet-stream），镜像回源时换成 `.bin` 并覆盖 APK 的 Content-Type / Content-Disposition；规则见 `src/lib/oss-storage.ts`，上传侧在 `.github/actions/oss-upload`。
 - 本地回归：`bun test tests/download-backend.test.ts tests/download-route.test.ts tests/download-source.test.ts`，完整静态与构建检查：`bun run build`。这些测试替换外部 fetch 与反代头，不代表真实 CDN 回源演练。
 
+## 快传分享页
+
+- `/s/`（en）与 `/zh/s/`（zh）是静态说明页：取件码只在 FluxDown 客户端「快传 → 接收」里输入（FluxCloud 没有公开的取件码换 slug 端点），网页入口是粘贴分享链接 / 10–12 位链接 ID 跳到 `/s/<slug>`（`parseShareInput`）。noindex，不进 sitemap（`astro.config.mjs` 的 `noindexPathnames`）。
+- `/s/<slug>`（en）与 `/zh/s/<slug>`（zh）是 SSR 落地页（`src/pages/[...lang]/s/[slug].astro`），每个请求经 `src/lib/share-proxy.ts` 现取 FluxCloud `GET /api/v1/share/public/{slug}`。状态机在 `src/lib/share-landing.ts::landingState`：云端副本就绪（`cloudReady`）→ 逐文件「下载」；未就绪 → 只给应用深链 `fluxdown://share/<slug>`（分享方设备在线时才可下载）；不存在 / 已结束 / 过期 / 下架 → 404 / 410；上游限频 / 不可达 → 429 / 503。「还没有 FluxDown？下载」指向下载页。举报见下。
+- 浏览器下载走同源代理，不直连 FluxCloud：`GET /api/cloud/share/public/<slug>`（清单）与 `POST /api/cloud/share/public/<slug>/download`（`{ fileIndex, turnstileToken? }` → `{ url, expiresAt }` 签名 CDN 链接）。slug 为 10–12 位 base64url、fileIndex 为非负整数、token ≤ 2048 字符，不合法在到达 FluxCloud 前被拒（404 / 422）；FluxCloud 的失败（404 / 410 `share_ended|share_takedown` / 409 `share_cloud_not_ready` / 403 `traffic_exhausted` / `turnstile_required|turnstile_failed` / 429）原样透传状态码与 `{ code, message }`，上游不可达 / 畸形响应为 502（`upstream_unreachable` / `upstream_invalid` / `not_configured`）。清单带 `turnstileSiteKey` 时页面渲染 Cloudflare Turnstile 小部件（token 一次性）。限频由 FluxCloud 按转发的访客 IP（`X-Forwarded-For`，需把本站出口 IP 加入 `FLUXCLOUD_TRUSTED_PROXIES`）执行，本站不另设计数器。
+- 页面与代理响应一律 `Cache-Control: no-store`、`X-Robots-Tag: noindex, nofollow`；页面另有 `<meta name="robots" content="noindex,nofollow">`；`public/robots.txt` 对 `*` 与 AI 爬虫分组都 `Disallow: /s/`、`/zh/s/`、`/api/`。
+- 举报：落地页（清单可用的状态，含「未就绪」）有紧凑的「举报」按钮，展开为小表单（原因下拉：侵权 / 违法违规 / 恶意软件 / 其他，可选补充说明与联系方式，清单带 `turnstileSiteKey` 时附 Turnstile），经 `POST /api/cloud/share/public/<slug>/report`（`{ reason ≤ 64, detail? ≤ 2000, contact? ≤ 200, turnstileToken? }` → FluxCloud 同名端点，成功 204，失败透传，每 IP 每小时 5 次由 FluxCloud 限）。发给上游的 reason 是固定中文文本，界面文案随语言。
+- 环境变量只用已有的 `FLUXCLOUD_API_BASE`（FluxCloud 根地址，无 `/api` 前缀，缺省 `http://127.0.0.1:8720`；与 `/api/cloud/*` 同一个 `cloudBase()`）。
+- 回归：`bun test tests/share-landing.test.ts tests/share-proxy.test.ts`（替换 FluxCloud fetch，不代表真实上游与 Turnstile 演练）。
+
 ## 结构
 
 | 位置 | 内容 |

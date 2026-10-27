@@ -6,3 +6,4 @@ mod legacy_api_dto_wire;
 mod legacy_server_wire;
 mod method_literals;
 mod plugin_view_fixtures;
+mod share_wire;

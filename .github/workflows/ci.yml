@@ -188,7 +188,7 @@ jobs:
           - name: mobile
             packages: "-p fluxdown_mobile"
           - name: gpui
-            packages: "-p fluxdown_ui_account -p fluxdown_ui_app -p fluxdown_ui_command_palette -p fluxdown_ui_components -p fluxdown_ui_downloads -p fluxdown_ui_extensions -p fluxdown_ui_i18n -p fluxdown_ui_plugin_ui -p fluxdown_ui_rss -p fluxdown_ui_settings -p fluxdown_ui_shell -p fluxdown_ui_theme"
+            packages: "-p fluxdown_ui_account -p fluxdown_ui_app -p fluxdown_ui_command_palette -p fluxdown_ui_components -p fluxdown_ui_downloads -p fluxdown_ui_extensions -p fluxdown_ui_i18n -p fluxdown_ui_plugin_ui -p fluxdown_ui_rss -p fluxdown_ui_settings -p fluxdown_ui_share -p fluxdown_ui_shell -p fluxdown_ui_theme"
     steps:
       - uses: actions/checkout@v4
 

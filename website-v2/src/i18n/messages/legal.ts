@@ -52,6 +52,17 @@ export const legal = defineMessages({
           ],
         },
         {
+          id: "share",
+          title: "File Sharing (Quick Share)",
+          body: "Quick Share is used only when you share a completed download or receive a shared file. Files are transferred directly between devices over an encrypted peer-to-peer connection whenever possible, otherwise through FluxDown relay servers that cannot read the content. When you use it, we process:",
+          items: [
+            "<strong>Share records:</strong> for each share, the file names, sizes, content hashes (BLAKE3), the link, pickup code, expiry and claim count, plus the sharing device and account. Receivers can receive without an account; their device's random network ID, device name, IP address and its approximate location (country, region, city and ISP looked up on our servers) are recorded as access history for the share owner and for abuse handling.",
+            "<strong>Network address records:</strong> the random network ID of each device taking part in sharing and the network addresses it publishes (relay server and direct IP addresses) are stored on FluxDown's own address servers so peers can find each other. We do not use third-party discovery services.",
+            "<strong>Network and transfer diagnostics:</strong> the same diagnostics the app shows you on the Network Diagnostics and Transfer Diagnostics pages are also sent to FluxDown while sharing or receiving: NAT type, IPv4/IPv6 availability, public IP addresses and their approximate location, relay latencies, peer-to-peer connection counters, and per-transfer connection paths, round-trip times, throughput, packet loss and errors. Network snapshots are sent only when they change during sharing activity; transfer details are sent every few seconds while a transfer runs and once when it ends. Nothing is sent when you are not sharing or receiving, and no other download tasks, URLs or folders are included.",
+            "<strong>Retention:</strong> access history, network diagnostics and transfer details are deleted after a period set on our servers (30 days by default); the history of published network addresses after 90 days by default. When a share ends its pickup code is released immediately; the share record stays in the owner's share history.",
+          ],
+        },
+        {
           id: "not-collect",
           title: "Information We Do NOT Collect",
           body: "FluxDown is designed with a local-first architecture. The FluxDown apps:",
@@ -322,6 +333,17 @@ export const legal = defineMessages({
             "<strong>云端推送（需主动开启，桌面端与服务器端）：</strong>开启后会发送任务事件（文件名、大小、状态、错误与队列名），用于投递邮件或 Telegram 通知。下载地址与保存目录只有在您分别开启对应选项时才会包含。事件保留 7 天。",
             "<strong>下载线路质量：</strong>登录期间，应用会上报下载服务器的连接测量数据（服务器主机名、IP 地址、连接耗时、吞吐量与是否成功），用于为 FluxDown 选择更快的线路。其中绝不包含链接路径、查询参数、文件名或令牌。",
             "<strong>套餐：</strong>如果您在桌面应用或网站上购买可选套餐，我们会在账户中保存订单记录（套餐、金额与状态）。移动应用不提供任何购买。",
+          ],
+        },
+        {
+          id: "share",
+          title: "文件分享（快传）",
+          body: "只有当您分享已完成的下载或接收他人分享的文件时才会使用快传。文件尽量在设备之间通过加密的点对点连接直接传输，无法直连时经由 FluxDown 自建中继服务器转发，中继无法读取内容。使用快传时，我们会处理：",
+          items: [
+            "<strong>分享记录：</strong>每个分享的文件名、大小、内容哈希（BLAKE3）、链接、取件码、有效期与领取次数，以及分享所用的设备和账户。未登录也可以接收；接收方设备的随机网络 ID、设备名、IP 地址及其大致归属（由我们服务器查询的国家、省份、城市与运营商）会作为访问记录保存，供分享者查看和处理滥用。",
+            "<strong>网络地址记录：</strong>参与分享的设备的随机网络 ID 及其公布的网络地址（中继服务器与直连 IP 地址）保存在 FluxDown 自建的地址服务器上，用于让双方互相找到。我们不使用第三方发现服务。",
+            "<strong>网络与传输诊断：</strong>应用在「网络诊断」「传输诊断」页面向您展示的同一份诊断数据，在分享或接收期间也会发送给 FluxDown：NAT 类型、IPv4 / IPv6 可用性、公网 IP 及其大致归属、各中继延迟、点对点连接计数，以及每次传输的连接路径、往返时延、速率、丢包与错误。网络快照只在分享活动期间发生变化时发送；传输详情在传输进行中每隔几秒发送一次、结束时发送一次。不分享也不接收时不发送任何内容，也不包含其他下载任务、链接或目录。",
+            "<strong>保存期限：</strong>访问记录、网络诊断与传输详情按服务器设定的期限（默认 30 天）后删除；公布网络地址的历史默认保留 90 天。分享结束后取件码立即释放，分享记录保留在分享者的分享历史中。",
           ],
         },
         {

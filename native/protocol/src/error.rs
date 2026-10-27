@@ -177,6 +177,36 @@ pub enum ErrorReason {
     ReferralPlanExcluded,
     /// 推介：自定义推荐码已被占用。
     ReferralCodeTaken,
+    /// 快传：本构建未编入快传、agent 快传服务未运行，或云端关闭了快传。
+    ShareUnavailable,
+    /// 快传：分享不存在（取件码 / 链接无对应分享，或不是本人的分享）。
+    ShareNotFound,
+    /// 快传：分享已过期。
+    ShareExpired,
+    /// 快传：分享已被分享方或后台停止。
+    ShareStopped,
+    /// 快传：取件码 / 分享链接格式不正确。
+    ShareCodeInvalid,
+    /// 快传：取件码尝试过于频繁，被云端限流。
+    ShareRateLimited,
+    /// 快传：云端要求先完成人机验证（Turnstile）再重试 resolve。
+    ShareTurnstileRequired,
+    /// 快传：分享方已修改或删除源文件（数据面 `changed`）。
+    ShareFileChanged,
+    /// 快传：实时分享的分享方当前不在线。
+    ShareSenderOffline,
+    /// 快传：任务不能分享（未完成、文件缺失或远程任务）。
+    ShareTaskNotShareable,
+    /// 快传：没有可用的桥接（分享方不在线、没有在线网关，或云端不允许该身份走桥接）。
+    ShareBridgeUnavailable,
+    /// 快传：分享数量、领取次数或流量超出套餐额度。
+    ShareQuotaExceeded,
+    /// 快传：云端暂存副本尚未就绪（未转暂存、上传未完成或已被删除）。
+    ShareCloudNotReady,
+    /// 快传：云端流量额度耗尽（桥接 / CDN 下载或上传）。
+    ShareTrafficExhausted,
+    /// 快传：云端暂存不可用（存储未配置或服务暂不可用）。
+    ShareCloudUnavailable,
     /// 对端发送了本端不认识的原因。
     #[serde(other)]
     Unknown,

@@ -30,7 +30,10 @@ use crate::{
     UserStartIntent,
     batch::{MAX_IN_FLIGHT, coalesce_commands, retry_copy, retry_delay},
     components::{
-        conflict_badge::conflict_badge, file_icon::task_file_icon, task_drag::DraggedTasks,
+        conflict_badge::conflict_badge,
+        file_icon::task_file_icon,
+        share_badge::{badge_for, share_badge},
+        task_drag::DraggedTasks,
     },
     controller::DownloadsCommand,
     deletion::{MIN_BATCH_DELETE, split_local_deletes},
@@ -42,6 +45,7 @@ use crate::{
         format_bytes,
         group_tree::GroupMeta,
         row_order::{InteractionHold, RowOrder},
+        share::{ShareBlock, ShareRow, share_control},
         view_prefs::{
             DateBucket, SortDir, ViewDensity, ViewGroupBy, ViewPrefs, ViewSortKey, state_group_key,
         },
@@ -445,6 +449,10 @@ pub(crate) struct TaskMenuFacts {
     pub(crate) is_seeding: bool,
     /// 已完成且做种已停止 / 达标（seeding_status 2..=7）、产物仍在：可继续（恢复做种）。
     pub(crate) can_resume_seeding: bool,
+    /// 快传「分享」入口对本构建 / 宿主可见（快传可用且宿主提供了入口）；选区内一致。
+    pub(crate) share_visible: bool,
+    /// 本机当前可发起分享（已登录，或云端允许游客发起）。
+    pub(crate) share_can_send: bool,
 }
 
 /// 引擎/daemon 插件系统失败任务的错误消息前缀。
@@ -489,6 +497,15 @@ impl TaskMenuFacts {
     pub(crate) fn can_verify_integrity(&self) -> bool {
         self.is_local && self.is_bt && self.state == TaskState::Completed && !self.file_missing
     }
+
+    /// 「分享」判定用的任务事实。
+    pub(crate) fn share_row(&self) -> ShareRow {
+        ShareRow {
+            is_local: self.is_local,
+            state: self.state,
+            file_missing: self.file_missing,
+        }
+    }
 }
 
 /// 由任务行计算菜单事实：右键菜单、应用菜单与详情面板按钮共用同一事实源。
@@ -507,6 +524,8 @@ pub(crate) fn task_menu_facts_for(store: &TaskStore, key: &RowKey) -> Option<Tas
         file_missing: row.is_file_missing(),
         is_seeding: row.is_seeding(),
         can_resume_seeding: row.can_resume_seeding(),
+        share_visible: store.share_entry_visible(),
+        share_can_send: store.share().can_send(),
     })
 }
 
@@ -527,6 +546,8 @@ pub(crate) enum MenuEntry {
     ChangeSegments,
     /// 完整性校验（单选；条件见 [`TaskMenuFacts::can_verify_integrity`]）。
     VerifyIntegrity,
+    /// 分享选中的已完成任务（`None` = 可点击；`Some(原因)` = 禁用并提示原因）。
+    Share(Option<ShareBlock>),
     Redownload,
     CopyUrl,
     MoveToQueue,
@@ -613,6 +634,13 @@ pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> 
             && !task.is_torrent_sentinel
     }) {
         items.push(MenuEntry::Redownload);
+    }
+    if selection.first().is_some_and(|task| task.share_visible) {
+        let rows: Vec<ShareRow> = selection.iter().map(TaskMenuFacts::share_row).collect();
+        let control = share_control(true, selection[0].share_can_send, &rows);
+        if control.is_visible() {
+            items.push(MenuEntry::Share(control.block()));
+        }
     }
     items.push(MenuEntry::CopyUrl);
     if selection.iter().all(|task| task.is_local) {
@@ -2292,6 +2320,61 @@ impl DownloadTableDelegate {
             detail.clone().map(SharedString::from)
         };
         let label_style = &typography.xs;
+        let primary = if task.conflict_pending {
+            h_flex()
+                .min_w_0()
+                .child(conflict_badge(
+                    task.key.task_id(),
+                    &self.strings,
+                    self.host.as_ref(),
+                    cx,
+                ))
+                .into_any_element()
+        } else {
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(label_style.size)
+                .line_height(label_style.line_height)
+                .text_color(task_status_color(task, cx))
+                .child(self.status_label(task))
+                .into_any_element()
+        };
+        // 快传接收任务：状态文案旁挂来源角标（只对本机任务）；角标与文案各自省略，不撑宽列。
+        let share_active = matches!(
+            task.state,
+            TaskState::Pending | TaskState::Downloading | TaskState::Paused
+        );
+        let badge = task
+            .key
+            .is_local()
+            .then(|| {
+                self.store
+                    .share()
+                    .task(task.key.task_id())
+                    .and_then(|facts| badge_for(facts, share_active))
+            })
+            .flatten()
+            .map(|badge| {
+                share_badge(
+                    task.key.task_id(),
+                    badge,
+                    &self.strings,
+                    self.store.share_host().switch_bridge,
+                    self.host.as_ref(),
+                    cx,
+                )
+            });
+        let first = match badge {
+            Some(badge) => h_flex()
+                .min_w_0()
+                .items_center()
+                .gap(theme.tokens().spacing.xs)
+                .child(primary)
+                .child(badge)
+                .into_any_element(),
+            None => primary,
+        };
         v_flex()
             .id(SharedString::from(format!(
                 "download-status-{}",
@@ -2301,26 +2384,7 @@ impl DownloadTableDelegate {
             .min_w_0()
             .justify_center()
             .font_features(tabular_numbers())
-            .child(if task.conflict_pending {
-                h_flex()
-                    .min_w_0()
-                    .child(conflict_badge(
-                        task.key.task_id(),
-                        &self.strings,
-                        self.host.as_ref(),
-                        cx,
-                    ))
-                    .into_any_element()
-            } else {
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(label_style.size)
-                    .line_height(label_style.line_height)
-                    .text_color(task_status_color(task, cx))
-                    .child(self.status_label(task))
-                    .into_any_element()
-            })
+            .child(first)
             .when_some(detail.filter(|_| two_line), |this, detail| {
                 this.child(
                     div()
@@ -2751,6 +2815,26 @@ impl DownloadTableDelegate {
                 FluxIcon::RotateCw,
                 Box::new(crate::actions::RedownloadSelected),
             ),
+            MenuEntry::Share(None) => menu.menu_with_icon(
+                self.strings.share.clone(),
+                FluxIcon::Share2,
+                Box::new(crate::actions::ShareSelected),
+            ),
+            MenuEntry::Share(Some(block)) => {
+                let label = self.strings.share.clone();
+                let reason = self.strings.share_disabled(block);
+                menu.item(
+                    PopupMenuItem::element(move |_, _| {
+                        let reason = reason.clone();
+                        div()
+                            .id("task-menu-share-disabled")
+                            .child(label.clone())
+                            .tooltip(move |window, cx| tooltip_view(reason.clone(), window, cx))
+                    })
+                    .icon(FluxIcon::Share2)
+                    .disabled(true),
+                )
+            }
             MenuEntry::CopyUrl => menu.menu_with_icon(
                 self.strings.copy_url.clone(),
                 FluxIcon::Copy,
@@ -5530,7 +5614,7 @@ mod tests {
 #[cfg(test)]
 mod context_menu_tests {
     use super::{
-        MenuEntry, PLUGIN_ERROR_PREFIX, TaskMenuFacts, context_menu_items, is_bt_url,
+        MenuEntry, PLUGIN_ERROR_PREFIX, ShareBlock, TaskMenuFacts, context_menu_items, is_bt_url,
         is_replaceable_url, task_menu_entries,
     };
     use crate::model::TaskState;
@@ -5548,12 +5632,78 @@ mod context_menu_tests {
             file_missing: false,
             is_seeding: false,
             can_resume_seeding: false,
+            share_visible: false,
+            share_can_send: true,
         }
     }
 
     #[test]
     fn empty_selection_has_no_menu_items() {
         assert!(context_menu_items(&[]).is_empty());
+    }
+
+    fn share_task(is_local: bool, state: TaskState) -> TaskMenuFacts {
+        TaskMenuFacts {
+            share_visible: true,
+            ..task(is_local, state)
+        }
+    }
+
+    #[test]
+    fn share_entry_is_hidden_unless_host_and_share_are_available() {
+        let items = context_menu_items(&[task(true, TaskState::Completed)]);
+        assert!(!items.iter().any(|e| matches!(e, MenuEntry::Share(_))));
+        let items = task_menu_entries(&[task(true, TaskState::Completed)], false, 0);
+        assert!(!items.iter().any(|e| matches!(e, MenuEntry::Share(_))));
+    }
+
+    #[test]
+    fn share_entry_is_enabled_only_for_completed_local_files_that_exist() {
+        let share = |selection: &[TaskMenuFacts]| {
+            context_menu_items(selection)
+                .into_iter()
+                .find(|entry| matches!(entry, MenuEntry::Share(_)))
+        };
+        assert_eq!(
+            share(&[share_task(true, TaskState::Completed)]),
+            Some(MenuEntry::Share(None))
+        );
+        assert_eq!(
+            share(&[share_task(true, TaskState::Downloading)]),
+            Some(MenuEntry::Share(Some(ShareBlock::Incomplete)))
+        );
+        let mut missing = share_task(true, TaskState::Completed);
+        missing.file_missing = true;
+        assert_eq!(
+            share(&[missing]),
+            Some(MenuEntry::Share(Some(ShareBlock::Missing)))
+        );
+        assert_eq!(
+            share(&[share_task(false, TaskState::Completed)]),
+            Some(MenuEntry::Share(Some(ShareBlock::Remote)))
+        );
+        let mut signed_out = share_task(true, TaskState::Completed);
+        signed_out.share_can_send = false;
+        assert_eq!(
+            share(&[signed_out]),
+            Some(MenuEntry::Share(Some(ShareBlock::SignedOut)))
+        );
+    }
+
+    #[test]
+    fn share_entry_uses_intersection_semantics_for_multi_select() {
+        let done = share_task(true, TaskState::Completed);
+        let paused = share_task(true, TaskState::Paused);
+        let share = |selection: &[TaskMenuFacts]| {
+            task_menu_entries(selection, false, 0)
+                .into_iter()
+                .find(|entry| matches!(entry, MenuEntry::Share(_)))
+        };
+        assert_eq!(share(&[done, done]), Some(MenuEntry::Share(None)));
+        assert_eq!(
+            share(&[done, paused]),
+            Some(MenuEntry::Share(Some(ShareBlock::Selection)))
+        );
     }
 
     #[test]

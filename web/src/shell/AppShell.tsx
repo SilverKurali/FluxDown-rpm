@@ -10,6 +10,7 @@ import { useEffect } from 'react'
 import { useT } from '../i18n'
 import { isPluginEntryActive } from '../pages/plugins/contributions'
 import { usePluginActivityEntries, usePluginShellBridge } from '../pages/plugins/usePluginContributions'
+import { ShareHost } from '../pages/share'
 import { useIsMobile } from '../ui'
 import { AccountGuards } from './AccountGuards'
 import { ActivityRail } from './ActivityRail'
@@ -34,6 +35,7 @@ function useDefaultTitle(): string {
   }
   if (pathname.startsWith('/rss')) return t('sidebarRss')
   if (pathname.startsWith('/webhooks')) return t('pushNavTitle')
+  if (pathname.startsWith('/share')) return t('shareNavTitle')
   if (pathname.startsWith('/settings')) return t('settings')
   return t('mobileNavDownloads')
 }
@@ -90,6 +92,7 @@ export function AppShell() {
         </div>
         {mobile ? <BottomTabBar /> : null}
         <AccountGuards />
+        <ShareHost />
         <UpdateRestartOverlay />
       </div>
     </TitleBarSlotProvider>

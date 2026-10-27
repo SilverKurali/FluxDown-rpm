@@ -301,6 +301,8 @@ struct RunOutcome {
 
 /// 用 Auto 多路径上下文跑完整 `run_download`，返回终态、耗时与 DB 标签。
 async fn run_auto(tag: &str, origin: &TestServer, proxy: &TestServer) -> RunOutcome {
+    // 假代理与假源站都在环回上，须关闭引擎的环回直连才能走代理路径。
+    fluxdown_engine::proxy_config::disable_loopback_bypass_for_tests();
     init_test_logging();
     let dir = work_dir(tag);
     let db = Db::open(&dir).await.expect("Db::open");

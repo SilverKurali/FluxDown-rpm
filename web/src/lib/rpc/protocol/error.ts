@@ -97,6 +97,21 @@ export type ErrorReason =
   | 'referralAlreadyUsed'
   | 'referralPlanExcluded'
   | 'referralCodeTaken'
+  | 'shareUnavailable'
+  | 'shareNotFound'
+  | 'shareExpired'
+  | 'shareStopped'
+  | 'shareCodeInvalid'
+  | 'shareRateLimited'
+  | 'shareTurnstileRequired'
+  | 'shareFileChanged'
+  | 'shareSenderOffline'
+  | 'shareTaskNotShareable'
+  | 'shareBridgeUnavailable'
+  | 'shareQuotaExceeded'
+  | 'shareCloudNotReady'
+  | 'shareTrafficExhausted'
+  | 'shareCloudUnavailable'
   | 'unknown';
 
 /** `error.data`：应用错误的机器可读详情。 */

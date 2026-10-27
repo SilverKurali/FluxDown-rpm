@@ -4,7 +4,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use fluxdown_protocol::{CreateTaskItem, CreateTaskRequest, MAX_TASK_SEGMENTS};
+use fluxdown_protocol::{
+    CreateTaskItem, CreateTaskRequest, MAX_TASK_SEGMENTS, capture_link::is_share_link,
+};
 
 use super::aria2c::{RequestHints, join_continuations, parse_command};
 
@@ -104,12 +106,15 @@ pub(crate) fn parse_entries(text: &str, loose: bool) -> Vec<UrlEntry> {
     parse_input(text, loose).entries
 }
 
-/// [`parse_entries`] 的完整结果：条目 + 首条 aria2c 命令带出的请求信息。
+/// [`parse_entries`] 的完整结果：条目 + 首条 aria2c 命令带出的请求信息 + 快传分享链接。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ParsedInput {
     pub(crate) entries: Vec<UrlEntry>,
     /// 第一条产出了条目的 aria2c 命令的头部信息（其余命令的不采用）；没有时为空。
     pub(crate) hints: RequestHints,
+    /// 快传分享链接（`fluxdown://share/<slug>`、官网 `/s/<slug>`），按出现顺序去重。
+    /// 它们不是下载链接：不进 `entries`，由对话框交给接收确认流程。
+    pub(crate) share_links: Vec<String>,
 }
 
 /// 解析规则见 [`parse_entries`]。行首为 `aria2c` 的命令（先合并其续行）按 shell 规则切词，
@@ -119,6 +124,7 @@ pub(crate) fn parse_input(text: &str, loose: bool) -> ParsedInput {
     let visible = strip_invisible(text);
     let text = join_continuations(&visible);
     let mut entries = Vec::new();
+    let mut share_links: Vec<String> = Vec::new();
     let mut hints: Option<RequestHints> = None;
     let mut current: Option<UrlEntry> = None;
     for line in text.split('\n') {
@@ -140,6 +146,12 @@ pub(crate) fn parse_input(text: &str, loose: bool) -> ParsedInput {
         }
         if let Some(entry) = current.take() {
             entries.push(entry);
+        }
+        if let Some(link) = share_link_in_line(trimmed, loose) {
+            if !share_links.iter().any(|known| known == link) {
+                share_links.push(link.to_owned());
+            }
+            continue;
         }
         if let Some(command) = parse_command(trimmed) {
             let mut produced = command.entries;
@@ -172,6 +184,49 @@ pub(crate) fn parse_input(text: &str, loose: bool) -> ParsedInput {
     ParsedInput {
         entries,
         hints: hints.unwrap_or_default(),
+        share_links,
+    }
+}
+
+/// 行里的快传分享链接。手动输入只认行首的词（后面的内容是附注，与普通链接一致）；
+/// 宽松模式（TXT 导入）还接受行内任意位置并去掉末尾标点。
+fn share_link_in_line(line: &str, loose: bool) -> Option<&str> {
+    let first = line.split_whitespace().next()?;
+    if is_share_link(first) {
+        return Some(first);
+    }
+    if !loose {
+        return None;
+    }
+    let lower = line.to_ascii_lowercase();
+    let deep_link = lower
+        .find("fluxdown://share/")
+        .and_then(|index| line.get(index..)?.split_whitespace().next());
+    [deep_link, find_url(line)]
+        .into_iter()
+        .flatten()
+        .map(trim_url_tail)
+        .find(|candidate| is_share_link(candidate))
+}
+
+/// 对话框里分享链接的提示类别（见 [`share_note`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShareNote {
+    /// 只有一条分享链接：提交 = 打开接收确认。
+    Link,
+    /// 分享链接与普通链接混合：分享链接打开接收确认，其余照常下载。
+    Mixed,
+    /// 多条分享链接：接收确认一次只处理一条，从第一条开始。
+    Multiple(usize),
+}
+
+/// `entries` 条普通链接、`pending_links` 条尚未交给接收流程的分享链接时应显示的提示。
+pub(crate) fn share_note(entries: usize, pending_links: usize) -> Option<ShareNote> {
+    match (entries, pending_links) {
+        (_, 0) => None,
+        (_, 1) if entries == 0 => Some(ShareNote::Link),
+        (_, 1) => Some(ShareNote::Mixed),
+        (_, count) => Some(ShareNote::Multiple(count)),
     }
 }
 
@@ -217,7 +272,7 @@ fn leading_manual_url(text: &str) -> Option<&str> {
 }
 
 /// 是否以可建任务的链接开头（`http(s)://` / `ftp://` / `thunder://` / `magnet:?` /
-/// `ed2k://`，忽略大小写）。
+/// `ed2k://`，以及快传 `fluxdown://share/` 深链，忽略大小写）。
 pub(super) fn starts_with_link(text: &str) -> bool {
     [
         "https://",
@@ -226,6 +281,7 @@ pub(super) fn starts_with_link(text: &str) -> bool {
         "thunder://",
         "magnet:?",
         "ed2k://",
+        "fluxdown://share/",
     ]
     .into_iter()
     .any(|scheme| {
@@ -582,9 +638,9 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use super::{
-        DraftOptions, ProxyChoice, ThreadChoice, UrlEntry, append_entries, build_requests,
-        capture_entry, checksum_spec, custom_segments, detect_ua_preset, manual_proxy_url,
-        parse_entries, parse_input,
+        DraftOptions, ProxyChoice, ShareNote, ThreadChoice, UrlEntry, append_entries,
+        build_requests, capture_entry, checksum_spec, custom_segments, detect_ua_preset,
+        manual_proxy_url, parse_entries, parse_input, share_note,
     };
 
     #[test]
@@ -924,5 +980,82 @@ mod tests {
             &DraftOptions::default(),
         );
         assert!(requests.common.headers.is_none());
+    }
+
+    fn share_links(text: &str, loose: bool) -> Vec<String> {
+        parse_input(text, loose).share_links
+    }
+
+    #[test]
+    fn share_links_are_recognised_and_never_become_download_entries() {
+        for link in [
+            "fluxdown://share/abc_DEF-1",
+            "https://fluxdown.com/s/abc",
+            "  https://fluxdown.com/s/abc/?x=1#y  ",
+            "HTTPS://FluxDown.COM/s/abc",
+            "FLUXDOWN://share/abc",
+            "https://fluxdown.zerx.dev/s/abc",
+        ] {
+            let parsed = parse_input(link, false);
+            assert!(parsed.entries.is_empty(), "{link:?}");
+            assert_eq!(parsed.share_links, [link.trim()], "{link:?}");
+        }
+        // 同一主机上的其他路径是普通链接，不是分享。
+        let parsed = parse_input("https://fluxdown.com/download/x.zip", false);
+        assert_eq!(parsed.entries.len(), 1);
+        assert!(parsed.share_links.is_empty());
+        // slug 含非法字符 / 为空：不是分享链接。
+        let parsed = parse_input("https://fluxdown.com/s/a$b", false);
+        assert_eq!(parsed.entries.len(), 1);
+        assert!(parsed.share_links.is_empty());
+        assert!(share_links("fluxdown://share/", false).is_empty());
+    }
+
+    #[test]
+    fn mixed_batches_split_share_links_from_ordinary_entries() {
+        let text = "https://a.example/one.zip\nhttps://fluxdown.com/s/abc\n  out=ignored.bin\nmagnet:?xt=urn:btih:xyz\nfluxdown://share/def\nhttps://fluxdown.com/s/abc";
+        let parsed = parse_input(text, false);
+        let urls: Vec<_> = parsed.entries.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            ["https://a.example/one.zip", "magnet:?xt=urn:btih:xyz"]
+        );
+        // 去重并保持出现顺序；紧跟分享链接的 `out=` 行不附着到前一条普通链接。
+        assert_eq!(
+            parsed.share_links,
+            ["https://fluxdown.com/s/abc", "fluxdown://share/def"]
+        );
+        assert_eq!(parsed.entries[0].file_name, "");
+    }
+
+    #[test]
+    fn indented_share_links_are_links_not_option_lines() {
+        let parsed = parse_input("https://a.example/a\n  fluxdown://share/x\n", false);
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.share_links, ["fluxdown://share/x"]);
+    }
+
+    #[test]
+    fn loose_parse_finds_inline_share_links_and_trims_punctuation() {
+        assert_eq!(
+            share_links(
+                "快传：fluxdown://share/abc.\nsee https://fluxdown.com/s/xyz). ok",
+                true
+            ),
+            ["fluxdown://share/abc", "https://fluxdown.com/s/xyz"]
+        );
+        // 手动输入只认行首的词。
+        assert!(share_links("see https://fluxdown.com/s/xyz", false).is_empty());
+        assert!(parse_entries("see https://fluxdown.com/s/xyz", false).is_empty());
+    }
+
+    #[test]
+    fn share_note_follows_pending_links() {
+        assert_eq!(share_note(3, 0), None);
+        assert_eq!(share_note(0, 0), None);
+        assert_eq!(share_note(0, 1), Some(ShareNote::Link));
+        assert_eq!(share_note(2, 1), Some(ShareNote::Mixed));
+        assert_eq!(share_note(0, 3), Some(ShareNote::Multiple(3)));
+        assert_eq!(share_note(5, 2), Some(ShareNote::Multiple(2)));
     }
 }

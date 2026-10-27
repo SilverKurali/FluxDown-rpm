@@ -124,6 +124,8 @@ pub struct RemoteTaskService {
     reconnect: Notify,
     /// 云端 SSE 里推送相关的事件（`notify.changed` / `notify.delivery` / 重连 / `resync`）转交云端推送模块。
     notify_feed: Option<crate::cloud_notify::NotifyFeed>,
+    /// 快传事件（`share.claimed` / `share.sessionKill` / `share.changed`）原样转交快传服务；未编入快传时为空。
+    share_feed: Option<tokio::sync::mpsc::UnboundedSender<Value>>,
     runtime: Mutex<Runtime>,
 }
 
@@ -147,6 +149,7 @@ impl RemoteTaskService {
             heartbeat_interval: HEARTBEAT_INTERVAL,
             reconnect: Notify::new(),
             notify_feed: None,
+            share_feed: None,
             runtime: Mutex::new(Runtime::default()),
         }
     }
@@ -155,6 +158,13 @@ impl RemoteTaskService {
     #[must_use]
     pub fn with_notify_feed(mut self, feed: crate::cloud_notify::NotifyFeed) -> Self {
         self.notify_feed = Some(feed);
+        self
+    }
+
+    /// 接入快传服务：SSE 里的快传事件转交给它处理。
+    #[must_use]
+    pub fn with_share_feed(mut self, feed: tokio::sync::mpsc::UnboundedSender<Value>) -> Self {
+        self.share_feed = Some(feed);
         self
     }
 
@@ -839,6 +849,13 @@ impl RemoteTaskService {
                     feed.resync();
                 }
                 return Ok(Some(SseEnd::Resync));
+            }
+            "share.claimed" | "share.sessionKill" | "share.changed" => {
+                if let Some(feed) = &self.share_feed
+                    && feed.send(event.clone()).is_err()
+                {
+                    tracing::debug!("share service is gone; share event dropped");
+                }
             }
             _ => {}
         }

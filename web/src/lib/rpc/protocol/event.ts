@@ -16,6 +16,7 @@ import type {
   SyncStatusDto,
   UpdateStatusDto,
 } from './agent';
+import type { ShareProgressDto, ShareStateDto } from './share';
 import type { ErrorReason } from './error';
 import type { DaemonConfigSnapshot, DaemonRuntimeStatsDto } from './config';
 import type { ComponentStatusDto, PluginDto } from './plugin';
@@ -78,6 +79,8 @@ export interface AgentSnapshot {
   power: PowerStatusDto;
   /** 旧快照缺失时视为默认（上报关、无概览）。 */
   cloudNotify?: CloudNotifyStateDto;
+  /** 快传分区；旧快照缺失时视为 `available: false`。 */
+  share?: ShareStateDto;
 }
 
 /** `system.snapshot` 主体（`role` 相邻标记，`snapshot` 为内容）。 */
@@ -157,7 +160,11 @@ export type AgentEvent =
   /** 外部来源恢复的已有任务 ID（插件页面脚本恢复；一次性通知，不进快照）。 */
   | { type: 'captureTasksResumed'; data: string[] }
   /** 云端推送状态整体替换。 */
-  | { type: 'cloudNotifyChanged'; data: CloudNotifyStateDto };
+  | { type: 'cloudNotifyChanged'; data: CloudNotifyStateDto }
+  /** 快传分区整体替换。 */
+  | { type: 'shareChanged'; data: ShareStateDto }
+  /** 单个快传会话的进度 / 路径刷新（同 sessionId 的后帧完整取代前帧）。 */
+  | { type: 'shareProgress'; data: ShareProgressDto };
 
 /** `service.event` 事件主体（`service` + `event` 相邻标记）。 */
 export type ServiceEvent =

@@ -23,10 +23,14 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// [`crate::judge_frame`] 判定），v16 增加外部恢复任务通知（`AgentEvent::CaptureTasksResumed`），
 /// v17 取消全量任务单帧：快照与替换事件只带任务总数（`DaemonSnapshot.taskTotal` /
 /// `queueTotal`），任务表经 `system.taskPage` 分页载入（`DaemonEvent::TablesReloading`），
-/// `TaskDto` 默认值字段不再上线（反序列化须容忍缺省）。
-pub const PROTOCOL_VERSION: u32 = 17;
-/// 旧客户端不能解析新增事件，必须在握手时拒绝混用而非运行中断连。
-pub const MIN_PROTOCOL_VERSION: u32 = 17;
+/// `TaskDto` 默认值字段不再上线（反序列化须容忍缺省），v18 增加快传（临时文件分享）：
+/// `agent.share.*` 方法、`AgentEvent::ShareChanged` / `ShareProgress`（`AgentSnapshot.share`）与
+/// `ErrorReason::Share*`，v19 增加快传云端暂存 / 桥接：`agent.share.convertToCloud` /
+/// `deleteCloudCopy`、`ShareDto.cloudState` / `upload`、`SharePathKind::{Cdn, Bridge}`、
+/// `ShareSessionBytesDto.{cdn, bridge}` 与 `ErrorReason::Share{CloudNotReady, TrafficExhausted, CloudUnavailable}`。
+pub const PROTOCOL_VERSION: u32 = 19;
+/// 旧客户端不能解析新增的云端暂存 / 桥接方法与字段语义（UI 会把云端副本当成实时分享展示），必须在握手时拒绝混用。
+pub const MIN_PROTOCOL_VERSION: u32 = 19;
 /// 服务收到 `system.shutdown` 而退出时的 WebSocket 关闭原因：客户端据此停止重连与重拉。
 pub const CLOSE_REASON_SERVICE_QUIT: &str = "service-quit";
 /// headless 服务为应用更新而重启时的 WebSocket 关闭原因：浏览器客户端保持重连，

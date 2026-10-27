@@ -404,6 +404,12 @@ fn open_with(cx: &mut App, context: NewDownloadContext, captures: Vec<PendingCap
                     cx,
                 )
             });
+            form.update(cx, |form, cx| {
+                form.set_open_share_receive(
+                    Some(crate::share_host::open_share_receive_opener()),
+                    cx,
+                );
+            });
             if !captures.is_empty() {
                 form.update(cx, |form, cx| form.add_captures(captures, window, cx));
             }

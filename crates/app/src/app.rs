@@ -80,6 +80,10 @@ pub(crate) struct Desktop {
     pub account_host: Entity<AccountHost>,
     /// 设置侧栏「推介有奖」页的可见性（已登录 + 设备本地偏好），设置窗口与命令面板共用。
     pub referral_visibility: Entity<SlotVisibility>,
+    /// 快传状态中枢：管理页、分享面板、接收窗口、设置页与任务来源徽标共用的唯一一份快传投影。
+    pub share_hub: Entity<fluxdown_ui_share::ShareHub>,
+    /// 接收确认窗口内的视图（窗口关闭后失效）：新的来源交给它而不是再开一个窗口。
+    pub share_receive: Option<WeakEntity<fluxdown_ui_share::ShareReceiveView>>,
     /// 主窗口内的下载页（主窗口关闭后失效）。
     pub main_downloads: Option<WeakEntity<DownloadView>>,
     pub main_shell: Option<WeakEntity<ShellView>>,
@@ -245,6 +249,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             cx.new(|_| SettingsStore::new(Arc::new(AgentSettingsPort::new(agent_client.clone()))));
         attach(&session, &settings_store, cx);
         let account_host = crate::account_host::install(&translator, &session, &agent_client, cx);
+        let share_hub = crate::share_host::install(&translator, &session, &agent_client, cx);
         let quit_store = settings_store.clone();
         cx.on_app_quit(move |cx| {
             let calls = quit_store.update(cx, |store, _| store.drain_pending_calls());
@@ -276,6 +281,8 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             settings_store,
             account_host,
             referral_visibility,
+            share_hub,
+            share_receive: None,
             main_downloads: None,
             main_shell: None,
             settings_view: None,

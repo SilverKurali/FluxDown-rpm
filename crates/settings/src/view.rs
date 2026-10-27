@@ -74,6 +74,8 @@ pub(crate) enum ReferralPage {
 pub struct SettingsContentSlots {
     pub account: Option<AnyView>,
     pub extensions: Option<AnyView>,
+    /// 「快传」页（通知之后、扩展之前）；内容由快传 capability 提供。
+    pub share: Option<AnyView>,
     /// 「推介有奖」页（账户之后）；不可见时整页不出现在侧栏、搜索与直达里。
     pub referral: Option<VisibleSlot>,
     /// 「通用 → 活动栏」分区的开关行，按活动栏自上而下顺序。
@@ -220,6 +222,7 @@ impl SettingsView {
             &ctx,
             &self.slots.activity_bar,
             self.slots.account.clone(),
+            self.slots.share.clone(),
             self.slots.extensions.clone(),
             match &self.slots.referral {
                 Some(slot) if slot.visible.read(cx).visible() => {
@@ -420,6 +423,7 @@ pub(crate) fn build_pages(
     ctx: &SectionContext,
     activity_bar: &[ActivityBarToggle],
     account: Option<AnyView>,
+    share: Option<AnyView>,
     extensions: Option<AnyView>,
     referral: ReferralPage,
     cx: &mut App,
@@ -457,6 +461,14 @@ pub(crate) fn build_pages(
         proxy::page(ctx, cx),
         api::page(ctx, cx),
         notify::page(ctx, cx),
+        sections::slot_page(
+            ctx,
+            "share",
+            "settingsCatShare",
+            "settingsCatShareDesc",
+            FluxIcon::Share2,
+            share,
+        ),
         sections::slot_page(
             ctx,
             "extensions",

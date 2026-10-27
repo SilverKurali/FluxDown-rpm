@@ -347,6 +347,10 @@ async fn run_agent(
         device_meta_task,
         cdn_task,
         notify_task,
+        #[cfg(feature = "share-p2p")]
+        share,
+        #[cfg(feature = "share-p2p")]
+        share_task,
     } = start_cloud_services(
         fluxcloud_base_url(
             std::env::var("FLUXCLOUD_BASE_URL").ok(),
@@ -360,11 +364,20 @@ async fn run_agent(
         &cancel,
     )
     .await?;
-    let capture = Arc::new(crate::capture::CaptureService::new(
-        daemon.clone(),
-        events.clone(),
-        shell.clone(),
-    ));
+    #[cfg(feature = "share-p2p")]
+    let share_links: Option<Arc<dyn crate::share_link::ShareLinkSink>> = share
+        .clone()
+        .map(|service| service as Arc<dyn crate::share_link::ShareLinkSink>);
+    #[cfg(not(feature = "share-p2p"))]
+    let share_links: Option<Arc<dyn crate::share_link::ShareLinkSink>> = None;
+    #[cfg(feature = "share-p2p")]
+    if let Some(service) = &share {
+        lifecycle.set_before_quit(service.clone());
+    }
+    let capture = Arc::new(
+        crate::capture::CaptureService::new(daemon.clone(), events.clone(), shell.clone())
+            .with_share_links(share_links),
+    );
     let blobs = Arc::new(crate::capture::DaemonBlobClient::new(&daemon_config)?);
     // 已装插件的市场撤回：低频触发 daemon 拉索引（桌面与 server 宿主；embedded 不接入）。
     crate::plugin_revocation::spawn(daemon.clone(), cancel.clone());
@@ -436,33 +449,34 @@ async fn run_agent(
     ));
     update.start(cancel.clone(), true);
     let cloud = Arc::new(cloud_api);
-    let gateway_service = Arc::new(
-        GatewayService::new(
-            daemon.clone(),
-            events.clone(),
-            auth,
-            cloud,
-            sync,
-            remote,
-            notify,
-            capture.clone(),
-            blobs.clone(),
-            diagnostics.clone(),
-            update,
-            shared_state,
-            store.clone(),
-            api_switches,
-            api_token.clone(),
-            GatewayShell {
-                shell: shell.clone(),
-                power: power.clone(),
-                lifecycle: lifecycle.clone(),
-                notifier,
-            },
-        )
-        .with_server_mode(server.is_some())
-        .with_link(link.clone()),
-    );
+    let gateway = GatewayService::new(
+        daemon.clone(),
+        events.clone(),
+        auth,
+        cloud,
+        sync,
+        remote,
+        notify,
+        capture.clone(),
+        blobs.clone(),
+        diagnostics.clone(),
+        update,
+        shared_state,
+        store.clone(),
+        api_switches,
+        api_token.clone(),
+        GatewayShell {
+            shell: shell.clone(),
+            power: power.clone(),
+            lifecycle: lifecycle.clone(),
+            notifier,
+        },
+    )
+    .with_server_mode(server.is_some())
+    .with_link(link.clone());
+    #[cfg(feature = "share-p2p")]
+    let gateway = gateway.with_share(share);
+    let gateway_service = Arc::new(gateway);
     let shell_task = tokio::spawn(crate::shell::run_controller(
         ShellServices {
             state: shell,
@@ -567,6 +581,8 @@ async fn run_agent(
         ("cloud sync", sync_task),
         ("remote tasks", remote_task),
         ("device link", link_task),
+        #[cfg(feature = "share-p2p")]
+        ("share", share_task),
         ("device metadata", device_meta_task),
         ("background effects", effects_task),
         ("sound", sound_task),
@@ -811,6 +827,11 @@ pub(crate) struct CloudServices {
     pub(crate) device_meta_task: tokio::task::JoinHandle<()>,
     pub(crate) cdn_task: tokio::task::JoinHandle<()>,
     pub(crate) notify_task: tokio::task::JoinHandle<()>,
+    /// 快传服务（`share-p2p` 编入且装配成功时存在）。
+    #[cfg(feature = "share-p2p")]
+    pub(crate) share: Option<Arc<crate::share::ShareService>>,
+    #[cfg(feature = "share-p2p")]
+    pub(crate) share_task: tokio::task::JoinHandle<()>,
 }
 
 /// 装配并启动云相关服务；桌面 / server 与嵌入式宿主共用，差别只在 `base_url` 的来源。
@@ -847,16 +868,19 @@ pub(crate) async fn start_cloud_services(
         cancel.clone(),
     ));
     let notify_task = tokio::spawn(notify.clone().run(notices));
-    let remote = Arc::new(
-        crate::remote::RemoteTaskService::new(
-            api.clone(),
-            daemon.clone(),
-            events.clone(),
-            state.clone(),
-            store.clone(),
-        )
-        .with_notify_feed(notify.feed()),
-    );
+    #[cfg(feature = "share-p2p")]
+    let (share_feed, share_events) = tokio::sync::mpsc::unbounded_channel();
+    let remote = crate::remote::RemoteTaskService::new(
+        api.clone(),
+        daemon.clone(),
+        events.clone(),
+        state.clone(),
+        store.clone(),
+    )
+    .with_notify_feed(notify.feed());
+    #[cfg(feature = "share-p2p")]
+    let remote = remote.with_share_feed(share_feed);
+    let remote = Arc::new(remote);
     let remote_task = tokio::spawn(remote.clone().run(cancel.clone()));
     let device_meta_task = tokio::spawn(
         Arc::new(crate::device_meta::DeviceMetaService::new(
@@ -869,6 +893,29 @@ pub(crate) async fn start_cloud_services(
         crate::cdn_worker::CdnWorker::new(api.clone(), daemon.as_ref().clone(), events.clone())
             .run(cancel.clone()),
     );
+    #[cfg(feature = "share-p2p")]
+    let (share, share_task) = {
+        let parts = crate::share::ShareServiceParts {
+            events: events.clone(),
+            state: state.clone(),
+            store: store.clone(),
+            cloud: api.clone(),
+            tasks: Arc::new(crate::link::DaemonTaskCreator::new(daemon.clone())),
+            cloud_events: share_events,
+            egress: crate::egress::Egress::daemon(daemon.clone()),
+        };
+        match crate::share::ShareService::new(parts).await {
+            Ok(service) => {
+                let task = tokio::spawn(service.clone().run(cancel.clone()));
+                (Some(service), task)
+            }
+            // 快传不可用不拖垮 agent：不装配服务，`agent.share` 能力不下发。
+            Err(error) => {
+                tracing::error!(error = %format!("{error:#}"), "share service could not start");
+                (None, tokio::spawn(async {}))
+            }
+        }
+    };
     Ok(CloudServices {
         auth,
         api,
@@ -880,6 +927,10 @@ pub(crate) async fn start_cloud_services(
         device_meta_task,
         cdn_task,
         notify_task,
+        #[cfg(feature = "share-p2p")]
+        share,
+        #[cfg(feature = "share-p2p")]
+        share_task,
     })
 }
 

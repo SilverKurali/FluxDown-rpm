@@ -8,4 +8,5 @@ pub mod queue_manager;
 pub mod selection;
 pub mod task_detail;
 pub(crate) mod task_edit;
+pub(crate) mod task_share;
 pub(crate) mod task_verify;

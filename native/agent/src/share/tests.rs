@@ -1,0 +1,911 @@
+//! 快传服务端到端测试：mock FluxCloud（axum）+ 两个 `ShareService`（分享方 / 游客接收方）。
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use axum::Json;
+use axum::Router;
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post, put};
+use fluxdown_api::service::ApiError;
+use fluxdown_protocol::{
+    AgentEvent, AgentSnapshot, CreateTaskRequest, DaemonEvent, DaemonSnapshot, ShareDto,
+    ShareReceiveResultDto, ShareResolveDto, ShareStatus, TaskDto, method,
+};
+use fluxdown_share::ticket::{encode_public_key, sign_ticket};
+use fluxdown_share::timefmt::{now_unix_secs, rfc3339_ms};
+use fluxdown_share::{EndpointAddr, EndpointId, SecretKey, TicketPayload};
+use serde_json::{Value, json};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use super::{ShareService, ShareServiceParts};
+use crate::cloud::{CloudApi, CloudClient};
+use crate::event_hub::AgentEventHub;
+use crate::link::LinkTaskCreator;
+use crate::state::{AgentState, CloudCredentials, StateStore};
+
+// ───────────── mock FluxCloud ─────────────
+
+struct MockShare {
+    id: String,
+    slug: String,
+    code: String,
+    create_body: Value,
+    status: String,
+    /// 创建时的 Bearer：账号令牌或游客令牌；列出 / 停止只对同一身份可见。
+    owner: String,
+    /// 已领取次数（每次 resolve +1，与真实服务端「新接收方才计数」不同，这里只需要有变化）。
+    claims: u64,
+}
+
+struct Mock {
+    signer: SecretKey,
+    shares: Mutex<Vec<MockShare>>,
+    nets: Mutex<Vec<Value>>,
+    sessions: Mutex<Vec<Value>>,
+    endpoints: Mutex<Vec<String>>,
+    guest_share: std::sync::atomic::AtomicBool,
+    /// 已签发的游客发送方令牌（每次换取一条）。
+    guest_sessions: Mutex<Vec<String>>,
+    /// 下发的 `network.republishSecs`：测试改它模拟后台修改网络策略。
+    republish_secs: std::sync::atomic::AtomicU64,
+    /// 列表先取快照、再等这么久才返回：模拟请求在途期间本机又改了分享表。
+    list_delay_ms: std::sync::atomic::AtomicU64,
+}
+
+type MockState = Arc<Mock>;
+
+fn error(status: StatusCode, code: &str) -> Response {
+    (status, Json(json!({ "code": code, "message": code }))).into_response()
+}
+
+fn bearer(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .map(str::to_owned)
+}
+
+async fn config(State(mock): State<MockState>) -> Response {
+    let guest_share = mock.guest_share.load(std::sync::atomic::Ordering::SeqCst);
+    let republish = mock
+        .republish_secs
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let body = json!({
+        "enabled": true, "guestReceive": true, "guestBridge": false, "guestShare": guest_share,
+        "pickupCodeLength": 6, "chunkBytes": 4_194_304,
+        "liveTiers": [{ "id": "t1", "hours": 24, "enabled": true, "default": true }],
+        "network": {
+            "relays": [], "dnsOrigin": "", "pkarrUrl": "", "nameservers": [], "dohUrl": null,
+            "pkarrTtlSecs": 30, "republishSecs": republish, "publishDirectAddrs": false,
+            "portmapper": false, "holePunchHintSecs": 8, "reportIntervalSecs": 1
+        },
+        "revision": 1
+    });
+    // ETag 随游客开关 / 网络策略变化，保证切换后客户端拿到新配置。
+    let etag = format!("\"v1-{guest_share}-{republish}\"");
+    ([(header::ETAG, etag)], Json(body)).into_response()
+}
+
+/// 校验 endpoint 私钥签名（与 FluxCloud `share::guest` 同一消息格式），签发 `guest-<endpoint>-<n>`。
+async fn guest_session(State(mock): State<MockState>, Json(body): Json<Value>) -> Response {
+    if !mock.guest_share.load(std::sync::atomic::Ordering::SeqCst) {
+        return error(StatusCode::FORBIDDEN, "share_guest_disabled");
+    }
+    let endpoint = body["endpointId"].as_str().unwrap_or_default();
+    let timestamp = body["timestamp"].as_u64().unwrap_or_default();
+    let message = format!("fluxdown-share-guest-session/v1\n{endpoint}\n{timestamp}");
+    let verified = (|| {
+        use base64::Engine;
+        let key = EndpointId::from_z32(endpoint).ok()?;
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body["signature"].as_str()?)
+            .ok()?;
+        let signature = fluxdown_share::Signature::from_bytes(&raw.try_into().ok()?);
+        key.verify(message.as_bytes(), &signature).ok()
+    })();
+    if verified.is_none() {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let mut sessions = mock.guest_sessions.lock().unwrap();
+    let token = format!("guest-{endpoint}-{}", sessions.len());
+    sessions.push(token.clone());
+    Json(json!({
+        "guestToken": token,
+        "expiresAt": rfc3339_ms((now_unix_secs() + 86_400) * 1000),
+        "endpointId": endpoint,
+    }))
+    .into_response()
+}
+
+async fn keys(State(mock): State<MockState>) -> Json<Value> {
+    Json(json!({ "keys": [{
+        "kid": "k1", "publicKey": encode_public_key(&mock.signer.public())
+    }]}))
+}
+
+async fn register_endpoint(State(mock): State<MockState>, Json(body): Json<Value>) -> Json<Value> {
+    if let Some(id) = body["endpointId"].as_str() {
+        mock.endpoints.lock().unwrap().push(id.to_owned());
+    }
+    Json(json!({ "endpointId": body["endpointId"], "dnsOrigin": "" }))
+}
+
+fn share_json(share: &MockShare) -> Value {
+    let size: u64 = share.create_body["files"]
+        .as_array()
+        .map(|files| files.iter().filter_map(|f| f["size"].as_u64()).sum())
+        .unwrap_or(0);
+    let active = share.status == "active";
+    json!({
+        "id": share.id, "slug": share.slug,
+        "pickupCode": if active { json!(share.code) } else { Value::Null },
+        "url": format!("https://fluxdown.test/s/{}", share.slug),
+        "title": share.create_body["title"], "mode": "live", "tierId": "t1",
+        "expiresAt": rfc3339_ms((now_unix_secs() + 3600) * 1000),
+        "maxClaims": null, "claimCount": share.claims, "notifyOnClaim": false,
+        "status": share.status, "totalBytes": size
+    })
+}
+
+async fn create_share(
+    State(mock): State<MockState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let Some(owner) = bearer(&headers) else {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let mut shares = mock.shares.lock().unwrap();
+    let n = shares.len() + 1;
+    let share = MockShare {
+        id: format!("s{n}"),
+        slug: format!("slug{n}"),
+        code: format!("12345{n}"),
+        create_body: body,
+        status: "active".to_owned(),
+        owner,
+        claims: 0,
+    };
+    let out = share_json(&share);
+    shares.push(share);
+    Json(out).into_response()
+}
+
+/// 游客令牌只认同一 endpoint 签发的任一令牌（令牌会续期）；账号令牌只认账号。
+fn same_owner(owner: &str, caller: &str) -> bool {
+    match (owner.strip_prefix("guest-"), caller.strip_prefix("guest-")) {
+        (Some(a), Some(b)) => a.rsplit_once('-').map(|x| x.0) == b.rsplit_once('-').map(|x| x.0),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+async fn list_shares(State(mock): State<MockState>, headers: HeaderMap) -> Response {
+    let Some(caller) = bearer(&headers) else {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let mine: Vec<Value> = mock
+        .shares
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| same_owner(&s.owner, &caller))
+        .map(share_json)
+        .collect();
+    let delay = mock.list_delay_ms.load(std::sync::atomic::Ordering::SeqCst);
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+    Json(json!({ "shares": mine })).into_response()
+}
+
+async fn stop_share(
+    State(mock): State<MockState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let caller = bearer(&headers).unwrap_or_default();
+    let mut shares = mock.shares.lock().unwrap();
+    match shares
+        .iter_mut()
+        .find(|s| s.id == id && same_owner(&s.owner, &caller))
+    {
+        Some(share) => {
+            share.status = "stopped".to_owned();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        None => error(StatusCode::NOT_FOUND, "not_found"),
+    }
+}
+
+async fn resolve(
+    State(mock): State<MockState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut shares = mock.shares.lock().unwrap();
+    let found = shares.iter_mut().find(|s| {
+        body["code"].as_str() == Some(s.code.as_str())
+            || body["slug"].as_str() == Some(s.slug.as_str())
+    });
+    let Some(share) = found else {
+        return error(StatusCode::NOT_FOUND, "not_found");
+    };
+    if share.status != "active" {
+        return error(StatusCode::GONE, "share_ended");
+    }
+    let receiver = body["receiverEndpointId"].as_str().unwrap_or_default();
+    share.claims += 1;
+    // 与真实 FluxCloud 一致：登录设备 resolve 前，接收方 endpoint 必须已登记到本设备。
+    if headers.contains_key(header::AUTHORIZATION)
+        && !mock.endpoints.lock().unwrap().iter().any(|e| e == receiver)
+    {
+        return error(StatusCode::BAD_REQUEST, "validation");
+    }
+    let ticket = sign_ticket(
+        &mock.signer,
+        &TicketPayload {
+            v: 1,
+            kid: "k1".into(),
+            sid: share.id.clone(),
+            rep: receiver.to_owned(),
+            exp: now_unix_secs() + 3600,
+            scope: "recv".into(),
+        },
+    )
+    .unwrap();
+    let mut out = json!({
+        "share": {
+            "id": share.id, "title": share.create_body["title"],
+            "files": share.create_body["files"],
+            "senderDeviceName": "Sender PC",
+            "senderEndpointId": share.create_body["endpointId"],
+            "expiresAt": rfc3339_ms((now_unix_secs() + 3600) * 1000)
+        },
+        "ticket": ticket, "relays": []
+    });
+    if !headers.contains_key(header::AUTHORIZATION) {
+        out["guestToken"] = json!("guest-tok");
+    }
+    Json(out).into_response()
+}
+
+async fn telemetry_net(State(mock): State<MockState>, Json(body): Json<Value>) -> Json<Value> {
+    mock.nets.lock().unwrap().push(body);
+    Json(json!({ "globalV4Geo": { "province": "Zhejiang", "isp": "TestNet" } }))
+}
+
+async fn telemetry_sessions(State(mock): State<MockState>, Json(body): Json<Value>) -> Json<Value> {
+    mock.sessions.lock().unwrap().push(body);
+    Json(json!({ "killed": false }))
+}
+
+async fn start_mock() -> (String, MockState) {
+    let mock = Arc::new(Mock {
+        signer: SecretKey::generate(),
+        shares: Mutex::new(Vec::new()),
+        nets: Mutex::new(Vec::new()),
+        sessions: Mutex::new(Vec::new()),
+        endpoints: Mutex::new(Vec::new()),
+        guest_share: std::sync::atomic::AtomicBool::new(false),
+        guest_sessions: Mutex::new(Vec::new()),
+        republish_secs: std::sync::atomic::AtomicU64::new(300),
+        list_delay_ms: std::sync::atomic::AtomicU64::new(0),
+    });
+    let app = Router::new()
+        .route("/api/v1/share/config", get(config))
+        .route("/api/v1/share/keys", get(keys))
+        .route("/api/v1/share/guest-session", post(guest_session))
+        .route("/api/v1/share/endpoint", put(register_endpoint))
+        .route("/api/v1/share/shares", post(create_share).get(list_shares))
+        .route("/api/v1/share/shares/{id}", delete(stop_share))
+        .route("/api/v1/share/resolve", post(resolve))
+        .route("/api/v1/share/telemetry/net", post(telemetry_net))
+        .route("/api/v1/share/telemetry/sessions", post(telemetry_sessions))
+        .with_state(mock.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (base, mock)
+}
+
+// ───────────── 测试宿主 ─────────────
+
+/// 记录建任务请求的假 daemon。
+#[derive(Default)]
+struct FakeTasks {
+    requests: Mutex<Vec<CreateTaskRequest>>,
+}
+
+#[async_trait]
+impl LinkTaskCreator for FakeTasks {
+    async fn create_task(&self, request: CreateTaskRequest) -> Result<String, ApiError> {
+        let mut requests = self.requests.lock().unwrap();
+        requests.push(request);
+        Ok(format!("recv-task-{}", requests.len()))
+    }
+}
+
+fn task(id: &str, status: i32, dir: &std::path::Path, name: &str) -> TaskDto {
+    serde_json::from_value(json!({
+        "taskId": id, "url": "https://example.com/f", "fileName": name,
+        "saveDir": dir.to_string_lossy(), "status": status, "downloadedBytes": 0,
+        "totalBytes": 0, "errorMessage": "", "createdAt": "1", "proxyUrl": "",
+        "queueId": "main", "checksum": ""
+    }))
+    .unwrap()
+}
+
+struct Node {
+    service: Arc<ShareService>,
+    events: AgentEventHub,
+    tasks: Arc<FakeTasks>,
+    cancel: CancellationToken,
+    _feed: mpsc::UnboundedSender<Value>,
+}
+
+async fn node(base: &str, label: &str, logged_in: bool, tasks: Vec<TaskDto>) -> Node {
+    let dir = std::env::temp_dir().join(format!(
+        "fluxdown_share_{label}_{}_{}",
+        std::process::id(),
+        now_unix_secs()
+    ));
+    let store = Arc::new(StateStore::open(dir).await.unwrap());
+    let mut state = AgentState {
+        device_name: format!("{label}-device"),
+        ..AgentState::default()
+    };
+    if logged_in {
+        state.credentials = Some(CloudCredentials {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at_unix: i64::MAX / 2,
+            session: None,
+        });
+    }
+    let state = Arc::new(tokio::sync::Mutex::new(state));
+    let events = AgentEventHub::new(AgentSnapshot {
+        daemon: DaemonSnapshot {
+            tasks,
+            ..DaemonSnapshot::default()
+        },
+        ..AgentSnapshot::default()
+    });
+    let client = CloudClient::new(base.to_owned(), state.clone(), store.clone()).unwrap();
+    let fake = Arc::new(FakeTasks::default());
+    let (feed, cloud_events) = mpsc::unbounded_channel();
+    let service = ShareService::new(ShareServiceParts {
+        events: events.clone(),
+        state,
+        store,
+        cloud: CloudApi::new(client),
+        tasks: fake.clone(),
+        cloud_events,
+        egress: crate::egress::Egress::system_default(),
+    })
+    .await
+    .unwrap();
+    let cancel = CancellationToken::new();
+    tokio::spawn(service.clone().run(cancel.clone()));
+    Node {
+        service,
+        events,
+        tasks: fake,
+        cancel,
+        _feed: feed,
+    }
+}
+
+async fn call<T: serde::de::DeserializeOwned>(
+    node: &Node,
+    method: &str,
+    params: Value,
+) -> Result<T, fluxdown_protocol::RpcErrorData> {
+    let value = node.service.rpc(method, Some(params)).await?;
+    Ok(serde_json::from_value(value).unwrap())
+}
+
+async fn wait_until(what: &str, mut probe: impl FnMut() -> bool) {
+    for _ in 0..300 {
+        if probe() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn pseudo_random(len: usize) -> Vec<u8> {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut out = Vec::with_capacity(len);
+    while out.len() < len {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        out.extend_from_slice(&state.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn share_end_to_end_with_mock_cloud() {
+    let (base, mock) = start_mock().await;
+
+    // 分享方：本机有一个已完成任务，文件在磁盘上。
+    let files_dir =
+        std::env::temp_dir().join(format!("fluxdown_share_files_{}", std::process::id()));
+    std::fs::create_dir_all(&files_dir).unwrap();
+    let payload = pseudo_random(5 * 1024 * 1024);
+    std::fs::write(files_dir.join("payload.bin"), &payload).unwrap();
+    let sender = node(
+        &base,
+        "sender",
+        true,
+        vec![task("t1", 3, &files_dir, "payload.bin")],
+    )
+    .await;
+    let receiver = node(&base, "receiver", false, Vec::new()).await;
+
+    // 未完成 / 不存在的任务不可分享。
+    let missing: Result<ShareDto, _> = call(
+        &sender,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["nope"] }),
+    )
+    .await;
+    assert_eq!(
+        missing.unwrap_err().reason,
+        Some(fluxdown_protocol::ErrorReason::ShareTaskNotShareable)
+    );
+
+    // 创建分享：哈希 → 云端登记 → 发送方登记表。
+    let share: ShareDto = call(
+        &sender,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["t1"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(share.pickup_code, "123451");
+    assert_eq!(share.total_bytes, payload.len() as u64);
+    assert!(sender.service.registry.contains(&share.id));
+    assert!(
+        sender
+            .service
+            .with(|i| i.endpoint.as_ref().is_some_and(|e| e.is_bound()))
+    );
+
+    // 接收方：测试钩子给出分享方的回环地址（云端契约没有地址提示）。
+    let sender_service = sender.service.clone();
+    *receiver.service.addr_hint.lock().unwrap() = Some(Arc::new(move |z32: &str| {
+        let endpoint = sender_service.with(|i| i.endpoint.clone())?;
+        let port = endpoint
+            .bound_endpoint()?
+            .bound_sockets()
+            .iter()
+            .find(|a| a.is_ipv4())?
+            .port();
+        let id = EndpointId::from_z32(z32).ok()?;
+        Some(EndpointAddr::new(id).with_ip_addr(([127, 0, 0, 1], port).into()))
+    }));
+
+    // 游客凭取件码 resolve。
+    let preview: ShareResolveDto = call(
+        &receiver,
+        method::AGENT_SHARE_RESOLVE,
+        json!({ "codeOrLink": "123451" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(preview.files.len(), 1);
+    assert_eq!(preview.sender_device_name, "Sender PC");
+    assert_eq!(preview.total_bytes, payload.len() as u64);
+
+    // 接收：建出指向回环适配器、强制直连的普通下载任务。
+    let save_dir = std::env::temp_dir().join("fluxdown_share_recv");
+    let received: ShareReceiveResultDto = call(
+        &receiver,
+        method::AGENT_SHARE_RECEIVE,
+        json!({ "resolveId": preview.resolve_id, "saveDir": save_dir.to_string_lossy() }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(received.task_ids, ["recv-task-1"]);
+    let request = receiver.tasks.requests.lock().unwrap()[0].clone();
+    assert!(
+        request.url.starts_with("http://127.0.0.1:"),
+        "{}",
+        request.url
+    );
+    assert_eq!(request.proxy_url, "direct://");
+    assert_eq!(request.file_name, "payload.bin");
+
+    // 适配器经 iroh 取到并校验过的字节。
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = http.get(&request.url).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), payload.as_slice());
+
+    // 有接收方连上来 → 分享方对账，领取次数随云端更新（游客分享收不到云端推送，只能靠这一步）。
+    wait_until("sender claim count", || {
+        sender.service.with(|i| {
+            i.shares
+                .iter()
+                .any(|s| s.dto.id == share.id && s.dto.claim_count == 1)
+        })
+    })
+    .await;
+
+    // 接收方状态：任务事实 + 接收记录。
+    let state = receiver.service.with(|i| i.state_dto(false));
+    assert!(state.task_facts.contains_key("recv-task-1"));
+    assert_eq!(state.receive_records.len(), 1);
+
+    // 分享方停止 → 适配器对已建立的会话返回 410。
+    let stopped: ShareDto = call(&sender, method::AGENT_SHARE_STOP, json!({ "id": share.id }))
+        .await
+        .unwrap();
+    assert_eq!(stopped.status, ShareStatus::Stopped);
+    let gone = http.get(&request.url).send().await.unwrap();
+    assert_eq!(gone.status(), 410);
+
+    // 接收任务完成 → 会话与适配器收尾，接收方端点关闭（空闲静默）。
+    receiver
+        .events
+        .publish(AgentEvent::Daemon(DaemonEvent::TaskChanged(task(
+            "recv-task-1",
+            3,
+            &save_dir,
+            "payload.bin",
+        ))));
+    wait_until("receiver idle", || {
+        receiver.service.with(|i| {
+            i.receive_tasks.is_empty()
+                && i.adapter.is_none()
+                && i.endpoint.as_ref().is_none_or(|e| !e.is_bound())
+        })
+    })
+    .await;
+
+    // 上报：双方的会话报告与网络快照都送达云端。
+    wait_until("telemetry", || {
+        let sessions = mock.sessions.lock().unwrap();
+        let has = |role: &str| {
+            sessions
+                .iter()
+                .any(|s| s["role"] == role && s["shareId"] == share.id)
+        };
+        has("sender") && has("receiver") && !mock.nets.lock().unwrap().is_empty()
+    })
+    .await;
+    let receiver_state = receiver.service.with(|i| i.state_dto(false));
+    assert!(receiver_state.task_facts.is_empty());
+
+    // 云端回传的归属折进分享方网络状态。
+    wait_until("geo", || {
+        sender
+            .service
+            .with(|i| i.net.isp.as_deref() == Some("TestNet"))
+    })
+    .await;
+
+    // 诊断：会话详情来自上报簿；日志过滤的非法正则被拒绝。
+    let diag: fluxdown_protocol::ShareDiagnosticsDto =
+        call(&receiver, method::AGENT_SHARE_DIAGNOSTICS, json!({}))
+            .await
+            .unwrap();
+    assert!(!diag.sessions.is_empty());
+    let bad_regex: Result<fluxdown_protocol::ShareLogsDto, _> =
+        call(&receiver, method::AGENT_SHARE_LOGS, json!({ "regex": "(" })).await;
+    assert_eq!(bad_regex.unwrap_err().field.as_deref(), Some("regex"));
+
+    // 阶段 E 之前切换桥接恒不可用。
+    let bridge: Result<Value, _> = call(
+        &receiver,
+        method::AGENT_SHARE_SWITCH_TO_BRIDGE,
+        json!({ "taskId": "recv-task-1" }),
+    )
+    .await;
+    assert_eq!(
+        bridge.unwrap_err().reason,
+        Some(fluxdown_protocol::ErrorReason::ShareBridgeUnavailable)
+    );
+
+    sender.cancel.cancel();
+    receiver.cancel.cancel();
+}
+
+/// 回归（真实栈 smoke 发现）：登录设备的 `resolve` 要求接收方 endpoint 已登记到本设备（否则服务端 400，
+/// 被映射成 `shareCodeInvalid`）。此前只有 `create` / `receive` 会登记，冷启动后直接 resolve 必败。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn logged_in_receiver_registers_its_endpoint_before_resolve() {
+    let (base, _mock) = start_mock().await;
+    let files_dir =
+        std::env::temp_dir().join(format!("fluxdown_share_files_login_{}", std::process::id()));
+    std::fs::create_dir_all(&files_dir).unwrap();
+    std::fs::write(files_dir.join("payload.bin"), pseudo_random(1024 * 1024)).unwrap();
+    let sender = node(
+        &base,
+        "sender_login",
+        true,
+        vec![task("t1", 3, &files_dir, "payload.bin")],
+    )
+    .await;
+    let share: ShareDto = call(
+        &sender,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["t1"] }),
+    )
+    .await
+    .unwrap();
+
+    let receiver = node(&base, "receiver_login", true, Vec::new()).await;
+    let preview: ShareResolveDto = call(
+        &receiver,
+        method::AGENT_SHARE_RESOLVE,
+        json!({ "codeOrLink": share.pickup_code }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(preview.share_id, share.id);
+
+    sender.cancel.cancel();
+    receiver.cancel.cancel();
+}
+
+/// 游客发送方：未登录时凭 endpoint 签名换游客令牌创建分享；令牌缓存复用；登录后游客分享仍用游客令牌
+/// 停止，且账号对账不会把账号列表里没有的游客分享误判为已停止。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_sender_shares_without_login_and_keeps_ownership_after_login() {
+    let (base, mock) = start_mock().await;
+    mock.guest_share
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let files_dir =
+        std::env::temp_dir().join(format!("fluxdown_share_files_guest_{}", std::process::id()));
+    std::fs::create_dir_all(&files_dir).unwrap();
+    std::fs::write(files_dir.join("a.bin"), pseudo_random(256 * 1024)).unwrap();
+    std::fs::write(files_dir.join("b.bin"), pseudo_random(128 * 1024)).unwrap();
+    let sender = node(
+        &base,
+        "sender_guest",
+        false,
+        vec![
+            task("t1", 3, &files_dir, "a.bin"),
+            task("t2", 3, &files_dir, "b.bin"),
+        ],
+    )
+    .await;
+
+    let first: ShareDto = call(
+        &sender,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["t1"] }),
+    )
+    .await
+    .unwrap();
+    let second: ShareDto = call(
+        &sender,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["t2"] }),
+    )
+    .await
+    .unwrap();
+    assert!(!first.pickup_code.is_empty());
+    assert_eq!(
+        mock.guest_sessions.lock().unwrap().len(),
+        1,
+        "fresh guest token is reused"
+    );
+    assert!(
+        mock.shares
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|s| s.owner.starts_with("guest-"))
+    );
+    // 游客分享从未登记设备 endpoint（PUT /share/endpoint 只给登录设备）。
+    assert!(mock.endpoints.lock().unwrap().is_empty());
+
+    // 登录后：账号对账看不到游客分享，但它们仍有效。
+    sender.service.state.lock().await.credentials = Some(CloudCredentials {
+        access_token: "access".into(),
+        refresh_token: "refresh".into(),
+        expires_at_unix: i64::MAX / 2,
+        session: None,
+    });
+    sender.service.sync_shares().await;
+    let status_of = |id: &str| {
+        sender.service.with(|i| {
+            i.shares
+                .iter()
+                .find(|s| s.dto.id == id)
+                .map(|s| s.dto.status)
+        })
+    };
+    assert_eq!(status_of(&first.id), Some(ShareStatus::Active));
+    assert_eq!(status_of(&second.id), Some(ShareStatus::Active));
+
+    // 停止游客分享走游客令牌（账号令牌会被 mock 当作他人分享返回 404）。
+    let stopped: ShareDto = call(&sender, method::AGENT_SHARE_STOP, json!({ "id": first.id }))
+        .await
+        .unwrap();
+    assert_eq!(stopped.status, ShareStatus::Stopped);
+    let cloud_status = mock
+        .shares
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|s| s.id == first.id)
+        .map(|s| s.status.clone());
+    assert_eq!(cloud_status.as_deref(), Some("stopped"));
+
+    sender.cancel.cancel();
+}
+
+/// 回归（本机联调发现）：分享期间后台改了网络策略（pkarr / DNS / 中继），已绑定的端点仍按旧策略
+/// 发布地址，对端永远查不到。再次分享时必须取最新策略并按新策略重建端点。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_share_rebuilds_endpoint_after_network_policy_change() {
+    let (base, mock) = start_mock().await;
+    let files_dir = std::env::temp_dir().join(format!(
+        "fluxdown_share_files_policy_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&files_dir).unwrap();
+    std::fs::write(files_dir.join("a.bin"), pseudo_random(64 * 1024)).unwrap();
+    std::fs::write(files_dir.join("b.bin"), pseudo_random(64 * 1024)).unwrap();
+    let sender = node(
+        &base,
+        "sender_policy",
+        true,
+        vec![
+            task("t1", 3, &files_dir, "a.bin"),
+            task("t2", 3, &files_dir, "b.bin"),
+        ],
+    )
+    .await;
+    let republish = |node: &Node| {
+        node.service
+            .with(|i| i.endpoint.as_ref().map(|e| e.policy().republish_secs))
+    };
+    let _: ShareDto = call(
+        &sender,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["t1"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(republish(&sender), Some(300));
+
+    mock.republish_secs
+        .store(120, std::sync::atomic::Ordering::SeqCst);
+    let _: ShareDto = call(
+        &sender,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["t2"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(republish(&sender), Some(120));
+    assert!(
+        sender
+            .service
+            .with(|i| i.endpoint.as_ref().is_some_and(|e| e.is_bound()))
+    );
+
+    sender.cancel.cancel();
+}
+
+/// 回归（`upload_resumes_after_restart…` 偶发失败的根因）：多个任务同时持久化分享表时共用同一个
+/// 临时文件，交错写会撕裂 `shares.json`（重启后整张表被当作损坏丢弃），或把旧快照写在新快照之后。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_share_persists_never_tear_or_reorder() {
+    let (base, _mock) = start_mock().await;
+    let node = node(&base, "persist", false, Vec::new()).await;
+    let mut writers = Vec::new();
+    for n in 0..64_usize {
+        let service = node.service.clone();
+        writers.push(tokio::spawn(async move {
+            let id = format!("share-{}", "x".repeat(n));
+            service.with(|i| {
+                i.shares.push(super::store::StoredShare {
+                    dto: ShareDto {
+                        id: id.clone(),
+                        status: ShareStatus::Active,
+                        ..ShareDto::default()
+                    },
+                    manifest: fluxdown_share::ShareManifest {
+                        share_id: id,
+                        files: Vec::new(),
+                    },
+                    paths: Vec::new(),
+                    guest_owned: false,
+                });
+            });
+            service.persist_shares().await;
+        }));
+    }
+    for writer in writers {
+        writer.await.unwrap();
+    }
+    let on_disk = node.service.store.load_shares().await;
+    assert_eq!(
+        on_disk.len(),
+        64,
+        "last write must hold the full, untorn table"
+    );
+    node.cancel.cancel();
+}
+
+/// 回归：对账请求在途时本机停止了分享，旧列表（仍是 active）不得把它复活；同理新建的分享不得被
+/// 旧列表判为已停止。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_share_list_never_overrides_local_changes() {
+    let (base, mock) = start_mock().await;
+    let files_dir =
+        std::env::temp_dir().join(format!("fluxdown_share_files_stale_{}", std::process::id()));
+    std::fs::create_dir_all(&files_dir).unwrap();
+    std::fs::write(files_dir.join("a.bin"), pseudo_random(64 * 1024)).unwrap();
+    std::fs::write(files_dir.join("b.bin"), pseudo_random(64 * 1024)).unwrap();
+    let sender = node(
+        &base,
+        "sender_stale",
+        true,
+        vec![
+            task("t1", 3, &files_dir, "a.bin"),
+            task("t2", 3, &files_dir, "b.bin"),
+        ],
+    )
+    .await;
+    let first: ShareDto = call(
+        &sender,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["t1"] }),
+    )
+    .await
+    .unwrap();
+
+    mock.list_delay_ms
+        .store(300, std::sync::atomic::Ordering::SeqCst);
+    let syncing = {
+        let service = sender.service.clone();
+        tokio::spawn(async move { service.sync_shares().await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _: ShareDto = call(&sender, method::AGENT_SHARE_STOP, json!({ "id": first.id }))
+        .await
+        .unwrap();
+    let second: ShareDto = call(
+        &sender,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["t2"] }),
+    )
+    .await
+    .unwrap();
+    syncing.await.unwrap();
+
+    let status_of = |id: &str| {
+        sender.service.with(|i| {
+            i.shares
+                .iter()
+                .find(|s| s.dto.id == id)
+                .map(|s| s.dto.status)
+        })
+    };
+    assert_eq!(status_of(&first.id), Some(ShareStatus::Stopped));
+    assert_eq!(status_of(&second.id), Some(ShareStatus::Active));
+    assert!(sender.service.registry.contains(&second.id));
+
+    sender.cancel.cancel();
+}

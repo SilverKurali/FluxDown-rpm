@@ -289,13 +289,18 @@ pub struct ServerRuntime {
 
 /// 阻塞运行 server 模式直到退出。
 pub fn run_blocking(host: crate::shell::ShellHost) -> AgentResult {
-    if let Err(error) = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init()
-    {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let fmt_layer = tracing_subscriber::fmt::layer().with_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    );
+    let subscriber = tracing_subscriber::registry().with(fmt_layer);
+    // iroh / 快传 tracing 另走内存环形缓冲（诊断页）。
+    #[cfg(feature = "share-p2p")]
+    let subscriber = subscriber.with(crate::share::logs::layer());
+    if let Err(error) = subscriber.try_init() {
         // 嵌入式宿主可能已经设置订阅者；保留它，同时让 stderr 可观察未安装的原因。
         tracing::warn!(error = %error, "server tracing subscriber was not installed");
         eprintln!("server tracing subscriber was not installed: {error}");

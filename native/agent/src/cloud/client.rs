@@ -715,6 +715,18 @@ impl CloudClient {
         body: Option<Value>,
         bearer: Option<&str>,
     ) -> Result<reqwest::Response, CloudError> {
+        self.send_request(method, path, body, bearer, None).await
+    }
+
+    /// `send_once` 加可选 `If-None-Match`（条件 GET，如 `/share/config` 的 ETag 缓存）。
+    async fn send_request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        bearer: Option<&str>,
+        if_none_match: Option<&str>,
+    ) -> Result<reqwest::Response, CloudError> {
         let (device_id, device_name, platform) = self.device_identity().await;
         let client = self
             .http
@@ -730,6 +742,9 @@ impl CloudClient {
         if let Some(token) = bearer {
             request = request.bearer_auth(token);
         }
+        if let Some(etag) = if_none_match {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -740,6 +755,48 @@ impl CloudClient {
             .map_err(|error| CloudError::network(error_chain(&error)))?;
         self.observe_server_clock(&response, sent_at, unix_ms());
         Ok(response)
+    }
+
+    /// 带调用方自备 Bearer（快传游客会话令牌）的调用：令牌不属于账号会话，不做刷新重放。
+    pub(crate) async fn with_bearer<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&P>,
+        token: &str,
+    ) -> Result<R, CloudError> {
+        let body = body
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| CloudError::invalid(error.to_string()))?;
+        let response = self.send_once(method, path, body, Some(token)).await?;
+        decode(response).await
+    }
+
+    /// 公开 GET + 条件请求：`304` → `Ok(None)`；`200` → 正文与新的 `ETag`。
+    pub(crate) async fn public_conditional<R: DeserializeOwned>(
+        &self,
+        path: &str,
+        etag: Option<&str>,
+    ) -> Result<Option<(R, Option<String>)>, CloudError> {
+        let response = self
+            .send_request(Method::GET, path, None, None, etag)
+            .await?;
+        if response.status() == StatusCode::NOT_MODIFIED {
+            return Ok(None);
+        }
+        let new_etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = decode(response).await?;
+        Ok(Some((body, new_etag)))
+    }
+
+    /// 是否持有登录凭据（快传据此在账号鉴权与游客鉴权之间选择）。
+    pub(crate) async fn has_account(&self) -> bool {
+        self.is_authenticated().await
     }
 }
 

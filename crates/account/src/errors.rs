@@ -114,6 +114,21 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         ErrorReason::TaskStateConflict => "errReasonTaskStateConflict",
         ErrorReason::TaskDeviceMismatch => "errReasonTaskDeviceMismatch",
         ErrorReason::SaveDirUnavailable => "errReasonSaveDirUnavailable",
+        ErrorReason::ShareUnavailable => "errReasonShareUnavailable",
+        ErrorReason::ShareNotFound => "errReasonShareNotFound",
+        ErrorReason::ShareExpired => "errReasonShareExpired",
+        ErrorReason::ShareStopped => "errReasonShareStopped",
+        ErrorReason::ShareCodeInvalid => "errReasonShareCodeInvalid",
+        ErrorReason::ShareRateLimited => "errReasonShareRateLimited",
+        ErrorReason::ShareTurnstileRequired => "errReasonShareTurnstileRequired",
+        ErrorReason::ShareFileChanged => "errReasonShareFileChanged",
+        ErrorReason::ShareSenderOffline => "errReasonShareSenderOffline",
+        ErrorReason::ShareTaskNotShareable => "errReasonShareTaskNotShareable",
+        ErrorReason::ShareBridgeUnavailable => "errReasonShareBridgeUnavailable",
+        ErrorReason::ShareQuotaExceeded => "errReasonShareQuotaExceeded",
+        ErrorReason::ShareCloudNotReady => "errReasonShareCloudNotReady",
+        ErrorReason::ShareTrafficExhausted => "errReasonShareTrafficExhausted",
+        ErrorReason::ShareCloudUnavailable => "errReasonShareCloudUnavailable",
         ErrorReason::PaymentDisabled
         | ErrorReason::PaymentGatewayFailed
         | ErrorReason::PlanNotPurchasable

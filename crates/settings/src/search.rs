@@ -97,7 +97,7 @@ fn pages_for(
     } else {
         ReferralPage::Hidden
     };
-    build_pages(&ctx, activity_bar, None, None, referral, cx)
+    build_pages(&ctx, activity_bar, None, None, None, referral, cx)
 }
 
 fn flatten(pages: &[SettingsPage]) -> Vec<SettingsSearchEntry> {

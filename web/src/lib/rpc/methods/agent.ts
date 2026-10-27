@@ -2,6 +2,7 @@
 // 仅限 Web 可用的方法（不含读写宿主机路径的 platform.* / installFile / exportLogs 等）。
 
 import { call } from '../client';
+import type { CallOptions } from '../client';
 import { METHOD } from '../protocol';
 import type {
   CloudNotifyChannelCreateParams,
@@ -90,6 +91,26 @@ import type {
   LinkPairFinishResponse,
   LinkRenameParams,
   LinkPairingCodeDto,
+  ShareConfigDto,
+  ShareCreateParams,
+  ShareConvertToCloudParams,
+  ShareDiagnosticsDto,
+  ShareDiagnosticsParams,
+  ShareDto,
+  ShareIdParams,
+  ShareLocalConfigDto,
+  ShareLogsDto,
+  ShareLogsParams,
+  ShareReceiveParams,
+  ShareReceiveRecordsPage,
+  ShareReceiveRecordsParams,
+  ShareReceiveResultDto,
+  ShareResolveDto,
+  ShareResolveParams,
+  ShareSessionKillParams,
+  ShareSwitchToBridgeParams,
+  ShareTaskFactsDto,
+  ShareUpdateParams,
   RemoteCommandParams,
   RemoteDispatchParams,
   RemoteDispatchResult,
@@ -324,6 +345,44 @@ const cloudNotify = {
     call<OkResult>(METHOD.AGENT_CLOUD_NOTIFY_VERIFY_EMAIL, params),
 };
 
+// 快传（临时文件分享）：仅当 hello 带 `agent.share` 能力（`CAPABILITY_AGENT_SHARE`）时可用。
+// 状态经 `shareChanged` / `shareProgress` 推送到 `snapshot.share`，下列调用的返回值只是即时回执。
+const share = {
+  /** 刷新云端策略后返回策略摘要 + 本机设置。 */
+  config: () => call<ShareConfigDto>(METHOD.AGENT_SHARE_CONFIG),
+  /** 整体替换本机快传设置（以快照里的当前值为底稿修改后提交），返回规范化后的值。 */
+  setLocalConfig: (params: ShareLocalConfigDto) =>
+    call<ShareLocalConfigDto>(METHOD.AGENT_SHARE_SET_LOCAL_CONFIG, params),
+  /** 从已完成的本机任务创建分享（多个任务合成一个分享）；创建前要给文件算块哈希，大文件耗时可远超默认超时，调用方按需传 `options.timeoutMs`。 */
+  create: (params: ShareCreateParams, options?: CallOptions) => call<ShareDto>(METHOD.AGENT_SHARE_CREATE, params, options),
+  list: () => call<ShareDto[]>(METHOD.AGENT_SHARE_LIST),
+  /** 改有效期 / 次数 / 领取通知；链接与取件码不变。 */
+  update: (params: ShareUpdateParams) => call<ShareDto>(METHOD.AGENT_SHARE_UPDATE, params),
+  stop: (params: ShareIdParams) => call<ShareDto>(METHOD.AGENT_SHARE_STOP, params),
+  /** 解析取件码 / 链接，返回接收确认框预览。 */
+  resolve: (params: ShareResolveParams) => call<ShareResolveDto>(METHOD.AGENT_SHARE_RESOLVE, params),
+  /** `resolveId` 与 `codeOrLink` 二选一。 */
+  receive: (params: ShareReceiveParams) =>
+    call<ShareReceiveResultDto>(METHOD.AGENT_SHARE_RECEIVE, params),
+  dismissPending: (resolveId: string) =>
+    call<{ ok: true }>(METHOD.AGENT_SHARE_DISMISS_PENDING, { resolveId }),
+  receiveRecords: (params?: ShareReceiveRecordsParams) =>
+    call<ShareReceiveRecordsPage>(METHOD.AGENT_SHARE_RECEIVE_RECORDS, params),
+  /** 任务继续运行，切换后其 `pathKind` 变为 `bridge` / `cdn`；无可用桥接 → `shareBridgeUnavailable`。 */
+  switchToBridge: (params: ShareSwitchToBridgeParams) =>
+    call<ShareTaskFactsDto>(METHOD.AGENT_SHARE_SWITCH_TO_BRIDGE, params),
+  diagnostics: (params?: ShareDiagnosticsParams) =>
+    call<ShareDiagnosticsDto>(METHOD.AGENT_SHARE_DIAGNOSTICS, params),
+  logs: (params?: ShareLogsParams) => call<ShareLogsDto>(METHOD.AGENT_SHARE_LOGS, params),
+  /** 分享方强制中断一个接收方会话。 */
+  sessionKill: (params: ShareSessionKillParams) => call<OkResult>(METHOD.AGENT_SHARE_SESSION_KILL, params),
+  /** 转为云端暂存；需登录（游客 → `unauthorized`）。返回 `cloudState = uploading` 的分享。 */
+  convertToCloud: (params: ShareConvertToCloudParams) =>
+    call<ShareDto>(METHOD.AGENT_SHARE_CONVERT_TO_CLOUD, params),
+  /** 删除云端副本（上传中则取消）；需登录。 */
+  deleteCloudCopy: (id: string) => call<ShareDto>(METHOD.AGENT_SHARE_DELETE_CLOUD_COPY, { id } satisfies ShareIdParams),
+};
+
 // 桌面集成：在 agent 所在主机上打开 / 定位任务产物。仅当本连接的 hello 带
 // `agent.openTaskFiles` 能力时可用（见 downloads/model/actions.ts）；否则 agent 返回 Unsupported。
 const platform = {
@@ -351,5 +410,6 @@ export const agent = {
   update,
   power,
   cloudNotify,
+  share,
   platform,
 };

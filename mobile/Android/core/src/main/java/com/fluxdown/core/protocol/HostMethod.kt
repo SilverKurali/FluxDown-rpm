@@ -209,6 +209,23 @@ object HostMethod {
     const val agentLinkDispatch = "agent.link.dispatch"
     /** `LinkDeviceParams` → `LinkControlCredentialDto`：本机对已配对且可控制的主机签发设备专属控制凭据（仅发起方）。 */
     const val agentLinkControlCredential = "agent.link.controlCredential"
+    /** 快传（`agent.share.*`）：仅当主机 hello 带 `agent.share` 能力时可用；移动端暂不使用，常量只为与 `method.rs` 一一对应。 */
+    const val agentShareConfig = "agent.share.config"
+    const val agentShareSetLocalConfig = "agent.share.setLocalConfig"
+    const val agentShareCreate = "agent.share.create"
+    const val agentShareList = "agent.share.list"
+    const val agentShareUpdate = "agent.share.update"
+    const val agentShareStop = "agent.share.stop"
+    const val agentShareResolve = "agent.share.resolve"
+    const val agentShareReceive = "agent.share.receive"
+    const val agentShareReceiveRecords = "agent.share.receiveRecords"
+    const val agentShareDismissPending = "agent.share.dismissPending"
+    const val agentShareSwitchToBridge = "agent.share.switchToBridge"
+    const val agentShareDiagnostics = "agent.share.diagnostics"
+    const val agentShareLogs = "agent.share.logs"
+    const val agentShareSessionKill = "agent.share.sessionKill"
+    const val agentShareConvertToCloud = "agent.share.convertToCloud"
+    const val agentShareDeleteCloudCopy = "agent.share.deleteCloudCopy"
     const val agentPlanList = "agent.plan.list"
     const val agentOrderCreate = "agent.order.create"
     const val agentOrderGet = "agent.order.get"
@@ -290,5 +307,7 @@ object HostCapability {
     const val agentExternalCapture = "agent.externalCapture"
     /** 按连接下发：本连接可在 agent 所在主机上打开 / 定位任务产物（`agent.platform.openTask` / `revealTask`）。 */
     const val agentOpenTaskFiles = "agent.openTaskFiles"
+    /** 本主机编入了快传服务（`agent.share.*`）；移动端暂不使用。 */
+    const val agentShare = "agent.share"
     const val clientSelections = "client.selections"
 }

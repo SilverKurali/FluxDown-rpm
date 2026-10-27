@@ -17,6 +17,7 @@ import {
   SquareCheck,
   RotateCw,
   Rows3,
+  Share2,
   ShieldCheck,
   Trash2,
   Zap,
@@ -60,6 +61,7 @@ import type { DownloadTaskView } from '../model/task'
 import { anyActive, anyResumable } from '../model/groupTree'
 import type { GroupCounts } from '../model/groupTree'
 import { openChangeSegments, openChangeUrl, openGroupDetail, openRename } from '../dialogs'
+import { openSharePanel, peekSendState } from '../../share'
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
@@ -160,6 +162,19 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail, selecti
       label: t('openFolder'),
       icon: FolderOpen,
       onSelect: () => void revealTaskFile(only.taskId),
+    })
+  }
+  // 分享：未编入快传时不出现；未完成 / 文件丢失 / 远程任务 / 未登录时置灰并在说明行给出原因（多选合成一个分享）。
+  const shareState = peekSendState(views)
+  if (shareState !== 'hidden') {
+    entries.push({
+      type: 'item',
+      key: 'share',
+      label: t('sharePanelTitle'),
+      icon: Share2,
+      disabled: shareState !== 'ok',
+      ...(shareState === 'ok' ? {} : { description: t(shareState) }),
+      onSelect: () => openSharePanel(views.map((view) => view.taskId)),
     })
   }
   if (only && only.source === 'local') {

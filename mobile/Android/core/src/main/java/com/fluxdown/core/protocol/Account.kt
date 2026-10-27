@@ -590,6 +590,21 @@ object AccountRules {
         "taskStateConflict" -> "errReasonTaskStateConflict"
         "taskDeviceMismatch" -> "errReasonTaskDeviceMismatch"
         "saveDirUnavailable" -> "errReasonSaveDirUnavailable"
+        "shareUnavailable" -> "errReasonShareUnavailable"
+        "shareNotFound" -> "errReasonShareNotFound"
+        "shareExpired" -> "errReasonShareExpired"
+        "shareStopped" -> "errReasonShareStopped"
+        "shareCodeInvalid" -> "errReasonShareCodeInvalid"
+        "shareRateLimited" -> "errReasonShareRateLimited"
+        "shareTurnstileRequired" -> "errReasonShareTurnstileRequired"
+        "shareFileChanged" -> "errReasonShareFileChanged"
+        "shareSenderOffline" -> "errReasonShareSenderOffline"
+        "shareTaskNotShareable" -> "errReasonShareTaskNotShareable"
+        "shareBridgeUnavailable" -> "errReasonShareBridgeUnavailable"
+        "shareQuotaExceeded" -> "errReasonShareQuotaExceeded"
+        "shareCloudNotReady" -> "errReasonShareCloudNotReady"
+        "shareTrafficExhausted" -> "errReasonShareTrafficExhausted"
+        "shareCloudUnavailable" -> "errReasonShareCloudUnavailable"
         else -> null
     }
 
