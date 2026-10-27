@@ -40,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       updated: ${{ steps.sync.outputs.updated }}
+      rebuild: ${{ steps.gate.outputs.rebuild }}
     steps:
       # 必须用带 workflow 范围的 PAT：上游一旦改动 .github/workflows/**，
       # GITHUB_TOKEN（GitHub App 身份）的推送会被整体拒绝，且 'workflows' 不是
@@ -84,10 +85,34 @@ jobs:
           git push origin main
           echo "updated=true" >> "$GITHUB_OUTPUT"
 
+      # 自愈门：上游没动时，只有「滚动 release 里记录的构建 sha == 当前 HEAD」才跳过构建。
+      # 上一次构建失败（或 release 里的 rpm 落后）时会重新构建，不用等上游再推新提交。
+      - name: Decide whether a rebuild is required
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.sync.outputs.updated }}" = "true" ]; then
+            echo "rebuild=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          HEAD_SHA=$(git rev-parse --short HEAD)
+          BUILT_SHA=$(gh release view fork-rpm --json body --jq .body 2>/dev/null \
+            | sed -n 's/.*main@\([0-9a-f]\{7,40\}\).*/\1/p' | head -n1 || true)
+          echo "head=$HEAD_SHA built=${BUILT_SHA:-<none>}"
+          if [ "${BUILT_SHA:-}" = "$HEAD_SHA" ]; then
+            echo "rebuild=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "rebuild=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build-rpm:
     needs: sync-upstream
-    if: needs.sync-upstream.outputs.updated == 'true' || github.event_name != 'schedule'
+    if: needs.sync-upstream.outputs.rebuild == 'true' || github.event_name != 'schedule'
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
     steps:
       # 固定 checkout main 分支头：schedule 触发时 github.sha 可能仍指向同步前的提交
       - uses: actions/checkout@v4
@@ -162,9 +187,10 @@ jobs:
             gh release create fork-rpm \
               --title "FluxDown Fedora RPM（滚动更新）" --notes "$NOTES"
           gh release edit fork-rpm --title "FluxDown Fedora RPM（滚动更新）" --notes "$NOTES"
-          # 滚动 release 只保留固定名 latest 与本次版本化产物
+          # 先上传本次产物，再清理旧版本化 rpm：上传失败时旧资产还在，不会两头落空
+          gh release upload fork-rpm "$RPM" build/rpm/fluxdown-latest-linux-x64.rpm --clobber
+          NEWEST=$(basename "$RPM")
           for name in $(gh release view fork-rpm --json assets --jq '.assets[].name' \
-              | grep '\.rpm$' | grep -v '^fluxdown-latest-linux-x64.rpm$'); do
+              | grep '\.rpm$' | grep -v '^fluxdown-latest-linux-x64.rpm$' | grep -vxF "$NEWEST"); do
             gh release delete-asset fork-rpm "$name" --yes || :
           done
-          gh release upload fork-rpm "$RPM" build/rpm/fluxdown-latest-linux-x64.rpm --clobber
