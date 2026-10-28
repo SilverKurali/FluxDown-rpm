@@ -1,4 +1,4 @@
-// 快传设置（GPUI `crates/share` 的设置页内容；分类位置 = `build_pages` 里 notify 之后、扩展之前）。
+// FluxMesh设置（GPUI `crates/share` 的设置页内容；分类位置 = `build_pages` 里 notify 之后、扩展之前）。
 // 全部字段来自 `ShareLocalConfigDto`，经 `agent.share.setLocalConfig` 整体替换写回（见 `localConfig.ts`）。
 // UDP 端口 / 连接模式 / portmapper / 额外公布地址变化会让 agent 重建端点。
 
@@ -95,6 +95,13 @@ export function ShareSettings() {
             onCheckedChange={(defaultNotifyOnClaim) => void saveLocalConfig({ defaultNotifyOnClaim })}
           />
         </SettingsRow>
+        <SettingsRow title={t('shareSetDefaultSwarm')} description={t('shareSetDefaultSwarmDesc')} compact>
+          <Switch
+            checked={config.defaultSwarm !== false}
+            aria-label={t('shareSetDefaultSwarm')}
+            onCheckedChange={(on) => void saveLocalConfig({ defaultSwarm: on ? null : false })}
+          />
+        </SettingsRow>
       </SettingsSection>
 
       <SettingsSection title={t('shareSetGroupNetwork')}>
@@ -156,6 +163,13 @@ export function ShareSettings() {
       </SettingsSection>
 
       <SettingsSection title={t('shareSetGroupTransfer')}>
+        <SettingsRow title={t('shareSetAutoProvide')} description={t('shareSetAutoProvideDesc')} compact>
+          <Switch
+            checked={config.autoProvide !== false}
+            aria-label={t('shareSetAutoProvide')}
+            onCheckedChange={(on) => void saveLocalConfig({ autoProvide: on ? null : false })}
+          />
+        </SettingsRow>
         <SettingsRow title={t('shareSetRateLimit')} description={t('shareSetRateLimitDesc')}>
           <NumberField
             value={rateFromWire(config.sendRateLimitBytesPerSec)}

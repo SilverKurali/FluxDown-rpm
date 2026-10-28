@@ -432,6 +432,7 @@ impl DaemonService {
                                 name: outcome.name,
                                 source_url,
                                 error: outcome.error,
+                                plugin_id: outcome.plugin_id,
                                 items: outcome
                                     .items
                                     .into_iter()
@@ -870,7 +871,6 @@ impl DaemonService {
                     .set_enabled(&params.identity, params.enabled)
                     .await
                     .map_err(|error| invalid_argument("identity", &error.to_string()))?;
-                self.publish_plugins().await?;
                 Ok(json!({ "ok": true }))
             }
             #[cfg(feature = "plugins")]
@@ -885,7 +885,6 @@ impl DaemonService {
                         }
                         other => invalid_argument("identity", &other.to_string()),
                     })?;
-                self.publish_plugins().await?;
                 Ok(json!({ "ok": true }))
             }
             #[cfg(feature = "plugins")]
@@ -961,7 +960,6 @@ impl DaemonService {
                         }
                         other => invalid_argument("entries", &other.to_string()),
                     })?;
-                self.publish_plugins().await?;
                 Ok(json!({ "ok": true }))
             }
             #[cfg(feature = "plugins")]
@@ -982,7 +980,6 @@ impl DaemonService {
                     .await
                     .map_err(|error| internal_error(format!("{error:#}")))?;
                 let missing_components = self.plugin_missing_components(&identity).await;
-                self.publish_plugins().await?;
                 to_value(fluxdown_protocol::InstalledPlugin {
                     identity,
                     missing_components,
@@ -997,7 +994,6 @@ impl DaemonService {
                     .await
                     .map_err(|error| plugin_package_error("dirPath", &error))?;
                 let missing_components = self.plugin_missing_components(&identity).await;
-                self.publish_plugins().await?;
                 to_value(fluxdown_protocol::InstalledPlugin {
                     identity,
                     missing_components,
@@ -1007,9 +1003,6 @@ impl DaemonService {
             method::DAEMON_PLUGIN_RELOAD_DEV => {
                 let params = parse_params::<PluginIdentityParams>(params)?;
                 let result = self.plugin_manager()?.reload_dev(&params.identity).await;
-                // 失败也要广播：load_all 已刷新快照（加载失败原因 / 新 manifest），
-                // 列表必须与引擎一致。
-                self.publish_plugins().await?;
                 result.map_err(|error| plugin_package_error("identity", &error))?;
                 let missing_components = self.plugin_missing_components(&params.identity).await;
                 to_value(fluxdown_protocol::InstalledPlugin {
@@ -1024,7 +1017,6 @@ impl DaemonService {
                     .uninstall(&params.identity)
                     .await
                     .map_err(|error| invalid_argument("identity", &error.to_string()))?;
-                self.publish_plugins().await?;
                 Ok(json!({ "ok": true }))
             }
             #[cfg(feature = "plugins")]
@@ -1042,14 +1034,11 @@ impl DaemonService {
                     .filter(|entry| matches!(entry.yanked.as_str(), "vulnerable" | "malicious"))
                     .map(|entry| (entry.plugin_id.clone(), entry.version.clone()))
                     .collect();
-                let changed = self
-                    .plugin_manager()?
+                // 撤回结果由引擎经 `PluginsChanged` 广播，这里无需再发。
+                self.plugin_manager()?
                     .apply_market_revocations(&revoked)
                     .await
                     .map_err(|error| internal_error(format!("{error:#}")))?;
-                if changed {
-                    self.publish_plugins().await?;
-                }
                 to_value(
                     index
                         .entries
@@ -1068,7 +1057,6 @@ impl DaemonService {
                     .await
                     .map_err(|error| market_error(&error))?;
                 let missing_components = self.plugin_missing_components(&identity).await;
-                self.publish_plugins().await?;
                 to_value(fluxdown_protocol::InstalledPlugin {
                     identity,
                     missing_components,
@@ -1083,7 +1071,12 @@ impl DaemonService {
                 self.plugin_manager()?
                     .clear_task_resolver(&params.task_id)
                     .await
-                    .map_err(|error| internal_error(format!("{error:#}")))?;
+                    .map_err(|error| match error {
+                        fluxdown_engine::plugin::PluginError::InvalidSetting { key, message } => {
+                            invalid_argument(&key, &message)
+                        }
+                        other => internal_error(format!("{other:#}")),
+                    })?;
                 self.execute_unit(ActorOperation::ResumeTask {
                     task_id: params.task_id,
                 })
@@ -1671,6 +1664,7 @@ impl DaemonService {
                     size: item.size,
                 })
                 .collect(),
+            resolver_plugin_id: request.resolver_plugin_id,
         }
     }
 }

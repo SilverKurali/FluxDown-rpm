@@ -3,18 +3,20 @@
 use std::ops::Range;
 
 use fluxdown_protocol::{
-    RpcErrorData, ShareReceiveRecordDto, ShareReceiveRecordsPage, ShareReceiveStatus,
+    RpcErrorData, ShareProvideState, ShareReceiveRecordDto, ShareReceiveRecordsPage,
+    ShareReceiveStatus,
 };
 use fluxdown_ui_components::{
-    ButtonVariant, ControlExt as _, FluxIcon, loading_button, tabular_numbers,
+    ButtonVariant, ControlExt as _, FluxIcon, icon_button, loading_button, tabular_numbers,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, Context, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, uniform_list,
+    Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, uniform_list,
 };
-use gpui_component::{button::Button, h_flex, v_flex};
+use gpui_component::{Icon, button::Button, h_flex, v_flex};
 
 use super::{
     ShareView,
@@ -23,10 +25,10 @@ use super::{
 use crate::{
     actions::notify_error,
     errors::error_text,
-    manage_ui::{body_text, chip, clipped, empty_state, text, text_with},
+    manage_ui::{body_text, chip, clipped, empty_state, text, text_with, tooltip_builder},
     model::{
-        format_bytes, format_datetime, receive_status_key, records::ReceivedFeed,
-        refresh::GateAction,
+        format_bytes, format_datetime, provide_state_key, receive_status_key,
+        records::ReceivedFeed, refresh::GateAction,
     },
 };
 
@@ -175,8 +177,10 @@ impl ShareView {
                     (text(translator, "shareColSize"), Some(cols.size)),
                     (text(translator, "shareColStarted"), Some(cols.started)),
                     (text(translator, "shareColStatus"), Some(cols.status)),
+                    (text(translator, "shareColProvide"), Some(cols.provide)),
                 ],
                 tokens.spacing.xxs,
+                None,
                 cx,
             ))
             .child(
@@ -277,6 +281,29 @@ impl ShareView {
             Some(receive_status_tone(record.status, cx)),
             cx,
         );
+        let provide_chip = provide_state_key(record.provide_state).map(|key| {
+            let tone = (record.provide_state == ShareProvideState::Providing)
+                .then(|| active_theme(cx).extended().colors.status_completed);
+            chip(row_id("provide"), text(translator, key), tone, cx)
+        });
+        let stop_button = (record.provide_state == ShareProvideState::Providing).then(|| {
+            let label = text(translator, "shareStopProviding");
+            let icon_size = active_theme(cx).extended().icon.md;
+            let hub = self.hub.clone();
+            let record_id = record.id.clone();
+            icon_button(
+                row_id("stop-provide"),
+                label.clone(),
+                Icon::new(FluxIcon::X).size(icon_size),
+                ButtonVariant::Ghost,
+                cx,
+            )
+            .tooltip(tooltip_builder(label))
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                crate::actions::stop_providing(&hub, &record_id, window, cx);
+            })
+        });
         h_flex()
             .w_full()
             .h(row_height(cx))
@@ -303,6 +330,15 @@ impl ShareView {
                 row_id("started"),
             ))
             .child(h_flex().w(cols.status).flex_none().min_w_0().child(status))
+            .child(
+                h_flex()
+                    .w(cols.provide)
+                    .flex_none()
+                    .min_w_0()
+                    .gap(tokens.spacing.xxs)
+                    .children(provide_chip)
+                    .children(stop_button),
+            )
             .child(div().w(tokens.spacing.xxs).flex_none())
     }
 }

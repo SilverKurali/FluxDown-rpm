@@ -1,4 +1,4 @@
-// 快传对话框宿主：由 AppShell 挂一次，任意路由都能弹出分享面板 / 接收确认框。
+// FluxMesh对话框宿主：由 AppShell 挂一次，任意路由都能弹出分享面板 / 接收确认框。
 // 接收确认有两个来源：本页发起（`openShareReceive`，先 resolve）与 agent 推来的 `pendingReceive`
 // （系统打开 / 剪贴板 / NMH 到达的链接，agent 已解析，只等用户确认；永不自动建任务）。
 

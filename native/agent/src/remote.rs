@@ -124,7 +124,7 @@ pub struct RemoteTaskService {
     reconnect: Notify,
     /// 云端 SSE 里推送相关的事件（`notify.changed` / `notify.delivery` / 重连 / `resync`）转交云端推送模块。
     notify_feed: Option<crate::cloud_notify::NotifyFeed>,
-    /// 快传事件（`share.claimed` / `share.sessionKill` / `share.changed`）原样转交快传服务；未编入快传时为空。
+    /// FluxMesh事件（`share.claimed` / `share.sessionKill` / `share.changed`）原样转交FluxMesh服务；未编入FluxMesh时为空。
     share_feed: Option<tokio::sync::mpsc::UnboundedSender<Value>>,
     runtime: Mutex<Runtime>,
 }
@@ -161,7 +161,7 @@ impl RemoteTaskService {
         self
     }
 
-    /// 接入快传服务：SSE 里的快传事件转交给它处理。
+    /// 接入FluxMesh服务：SSE 里的FluxMesh事件转交给它处理。
     #[must_use]
     pub fn with_share_feed(mut self, feed: tokio::sync::mpsc::UnboundedSender<Value>) -> Self {
         self.share_feed = Some(feed);

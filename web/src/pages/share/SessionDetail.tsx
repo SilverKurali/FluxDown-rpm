@@ -14,6 +14,7 @@ const PATH_TONE: Record<SharePathKind, BadgeTone> = {
   relay: 'warning',
   cdn: 'success',
   bridge: 'neutral',
+  swarm: 'success',
   unknown: 'neutral',
 }
 

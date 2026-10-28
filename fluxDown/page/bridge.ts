@@ -76,6 +76,8 @@ export interface PageConfig {
   frameIsTop: boolean;
   /** 是否接管本页 magnet 链接点击：settings.enabled && settings.interceptMagnet && 站点 intercept !== "never"。 */
   interceptMagnet: boolean;
+  /** 跳过接管修饰键：settings.enabled 关闭时为 "off"（没有接管可跳过）。 */
+  bypassKey: "alt" | "shift" | "off";
   /** settings.sniffImages：DOM 扫描是否把图片链接算作可下载。 */
   sniffImages: boolean;
   /**

@@ -1,5 +1,5 @@
 // 详情面板标题栏 / 详情页内的「分享」按钮：未完成 / 文件丢失 / 远程任务 / 未登录时置灰并以 tooltip 说明原因；
-// 未编入快传时不渲染。
+// 未编入FluxMesh时不渲染。
 
 import { Share2 } from 'lucide-react'
 import { useT } from '../../i18n'

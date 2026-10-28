@@ -51,6 +51,7 @@ mod startup_failure;
 pub mod state;
 pub mod supervisor;
 pub mod sync;
+mod system_proxy;
 mod task_events;
 pub mod update;
 mod web_assets;

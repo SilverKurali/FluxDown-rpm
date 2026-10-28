@@ -34,9 +34,10 @@ const EVENT_KIND_WIDTH: f32 = 150.;
 pub(crate) fn path_tone(kind: SharePathKind, cx: &App) -> Option<Hsla> {
     let colors = active_theme(cx).extended().colors;
     match kind {
-        SharePathKind::DirectLan | SharePathKind::DirectWan | SharePathKind::Cdn => {
-            Some(colors.success)
-        }
+        SharePathKind::DirectLan
+        | SharePathKind::DirectWan
+        | SharePathKind::Cdn
+        | SharePathKind::Swarm => Some(colors.success),
         SharePathKind::Relay | SharePathKind::Bridge => Some(colors.warning),
         SharePathKind::Unknown => None,
     }

@@ -1,6 +1,6 @@
-//! 快传（临时文件分享）在下载页的只读投影与入口可用性判定。
+//! FluxMesh（临时文件分享）在下载页的只读投影与入口可用性判定。
 //!
-//! 下载页不依赖快传 capability crate：只从 `AgentSnapshot.share` 抽出入口门控所需的
+//! 下载页不依赖FluxMesh capability crate：只从 `AgentSnapshot.share` 抽出入口门控所需的
 //! `available` / `can_send` 与任务事实（`task_facts`），其余（我的分享、网络状态…）不进下载页状态。
 
 use std::collections::HashMap;
@@ -9,7 +9,7 @@ use fluxdown_protocol::{ShareProgressDto, ShareStateDto, ShareTaskFactsDto};
 
 use super::TaskState;
 
-/// 快传分区在下载页关心的切片。
+/// FluxMesh分区在下载页关心的切片。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ShareFacts {
     available: bool,
@@ -30,7 +30,7 @@ impl ShareFacts {
         }
     }
 
-    /// 快传在本构建可用；为 `false` 时下载页隐藏全部快传入口。
+    /// FluxMesh在本构建可用；为 `false` 时下载页隐藏全部FluxMesh入口。
     pub(crate) fn available(&self) -> bool {
         self.available
     }
@@ -44,7 +44,7 @@ impl ShareFacts {
         self.tasks.get(task_id)
     }
 
-    /// 该任务是快传接收任务（才有来源徽标 / 传输诊断页）。
+    /// 该任务是FluxMesh接收任务（才有来源徽标 / 传输诊断页）。
     pub(crate) fn is_share_receive(&self, task_id: &str) -> bool {
         self.task(task_id)
             .is_some_and(|facts| facts.is_share_receive)
@@ -76,7 +76,7 @@ pub(crate) struct ShareRow {
     pub(crate) file_missing: bool,
 }
 
-/// 宿主注入了哪些快传入口（`None` 的入口对应控件隐藏 / 无动作）。
+/// 宿主注入了哪些FluxMesh入口（`None` 的入口对应控件隐藏 / 无动作）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ShareHostCaps {
     /// 「分享」：打开分享面板。
@@ -135,7 +135,7 @@ fn row_block(row: &ShareRow) -> Option<ShareBlock> {
     }
 }
 
-/// 选区的分享入口状态。`visible` = 快传可用且宿主提供了入口；否则一律隐藏。
+/// 选区的分享入口状态。`visible` = FluxMesh可用且宿主提供了入口；否则一律隐藏。
 /// 单选给出该任务的具体原因；多选时全部任务原因一致才沿用，否则统一为
 /// [`ShareBlock::Selection`]。全部可分享但本机不能发起时为 [`ShareBlock::SignedOut`]。
 pub(crate) fn share_control(visible: bool, can_send: bool, rows: &[ShareRow]) -> ShareControl {

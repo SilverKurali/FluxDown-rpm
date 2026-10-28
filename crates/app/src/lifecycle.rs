@@ -88,7 +88,7 @@ pub fn quit_everything(cx: &mut App) {
     .detach();
 }
 
-/// 完全退出（已在某个窗口上下文里）：先让快传处理「实时分享仍有接收方没收完」（询问 / 自动转为云端暂存
+/// 完全退出（已在某个窗口上下文里）：先让FluxMesh处理「实时分享仍有接收方没收完」（询问 / 自动转为云端暂存
 /// 并等上传完成），再 [`quit_everything`]。没有需要处理的分享时与 [`quit_everything`] 完全一致。
 /// 对话框延后一帧打开：调用方往往正处在另一个确认框的 `on_ok` 里，同帧开新框会被它的关闭连带收起。
 pub fn quit_everything_in(window: &mut Window, cx: &mut App) {

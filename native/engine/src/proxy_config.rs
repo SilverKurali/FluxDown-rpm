@@ -392,10 +392,13 @@ impl ProxyConfig {
 /// 把用户/系统写的绕过列表归一化为 `reqwest::NoProxy` 能识别的写法。
 ///
 /// `NoProxy` 只支持精确域名、`.suffix` 后缀、精确 IP 与 CIDR；Windows
-/// `ProxyOverride` 和用户手填常见的 `*.corp.com`、`192.168.*`、`<local>`
-/// 不在其内，直接传入会静默失效。分隔符 `;` 统一为 `,`。
+/// `ProxyOverride`、macOS `ExceptionsList` 和用户手填常见的 `*.corp.com`、
+/// `192.168.*`、`169.254/16`（macOS 系统默认项）、`<local>` 不在其内，直接传入会
+/// 静默失效。分隔符 `;` 统一为 `,`。
 /// `<local>`（不含点的主机名直连）无法用 `NoProxy` 表达，按环回 + 私网段
 /// 近似。幂等。
+///
+/// 镜像：`native/agent/src/system_proxy.rs::normalize_no_proxy`（agent 不依赖引擎）。
 pub fn normalize_no_proxy(list: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     for raw in list.split([',', ';']) {
@@ -429,9 +432,27 @@ pub fn normalize_no_proxy(list: &str) -> String {
                 continue;
             }
         }
+        if let Some(cidr) = expand_abbreviated_ipv4_cidr(entry) {
+            out.push(cidr);
+            continue;
+        }
         out.push(entry.to_string());
     }
     out.join(",")
+}
+
+/// 缩写 IPv4 网段补足为四段：`169.254/16` → `169.254.0.0/16`。完整四段或非 IPv4 返回 `None`。
+fn expand_abbreviated_ipv4_cidr(entry: &str) -> Option<String> {
+    let (prefix, bits) = entry.split_once('/')?;
+    let mut octets: Vec<&str> = prefix.split('.').collect();
+    let valid = (1..=3).contains(&octets.len())
+        && octets.iter().all(|o| o.parse::<u8>().is_ok())
+        && bits.parse::<u8>().is_ok_and(|b| b <= 32);
+    if !valid {
+        return None;
+    }
+    octets.resize(4, "0");
+    Some(format!("{}/{bits}", octets.join(".")))
 }
 
 /// 环回地址恒直连：本机适配器 / 本地服务绝不能被转发到外部代理。
@@ -761,11 +782,32 @@ fn parse_scutil_dict(text: &str) -> HashMap<String, String> {
     map
 }
 
+/// `scutil --proxy` 的 `ExceptionsList` 数组（系统设置「忽略这些主机与域的代理设置」）。
+/// [`parse_scutil_dict`] 只取顶层标量，数组项须单独收集；缺失返回空。
+#[allow(dead_code)] // 仅 macOS 探测路径实际调用；其余平台保留供跨平台单测覆盖解析逻辑
+fn parse_scutil_exceptions(text: &str) -> Vec<String> {
+    let mut lines = text.lines().map(str::trim);
+    if !lines.any(|line| {
+        line.split_once(':').is_some_and(|(key, value)| {
+            key.trim() == "ExceptionsList" && value.trim().starts_with("<array>")
+        })
+    }) {
+        return Vec::new();
+    }
+    lines
+        .take_while(|line| *line != "}")
+        .filter_map(|line| line.split_once(':'))
+        .map(|(_, value)| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
 /// 从 `scutil --proxy` 字典中选出一个已启用的代理协议，按 socks > https >
 /// http 优先（与 [`parse_windows_proxy_server`] 一致）。`HTTPSProxy` 字段
 /// 命名的是【流量目标】协议而非代理端点自身的传输层——该端点仍然只会
 /// 应答明文 HTTP `CONNECT`，因此映射到 [`ProxyType::Http`]，理由与
 /// Windows `ProxyServer` 的 `https=` 键完全相同（见该函数文档）。
+/// 直连名单取 `ExceptionsList`（归一化后存入，同 Windows `ProxyOverride`）。
 #[allow(dead_code)] // 仅 macOS 探测路径实际调用；其余平台保留供跨平台单测覆盖解析逻辑
 fn parse_scutil_proxy_output(text: &str) -> Option<ProxyConfig> {
     let map = parse_scutil_dict(text);
@@ -795,6 +837,7 @@ fn parse_scutil_proxy_output(text: &str) -> Option<ProxyConfig> {
                 proxy_type,
                 host,
                 port,
+                no_proxy_list: normalize_no_proxy(&parse_scutil_exceptions(text).join(",")),
                 ..Default::default()
             });
         }
@@ -1887,6 +1930,11 @@ mod tests {
         assert!(local.contains("localhost") && local.contains("192.168.0.0/16"));
         // 幂等：已归一化的列表再次归一化不变。
         assert_eq!(normalize_no_proxy(&local), local);
+        // macOS `ExceptionsList` 的缩写网段补足为四段；完整网段与 IPv6 原样保留。
+        assert_eq!(
+            normalize_no_proxy("169.254/16, 10/8,192.168.0.0/16,fe80::/10"),
+            "169.254.0.0/16,10.0.0.0/8,192.168.0.0/16,fe80::/10"
+        );
     }
 
     #[test]
@@ -2841,6 +2889,24 @@ mod tests {
         assert_eq!(map.get("HTTPEnable").map(String::as_str), Some("1"));
         assert_eq!(map.get("HTTPPort").map(String::as_str), Some("1087"));
         assert_eq!(map.get("HTTPProxy").map(String::as_str), Some("127.0.0.1"));
+    }
+
+    /// Clash 一类工具写入的典型 `scutil --proxy` 输出：例外列表必须进入直连名单（此前整段被丢弃，
+    /// 系统代理模式下局域网 / `.local` 也被送进代理）；没有例外列表时名单为空。
+    #[test]
+    fn parse_scutil_proxy_output_keeps_exceptions_list_as_bypass() {
+        let text = "<dictionary> {\n  ExceptionsList : <array> {\n    0 : 127.0.0.1\n    1 : 192.168.0.0/16\n    2 : *.local\n    3 : 169.254/16\n    4 : <local>\n    5 : fe80::/10\n  }\n  ExcludeSimpleHostnames : 1\n  HTTPEnable : 1\n  HTTPPort : 7897\n  HTTPProxy : 127.0.0.1\n  SOCKSEnable : 1\n  SOCKSPort : 7897\n  SOCKSProxy : 127.0.0.1\n}\n";
+        let cfg = parse_scutil_proxy_output(text).expect("proxy should be detected");
+        assert_eq!(cfg.proxy_type, ProxyType::Socks5);
+        assert_eq!(
+            cfg.no_proxy_list,
+            "127.0.0.1,192.168.0.0/16,.local,169.254.0.0/16,localhost,127.0.0.0/8,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fe80::/10"
+        );
+
+        let bare =
+            "<dictionary> {\n  HTTPEnable : 1\n  HTTPPort : 7897\n  HTTPProxy : 127.0.0.1\n}\n";
+        let cfg = parse_scutil_proxy_output(bare).expect("proxy should be detected");
+        assert!(cfg.no_proxy_list.is_empty());
     }
 
     #[test]

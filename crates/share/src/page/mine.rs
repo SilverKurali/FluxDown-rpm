@@ -3,7 +3,9 @@
 use std::ops::Range;
 
 use fluxdown_protocol::{ShareDto, ShareStatus};
-use fluxdown_ui_components::{ButtonVariant, FluxIcon, icon_button, tabular_numbers};
+use fluxdown_ui_components::{
+    ButtonVariant, ControlExt as _, DialogIntent, FluxIcon, icon_button, tabular_numbers,
+};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -11,7 +13,10 @@ use gpui::{
     ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div, uniform_list,
 };
-use gpui_component::{Icon, WindowExt as _, h_flex, notification::Notification, v_flex};
+use gpui_component::{
+    Disableable as _, Icon, WindowExt as _, button::Button, checkbox::Checkbox, h_flex,
+    notification::Notification, v_flex,
+};
 
 use super::{
     ShareView,
@@ -25,10 +30,10 @@ use crate::{
         body_text, chip, clipped, empty_state, meta_text, text, text_with, tooltip_builder,
     },
     model::{
-        PanelTarget, claimed_summary,
+        PanelTarget, ShareAction, batch_actions, claimed_summary,
         cloud::{CloudPhase, cloud_actions, method_label},
         format_bytes, format_datetime, format_percent, is_editable, ordered_shares, share_headline,
-        share_status_key,
+        share_status_key, source_missing_badge,
     },
     qr::open_share_qr,
 };
@@ -86,27 +91,207 @@ impl ShareView {
         });
     }
 
+    /// 确认后删除分享记录（单项与批量共用；分享中的由 agent 先停止）。
+    pub(super) fn confirm_delete(
+        &mut self,
+        ids: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+        let translator = self.translator.read(cx).clone();
+        let title = text(&translator, "shareDeleteConfirmTitle");
+        let description = text_with(
+            &translator,
+            "shareDeleteConfirmBody",
+            &[("n", &ids.len().to_string())],
+        );
+        let ok = text(&translator, "shareActionDelete");
+        let cancel = text(&translator, "cancel");
+        let view = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let view = view.clone();
+            let ids = ids.clone();
+            alert
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
+                .description(description.clone())
+                .footer(fluxdown_ui_components::dialog_footer(
+                    Some(cancel.clone()),
+                    ok.clone(),
+                    DialogIntent::Destructive,
+                    cx,
+                ))
+                .on_ok(move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.run_action(ShareAction::Delete, ids.clone(), window, cx);
+                    })
+                    .is_ok()
+                })
+        });
+    }
+
     pub(super) fn stop_share(&mut self, share_id: String, window: &Window, cx: &mut Context<Self>) {
-        if !self.stopping.insert(share_id.clone()) {
+        self.run_action(ShareAction::Stop, vec![share_id], window, cx);
+    }
+
+    /// 对 `ids` 串行执行操作：防重入（`busy`）、逐个调用单项 RPC，失败汇总后提示一次。
+    pub(super) fn run_action(
+        &mut self,
+        action: ShareAction,
+        ids: Vec<String>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ids: Vec<String> = ids
+            .into_iter()
+            .filter(|id| self.busy.insert(id.clone()))
+            .collect();
+        if ids.is_empty() {
             return;
         }
         let handle = window.window_handle();
         let translator = self.translator.read(cx).clone();
-        let future = self.hub.read(cx).api().stop(&share_id);
+        let api = self.hub.read(cx).api();
+        let single = ids.len() == 1;
         cx.spawn(async move |this, cx| {
-            let result = future.await;
-            let Ok(()) = this.update(cx, |this, cx| {
-                this.stopping.remove(&share_id);
-                cx.notify();
-            }) else {
+            let mut failed = 0_usize;
+            let mut reason: Option<String> = None;
+            for id in ids {
+                let result = match action {
+                    ShareAction::Start => api.resume(&id).await.map(drop),
+                    ShareAction::Stop => api.stop(&id).await.map(drop),
+                    ShareAction::Delete => api.delete(&id).await.map(drop),
+                };
+                let Ok(()) = this.update(cx, |this, cx| {
+                    this.busy.remove(&id);
+                    cx.notify();
+                }) else {
+                    return;
+                };
+                if let Err(error) = result {
+                    failed += 1;
+                    reason.get_or_insert_with(|| error_text(&translator, &error));
+                }
+            }
+            let Some(reason) = reason else {
                 return;
             };
-            if let Err(error) = result {
-                notify_error(handle, cx, error_text(&translator, &error));
-            }
+            let message = if single {
+                reason
+            } else {
+                text_with(
+                    &translator,
+                    "shareBatchPartialFailed",
+                    &[("failed", &failed.to_string()), ("reason", &reason)],
+                )
+                .to_string()
+            };
+            notify_error(handle, cx, message);
         })
         .detach();
         cx.notify();
+    }
+
+    fn toggle_selected(&mut self, id: &str, checked: bool, cx: &mut Context<Self>) {
+        let changed = if checked {
+            self.selected.insert(id.to_owned())
+        } else {
+            self.selected.remove(id)
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// 全选 / 取消全选（已全选则清空）。
+    fn toggle_select_all(&mut self, cx: &mut Context<Self>) {
+        let all: Vec<String> = self
+            .hub
+            .read(cx)
+            .state()
+            .shares
+            .iter()
+            .map(|share| share.id.clone())
+            .collect();
+        if !all.is_empty() && self.selected.len() == all.len() {
+            self.selected.clear();
+        } else {
+            self.selected = all.into_iter().collect();
+        }
+        cx.notify();
+    }
+
+    /// 选中项里适用于 `action` 的分享 ID（列表顺序）。
+    fn batch_targets(&self, action: ShareAction, cx: &App) -> Vec<String> {
+        ordered_shares(&self.hub.read(cx).state().shares)
+            .into_iter()
+            .filter(|share| self.selected.contains(&share.id) && action.applies(share))
+            .map(|share| share.id.clone())
+            .collect()
+    }
+
+    /// 批量操作条：已选数量 + 开始 / 停止 / 删除。
+    fn render_batch_bar(&self, translator: &Translator, cx: &mut Context<Self>) -> Div {
+        let tokens = active_theme(cx).tokens().clone();
+        let stale = self.hub.read(cx).is_stale();
+        let actions = batch_actions(
+            self.hub
+                .read(cx)
+                .state()
+                .shares
+                .iter()
+                .filter(|share| self.selected.contains(&share.id)),
+        );
+        let count = text_with(
+            translator,
+            "shareSelectedCount",
+            &[("n", &self.selected.len().to_string())],
+        );
+        h_flex()
+            .w_full()
+            .flex_none()
+            .items_center()
+            .gap(tokens.spacing.sm)
+            .px(tokens.spacing.sm)
+            .child(body_text(cx).mr(tokens.spacing.sm).child(count))
+            .child(
+                Button::new("share-batch-start")
+                    .outline()
+                    .icon(FluxIcon::Play)
+                    .label(text(translator, "shareBatchStart"))
+                    .control(cx)
+                    .disabled(!actions.start || stale)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let ids = this.batch_targets(ShareAction::Start, cx);
+                        this.run_action(ShareAction::Start, ids, window, cx);
+                    })),
+            )
+            .child(
+                Button::new("share-batch-stop")
+                    .outline()
+                    .icon(FluxIcon::X)
+                    .label(text(translator, "shareBatchStop"))
+                    .control(cx)
+                    .disabled(!actions.stop || stale)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let ids = this.batch_targets(ShareAction::Stop, cx);
+                        this.run_action(ShareAction::Stop, ids, window, cx);
+                    })),
+            )
+            .child(
+                Button::new("share-batch-delete")
+                    .outline()
+                    .icon(FluxIcon::Trash2)
+                    .label(text(translator, "shareBatchDelete"))
+                    .control(cx)
+                    .disabled(!actions.delete || stale)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let ids = this.batch_targets(ShareAction::Delete, cx);
+                        this.confirm_delete(ids, window, cx);
+                    })),
+            )
     }
 
     pub(super) fn render_mine(&self, translator: &Translator, cx: &mut Context<Self>) -> Div {
@@ -122,7 +307,20 @@ impl ShareView {
             ));
         }
         let cols = columns(cx);
+        let all_selected = self.selected.len() == count;
+        let select_all = h_flex()
+            .w(cols.select)
+            .flex_none()
+            .justify_center()
+            .child(
+                Checkbox::new("share-select-all")
+                    .checked(all_selected)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_select_all(cx))),
+            )
+            .into_any_element();
+        let batch_bar = (!self.selected.is_empty()).then(|| self.render_batch_bar(translator, cx));
         container
+            .children(batch_bar)
             .child(self.header_row(
                 vec![
                     (text(translator, "shareColFile"), None),
@@ -132,7 +330,8 @@ impl ShareView {
                     (text(translator, "shareColLastAccess"), Some(cols.access)),
                     (text(translator, "shareColStatus"), Some(cols.status)),
                 ],
-                cols.actions,
+                cols.share_actions,
+                Some(select_all),
                 cx,
             ))
             .child(
@@ -178,7 +377,10 @@ impl ShareView {
         let cols = columns(cx);
         let stale = self.hub.read(cx).is_stale();
         let editable = is_editable(&share);
-        let stopping = self.stopping.contains(&share.id);
+        let busy = self.busy.contains(&share.id);
+        let selecting = !self.selected.is_empty();
+        let checked = self.selected.contains(&share.id);
+        let can_start = ShareAction::Start.applies(&share);
         let headline = or_placeholder(share_headline(&share));
         let row_id = |part: &str| {
             ElementId::NamedInteger(
@@ -225,19 +427,34 @@ impl ShareView {
             |at| SharedString::from(format_datetime(at)),
         );
         let expires = or_placeholder(&format_datetime(&share.expires_at));
-        let status = chip(
-            row_id("status"),
-            text(translator, share_status_key(share.status)),
-            share_status_tone(share.status, cx),
-            cx,
-        );
+        let (status_label, status_tone) = if source_missing_badge(&share) {
+            (
+                text(translator, "shareStatusSourceMissing"),
+                Some(colors.destructive),
+            )
+        } else {
+            (
+                text(translator, share_status_key(share.status)),
+                share_status_tone(share.status, cx),
+            )
+        };
+        let status = chip(row_id("status"), status_label, status_tone, cx);
 
         let icon_size = theme.extended().icon.md;
         let copy_label = text(translator, "shareCopyLink");
         let qr_label = text(translator, "shareShowQr");
         let stop_label = text(translator, "shareStop");
+        let start_label = text(translator, "shareActionStart");
+        let start_tip = if share.source_missing {
+            text(translator, "shareStartDisabledMissing")
+        } else {
+            start_label.clone()
+        };
+        let delete_label = text(translator, "shareActionDelete");
         let (copy_url, qr_url, qr_title) = (share.url.clone(), share.url.clone(), headline.clone());
         let (open_id, stop_id) = (share.id.clone(), share.id.clone());
+        let (start_id, delete_id, select_id) =
+            (share.id.clone(), share.id.clone(), share.id.clone());
         let hub_translator = self.translator.clone();
         let cloud = {
             let hub = self.hub.read(cx);
@@ -306,6 +523,81 @@ impl ShareView {
                 .into_any_element()
         };
 
+        // 行内第 4、5 个按钮位：有效分享 = 空位 + 停止；其余 = 开始 + 删除。
+        let (slot_start, slot_end) = if editable {
+            let stop_button = icon_button(
+                row_id("stop"),
+                stop_label.clone(),
+                Icon::new(FluxIcon::X)
+                    .size(icon_size)
+                    .text_color(colors.destructive),
+                ButtonVariant::Ghost,
+                cx,
+            )
+            .tooltip(tooltip_builder(stop_label))
+            .disabled(stale || busy)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.confirm_stop(stop_id.clone(), window, cx);
+            }))
+            .into_any_element();
+            (
+                div()
+                    .w(theme.density().control)
+                    .flex_none()
+                    .into_any_element(),
+                stop_button,
+            )
+        } else {
+            let start_button = icon_button(
+                row_id("start"),
+                start_label,
+                Icon::new(FluxIcon::Play).size(icon_size),
+                ButtonVariant::Ghost,
+                cx,
+            )
+            .tooltip(tooltip_builder(start_tip))
+            .disabled(!can_start || stale || busy)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.run_action(ShareAction::Start, vec![start_id.clone()], window, cx);
+            }))
+            .into_any_element();
+            let delete_button = icon_button(
+                row_id("delete"),
+                delete_label.clone(),
+                Icon::new(FluxIcon::Trash2)
+                    .size(icon_size)
+                    .text_color(colors.destructive),
+                ButtonVariant::Ghost,
+                cx,
+            )
+            .tooltip(tooltip_builder(delete_label))
+            .disabled(stale || busy)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.confirm_delete(vec![delete_id.clone()], window, cx);
+            }))
+            .into_any_element();
+            (start_button, delete_button)
+        };
+
+        let group = SharedString::from(format!("share-mine-group-{index}"));
+        let select_cell = h_flex()
+            .w(cols.select)
+            .flex_none()
+            .justify_center()
+            .opacity(if selecting || checked { 1. } else { 0. })
+            .group_hover(group.clone(), |style| style.opacity(1.))
+            .child(
+                Checkbox::new(row_id("select"))
+                    .checked(checked)
+                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_selected(&select_id, *checked, cx);
+                    })),
+            );
+
         let cell = |width: Pixels, value: SharedString, id: ElementId| {
             body_text(cx)
                 .w(width)
@@ -324,10 +616,12 @@ impl ShareView {
             .px(tokens.spacing.sm)
             .rounded(tokens.radius.md)
             .cursor_pointer()
+            .group(group)
             .hover(move |style| style.bg(theme.extended().colors.row_hover))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.open_share(&open_id, window, cx);
             }))
+            .child(select_cell)
             .child(
                 v_flex()
                     .flex_1()
@@ -346,7 +640,7 @@ impl ShareView {
             .child(h_flex().w(cols.status).flex_none().min_w_0().child(status))
             .child(
                 h_flex()
-                    .w(cols.actions)
+                    .w(cols.share_actions)
                     .flex_none()
                     .justify_end()
                     .gap(tokens.spacing.xxs)
@@ -383,29 +677,8 @@ impl ShareView {
                         }),
                     )
                     .child(cloud_button)
-                    .child(
-                        icon_button(
-                            row_id("stop"),
-                            stop_label.clone(),
-                            Icon::new(FluxIcon::X)
-                                .size(icon_size)
-                                .text_color(if editable {
-                                    colors.destructive
-                                } else {
-                                    colors.muted_foreground
-                                }),
-                            ButtonVariant::Ghost,
-                            cx,
-                        )
-                        .tooltip(tooltip_builder(stop_label))
-                        .disabled(!editable || stale || stopping)
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.confirm_stop(stop_id.clone(), window, cx);
-                            },
-                        )),
-                    ),
+                    .child(slot_start)
+                    .child(slot_end),
             )
     }
 }

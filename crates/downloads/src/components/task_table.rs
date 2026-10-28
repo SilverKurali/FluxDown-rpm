@@ -441,7 +441,7 @@ pub(crate) struct TaskMenuFacts {
     pub(crate) is_bt: bool,
     /// `url` 是 http(s) / ftp 链接（引擎 `change_task_url` 仅接受这些源）。
     pub(crate) url_replaceable: bool,
-    /// 失败态且错误消息带插件重试前缀。
+    /// 失败态、错误消息带插件重试前缀且非任务组成员（组成员的原始链接是分享页，daemon 拒绝忽略重试）。
     pub(crate) is_plugin_retry_error: bool,
     /// 已完成但产物已不在下载目录（文件跟踪扫描结果）。
     pub(crate) file_missing: bool,
@@ -449,13 +449,14 @@ pub(crate) struct TaskMenuFacts {
     pub(crate) is_seeding: bool,
     /// 已完成且做种已停止 / 达标（seeding_status 2..=7）、产物仍在：可继续（恢复做种）。
     pub(crate) can_resume_seeding: bool,
-    /// 快传「分享」入口对本构建 / 宿主可见（快传可用且宿主提供了入口）；选区内一致。
+    /// FluxMesh「分享」入口对本构建 / 宿主可见（FluxMesh可用且宿主提供了入口）；选区内一致。
     pub(crate) share_visible: bool,
     /// 本机当前可发起分享（已登录，或云端允许游客发起）。
     pub(crate) share_can_send: bool,
 }
 
-/// 引擎/daemon 插件系统失败任务的错误消息前缀。
+/// 可「忽略插件重试」的插件失败错误消息前缀（引擎 `handle_resolve_ready`；二段解析任务
+/// 失败用 `[解析插件]`，不匹配本前缀，daemon 也拒绝对其忽略插件）。
 pub(crate) const PLUGIN_ERROR_PREFIX: &str = "[插件]";
 
 /// `url` 以任一 scheme 前缀开头（ASCII 大小写不敏感，不分配）。
@@ -498,6 +499,11 @@ impl TaskMenuFacts {
         self.is_local && self.is_bt && self.state == TaskState::Completed && !self.file_missing
     }
 
+    /// 本地已完成且产物仍在下载目录：「打开文件」「复制文件」的共同前提。
+    pub(crate) fn has_product_on_disk(&self) -> bool {
+        self.is_local && self.state == TaskState::Completed && !self.file_missing
+    }
+
     /// 「分享」判定用的任务事实。
     pub(crate) fn share_row(&self) -> ShareRow {
         ShareRow {
@@ -520,6 +526,7 @@ pub(crate) fn task_menu_facts_for(store: &TaskStore, key: &RowKey) -> Option<Tas
         is_bt: is_bt_url(&row.url),
         url_replaceable: is_replaceable_url(&row.url),
         is_plugin_retry_error: row.state == TaskState::Failed
+            && row.group_id.is_empty()
             && row.error_message.starts_with(PLUGIN_ERROR_PREFIX),
         file_missing: row.is_file_missing(),
         is_seeding: row.is_seeding(),
@@ -539,6 +546,8 @@ pub(crate) enum MenuEntry {
     CancelBoost,
     OpenFile,
     OpenFolder,
+    /// 把产物以文件写入系统剪贴板（条件同 [`MenuEntry::OpenFile`]，可多选）。
+    CopyFile,
     Rename,
     /// 更换下载链接（单选；条件见 [`TaskMenuFacts::can_change_url`]）。
     ChangeUrl,
@@ -603,14 +612,15 @@ pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> 
             });
         }
     }
-    if selection
-        .iter()
-        .all(|task| task.is_local && task.state == TaskState::Completed && !task.file_missing)
-    {
+    if selection.iter().all(TaskMenuFacts::has_product_on_disk) {
         items.push(MenuEntry::OpenFile);
     }
     if selection.iter().all(|task| task.is_local) {
         items.push(MenuEntry::OpenFolder);
+    }
+    // 产物都在磁盘上才能整体放进剪贴板（agent 遇到任一缺失即整体拒绝）。
+    if selection.iter().all(TaskMenuFacts::has_product_on_disk) {
+        items.push(MenuEntry::CopyFile);
     }
     if let [only] = selection
         && only.is_local
@@ -2340,7 +2350,7 @@ impl DownloadTableDelegate {
                 .child(self.status_label(task))
                 .into_any_element()
         };
-        // 快传接收任务：状态文案旁挂来源角标（只对本机任务）；角标与文案各自省略，不撑宽列。
+        // FluxMesh接收任务：状态文案旁挂来源角标（只对本机任务）；角标与文案各自省略，不撑宽列。
         let share_active = matches!(
             task.state,
             TaskState::Pending | TaskState::Downloading | TaskState::Paused
@@ -2790,6 +2800,11 @@ impl DownloadTableDelegate {
                 FluxIcon::FolderOpen,
                 Box::new(crate::actions::RevealSelected),
             ),
+            MenuEntry::CopyFile => menu.menu_with_icon(
+                self.strings.copy_file.clone(),
+                FluxIcon::File,
+                Box::new(crate::actions::CopySelectedFiles),
+            ),
             MenuEntry::Rename => menu.menu_with_icon(
                 self.strings.rename_task.clone(),
                 FluxIcon::Pen,
@@ -2902,13 +2917,17 @@ impl DownloadTableDelegate {
             .filter(|key| key.is_local())
             .map(|key| key.task_id().to_owned())
             .collect();
+        // 按菜单构建时的稳定键（插件 identity + 命令 id）分派：菜单打开期间插件列表可能变化，
+        // 下标会指向别的命令。
+        let identity = command.identity.clone();
+        let command_id = command.command.clone();
         menu.item(
             PopupMenuItem::new(command.title.clone())
                 .icon(FluxIcon::Sparkles)
                 .on_click(move |_, window, cx| {
                     let task_ids = task_ids.clone();
                     let Ok(()) = host.update(cx, |view, cx| {
-                        view.run_plugin_command(index, task_ids, window, cx);
+                        view.run_plugin_command(&identity, &command_id, task_ids, window, cx);
                     }) else {
                         // 视图已释放，结束这次回调。
                         return;
@@ -5767,6 +5786,7 @@ mod context_menu_tests {
                 MenuEntry::Boost,
                 MenuEntry::OpenFile,
                 MenuEntry::OpenFolder,
+                MenuEntry::CopyFile,
                 MenuEntry::Rename,
                 MenuEntry::Redownload,
                 MenuEntry::CopyUrl,
@@ -5823,6 +5843,33 @@ mod context_menu_tests {
     }
 
     #[test]
+    fn plugin_retry_fact_excludes_task_group_members() {
+        use fluxdown_protocol::TaskDto;
+
+        use super::task_menu_facts_for;
+        use crate::model::{DownloadTaskView, RowKey, TaskStore};
+
+        let store = TaskStore::default();
+        for (id, group) in [("solo", ""), ("member", "g1")] {
+            let dto: TaskDto = serde_json::from_value(serde_json::json!({
+                "taskId": id, "url": "https://example.com/f", "fileName": "f.zip",
+                "saveDir": "/tmp", "status": 4, "downloadedBytes": 0, "totalBytes": 10,
+                "errorMessage": "[插件] yt: boom", "createdAt": "1", "proxyUrl": "",
+                "queueId": "", "checksum": "", "groupId": group
+            }))
+            .expect("task");
+            store.push_local(DownloadTaskView::local(&dto, None, false));
+        }
+        let fact = |id: &str| {
+            task_menu_facts_for(&store, &RowKey::Local(id.to_owned()))
+                .expect("facts")
+                .is_plugin_retry_error
+        };
+        assert!(fact("solo"));
+        assert!(!fact("member"));
+    }
+
+    #[test]
     fn boost_toggles_label_by_boosted_state() {
         let mut boosted = task(true, TaskState::Downloading);
         boosted.boosted = true;
@@ -5842,18 +5889,24 @@ mod context_menu_tests {
     }
 
     #[test]
-    fn missing_file_hides_open_file_but_keeps_folder_and_redownload() {
+    fn missing_file_hides_open_and_copy_file_but_keeps_folder_and_redownload() {
         let mut missing = task(true, TaskState::Completed);
         missing.file_missing = true;
         let items = context_menu_items(&[missing]);
         assert!(!items.contains(&MenuEntry::OpenFile));
+        assert!(!items.contains(&MenuEntry::CopyFile));
         assert!(items.contains(&MenuEntry::OpenFolder));
         assert!(items.contains(&MenuEntry::Redownload));
-        // 与可打开的任务混选：「打开文件」要求全体成立。
-        assert!(
-            !context_menu_items(&[task(true, TaskState::Completed), missing])
-                .contains(&MenuEntry::OpenFile)
-        );
+        // 与可打开的任务混选：「打开文件」「复制文件」要求全体成立。
+        let mixed = context_menu_items(&[task(true, TaskState::Completed), missing]);
+        assert!(!mixed.contains(&MenuEntry::OpenFile));
+        assert!(!mixed.contains(&MenuEntry::CopyFile));
+        // 多个产物都在：一次复制全部。
+        let both = [
+            task(true, TaskState::Completed),
+            task(true, TaskState::Completed),
+        ];
+        assert!(context_menu_items(&both).contains(&MenuEntry::CopyFile));
     }
 
     #[test]

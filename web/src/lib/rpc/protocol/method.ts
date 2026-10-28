@@ -206,9 +206,11 @@ export const METHOD = {
   AGENT_PLUGIN_FAVORITE_LIST: 'agent.pluginFavorite.list',
   AGENT_PLUGIN_FAVORITE_SET: 'agent.pluginFavorite.set',
 
-  // 以下方法读写宿主机路径 / 桌面集成，Web 不使用。
+  // 以下方法读写宿主机路径 / 桌面集成，按连接能力门控（多数 Web 不使用）。
   AGENT_PLATFORM_OPEN_TASK: 'agent.platform.openTask',
   AGENT_PLATFORM_REVEAL_TASK: 'agent.platform.revealTask',
+  /** 把任务产物以文件写入 agent 所在主机的系统剪贴板；仅当 hello 带 `agent.copyTaskFiles` 能力时可用。 */
+  AGENT_PLATFORM_COPY_TASK_FILES: 'agent.platform.copyTaskFiles',
   AGENT_PLATFORM_OPEN_PATH: 'agent.platform.openPath',
   AGENT_PLATFORM_INTEGRATION_GET: 'agent.platform.integrationGet',
   AGENT_PLATFORM_SET_AUTOSTART: 'agent.platform.setAutostart',
@@ -247,13 +249,17 @@ export const METHOD = {
   AGENT_CLOUD_NOTIFY_DELIVERIES: 'agent.cloudNotify.deliveries',
   AGENT_CLOUD_NOTIFY_SEND_EMAIL_CODE: 'agent.cloudNotify.sendEmailCode',
   AGENT_CLOUD_NOTIFY_VERIFY_EMAIL: 'agent.cloudNotify.verifyEmail',
-  /** 快传（临时文件分享）：仅当 hello 带 `agent.share` 能力时可用。 */
+  /** FluxMesh（临时文件分享）：仅当 hello 带 `agent.share` 能力时可用。 */
   AGENT_SHARE_CONFIG: 'agent.share.config',
   AGENT_SHARE_SET_LOCAL_CONFIG: 'agent.share.setLocalConfig',
   AGENT_SHARE_CREATE: 'agent.share.create',
   AGENT_SHARE_LIST: 'agent.share.list',
   AGENT_SHARE_UPDATE: 'agent.share.update',
   AGENT_SHARE_STOP: 'agent.share.stop',
+  /** 重新开始已停止 / 已过期的分享（同 id、同链接，重新分配取件码）。 */
+  AGENT_SHARE_RESUME: 'agent.share.resume',
+  /** 删除分享记录（分享中的先停止）。 */
+  AGENT_SHARE_DELETE: 'agent.share.delete',
   AGENT_SHARE_RESOLVE: 'agent.share.resolve',
   AGENT_SHARE_RECEIVE: 'agent.share.receive',
   AGENT_SHARE_DISMISS_PENDING: 'agent.share.dismissPending',
@@ -267,6 +273,7 @@ export const METHOD = {
   AGENT_SHARE_CONVERT_TO_CLOUD: 'agent.share.convertToCloud',
   /** 删除云端副本（上传中则先取消）；分享回到实时模式。 */
   AGENT_SHARE_DELETE_CLOUD_COPY: 'agent.share.deleteCloudCopy',
+  AGENT_SHARE_STOP_PROVIDING: 'agent.share.stopProviding',
 
   /** 服务端推送通知，params 为 EventFrame。 */
   SERVICE_EVENT: 'service.event',
@@ -294,7 +301,12 @@ export const CAPABILITY_AGENT_DEVICE_LINK = 'agent.deviceLink';
 export const CAPABILITY_AGENT_EXTERNAL_CAPTURE = 'agent.externalCapture';
 /** 按连接下发：本连接可在 agent 所在主机上打开 / 定位任务产物（`agent.platform.openTask` / `revealTask`）。 */
 export const CAPABILITY_AGENT_OPEN_TASK_FILES = 'agent.openTaskFiles';
-/** 本 agent 编入了快传服务（`agent.share.*`）；条件能力，未编入快传的构建不下发。 */
+/**
+ * 按连接下发：本连接可把任务产物写入 agent 所在主机的系统剪贴板（`agent.platform.copyTaskFiles`）。
+ * 只在本机来源 + 桌面构建 + 有图形会话时下发；远程 / NAS 连接没有（浏览器无法把文件写进系统剪贴板）。
+ */
+export const CAPABILITY_AGENT_COPY_TASK_FILES = 'agent.copyTaskFiles';
+/** 本 agent 编入了FluxMesh服务（`agent.share.*`）；条件能力，未编入FluxMesh的构建不下发。 */
 export const CAPABILITY_AGENT_SHARE = 'agent.share';
 /** 客户端能力：可处理交互选择（HLS/BT/变体），放入握手 capabilities。 */
 export const CAPABILITY_CLIENT_SELECTIONS = 'client.selections';

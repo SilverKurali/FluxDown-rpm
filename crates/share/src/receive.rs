@@ -746,7 +746,13 @@ impl ShareReceiveView {
                                     .rounded(tokens.radius.full)
                                     .bg(source_color(line.tone, cx)),
                             )
-                            .child(text(translator, line.key))
+                            .child(match line.count {
+                                Some(count) => SharedString::from(
+                                    translator
+                                        .text_with(line.key, &[("count", &count.to_string())]),
+                                ),
+                                None => text(translator, line.key),
+                            })
                     })),
             )
     }

@@ -1,4 +1,4 @@
-//! 快传（临时文件分享）的 agent RPC / 事件 wire 契约（`agent.share.*`、
+//! FluxMesh（临时文件分享）的 agent RPC / 事件 wire 契约（`agent.share.*`、
 //! `AgentEvent::ShareChanged` / `ShareProgress`、`AgentSnapshot.share`）。
 //!
 //! 本模块只定义 UI 与 agent 之间的纯 serde DTO：不依赖 `fluxdown_share`（agent 侧负责转换），
@@ -35,6 +35,8 @@ pub enum SharePathKind {
     Cdn,
     /// 经 share-gateway 实时桥接（分享方在线、无副本）。
     Bridge,
+    /// 分享方未连接，块全部来自持有同一文件的其他设备（共享）。
+    Swarm,
     /// 尚未选定路径。
     #[default]
     #[serde(other)]
@@ -202,6 +204,23 @@ pub enum ShareReceiveStatus {
     Failed,
 }
 
+/// 一次接收的共享（共享提供）状态。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ShareProvideState {
+    /// 正在共享。
+    Providing,
+    /// 原分享已结束或文件已变动，共享自然结束。
+    Ended,
+    /// 用户停止了共享。
+    Stopped,
+    /// 未共享。
+    #[default]
+    #[serde(other)]
+    Off,
+}
+
 // ───────────────────────── 分享 ─────────────────────────
 
 /// 分享里的单个文件。
@@ -285,6 +304,12 @@ pub struct ShareDto {
     /// 云端暂存上传进度；没有进行中的上传时为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload: Option<ShareUploadDto>,
+    /// 本机源文件已缺失或已被修改，实时分享无法提供，也无法重新开始；此时只能删除该分享。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_missing: bool,
+    /// 该分享是否加入共享（其他持有同一文件的设备可互相取块）。
+    #[serde(default)]
+    pub swarm: bool,
 }
 
 /// 一个有效期档位。
@@ -339,7 +364,7 @@ pub struct ShareRelayDto {
     pub region: String,
 }
 
-/// 本机快传设置（客户端「快传」设置页；与 FluxCloud 策略无关）。`agent.share.setLocalConfig`
+/// 本机FluxMesh设置（客户端「FluxMesh」设置页；与 FluxCloud 策略无关）。`agent.share.setLocalConfig`
 /// 整体替换它，UI 以快照里的当前值为底稿修改后整体提交。
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -378,6 +403,12 @@ pub struct ShareLocalConfigDto {
     /// 新建分享的默认「领取通知」。
     #[serde(default)]
     pub default_notify_on_claim: bool,
+    /// 新建分享默认加入共享；`None` = 开。
+    #[serde(default)]
+    pub default_swarm: Option<bool>,
+    /// 接收的文件参与共享（共享）；`None` = 开。
+    #[serde(default)]
+    pub auto_provide: Option<bool>,
 }
 
 /// 本机端点网络状态（展示与上报 FluxCloud 的快照的同源摘要；端点未绑定时多为空）。
@@ -419,8 +450,8 @@ pub struct ShareHomeRelayDto {
     pub connected: bool,
 }
 
-/// 一个下载任务上的快传事实（任务行来源徽标 / 「切换桥接」 / 传输诊断页的入口）。
-/// 只有快传接收任务（`isShareReceive`）才有条目；键为 daemon 任务 ID。
+/// 一个下载任务上的FluxMesh事实（任务行来源徽标 / 「切换桥接」 / 传输诊断页的入口）。
+/// 只有FluxMesh接收任务（`isShareReceive`）才有条目；键为 daemon 任务 ID。
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
@@ -441,6 +472,9 @@ pub struct ShareTaskFactsDto {
     /// 打洞超过 `policy.holePunchHintSecs` 仍走中继，UI 据此显示「切换桥接」提示。
     #[serde(default)]
     pub relay_stuck: bool,
+    /// 当前在线、可共享取块的其他设备数。
+    #[serde(default)]
+    pub swarm_peers: u32,
 }
 
 /// 创建分享时正在做块哈希的任务，`agent.share.create` 返回前出现，完成后移除。
@@ -476,18 +510,21 @@ pub struct ShareReceiveRecordDto {
     pub started_at: String,
     #[serde(default)]
     pub status: ShareReceiveStatus,
+    /// 共享（共享提供）状态；由 agent 在下发时叠加，旧载荷缺省为 `off`。
+    #[serde(default)]
+    pub provide_state: ShareProvideState,
 }
 
-/// 快传分区的完整状态（`AgentSnapshot.share`，`AgentEvent::ShareChanged` 整体替换）。
+/// FluxMesh分区的完整状态（`AgentSnapshot.share`，`AgentEvent::ShareChanged` 整体替换）。
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShareStateDto {
-    /// 云端策略当前允许快传（`/share/config.enabled`）。
+    /// 云端策略当前允许FluxMesh（`/share/config.enabled`）。
     #[serde(default)]
     pub enabled: bool,
-    /// 本构建已编入快传、agent 的快传服务在运行，且云端允许使用（可接收）。
-    /// 为 `false` 时 UI 隐藏全部快传入口。
+    /// 本构建已编入FluxMesh、agent 的FluxMesh服务在运行，且云端允许使用（可接收）。
+    /// 为 `false` 时 UI 隐藏全部FluxMesh入口。
     #[serde(default)]
     pub available: bool,
     /// 本机当前可发起分享（已登录，或云端允许游客发起）。
@@ -502,7 +539,7 @@ pub struct ShareStateDto {
     pub shares: Vec<ShareDto>,
     #[serde(default)]
     pub net_status: ShareNetStatusDto,
-    /// daemon 任务 ID → 快传事实（只含快传接收任务）。
+    /// daemon 任务 ID → FluxMesh事实（只含FluxMesh接收任务）。
     #[serde(default)]
     pub task_facts: BTreeMap<String, ShareTaskFactsDto>,
     /// 最近的接收记录（新的在前，至多 [`SHARE_STATE_RECEIVE_RECORDS`] 条）。
@@ -581,6 +618,9 @@ pub struct ShareCreateParams {
     /// 缺省取 [`ShareLocalConfigDto::default_notify_on_claim`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_on_claim: Option<bool>,
+    /// 缺省取 [`ShareLocalConfigDto::default_swarm`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<bool>,
 }
 
 /// `agent.share.update` 参数：改设置不新建分享，链接与取件码不变；缺省字段不改。
@@ -596,6 +636,9 @@ pub struct ShareUpdateParams {
     pub max_claims: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_on_claim: Option<bool>,
+    /// 是否加入共享。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<bool>,
 }
 
 /// `agent.share.stop` 参数。
@@ -604,6 +647,14 @@ pub struct ShareUpdateParams {
 #[serde(rename_all = "camelCase")]
 pub struct ShareIdParams {
     pub id: String,
+}
+
+/// `agent.share.stopProviding` 参数。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ShareStopProvidingParams {
+    pub record_id: String,
 }
 
 /// `agent.share.convertToCloud` 参数：把一个实时分享转为云端暂存并开始上传。
@@ -643,6 +694,9 @@ pub struct ShareSourcesDto {
     /// 可经实时桥接取（云端允许该身份走桥接）。
     #[serde(default)]
     pub bridge: bool,
+    /// 当前在线、持有同一文件的其他设备数（共享）。
+    #[serde(default)]
+    pub swarm_peers: u32,
 }
 
 /// `agent.share.resolve` 结果：接收确认框的预览。
@@ -844,6 +898,9 @@ pub struct ShareSessionBytesDto {
     /// 经 share-gateway 桥接取得并通过校验的字节。
     #[serde(default)]
     pub bridge: u64,
+    /// 从共享对端取回并通过校验的字节。
+    #[serde(default)]
+    pub peer: u64,
 }
 
 /// 单条路径的统计（镜像 `fluxdown_share::PathSummary`）。

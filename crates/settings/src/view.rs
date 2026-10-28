@@ -74,7 +74,7 @@ pub(crate) enum ReferralPage {
 pub struct SettingsContentSlots {
     pub account: Option<AnyView>,
     pub extensions: Option<AnyView>,
-    /// 「快传」页（通知之后、扩展之前）；内容由快传 capability 提供。
+    /// 「FluxMesh」页（通知之后、扩展之前）；内容由FluxMesh capability 提供。
     pub share: Option<AnyView>,
     /// 「推介有奖」页（账户之后）；不可见时整页不出现在侧栏、搜索与直达里。
     pub referral: Option<VisibleSlot>,

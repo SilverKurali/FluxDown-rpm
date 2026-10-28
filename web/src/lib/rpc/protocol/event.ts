@@ -79,7 +79,7 @@ export interface AgentSnapshot {
   power: PowerStatusDto;
   /** 旧快照缺失时视为默认（上报关、无概览）。 */
   cloudNotify?: CloudNotifyStateDto;
-  /** 快传分区；旧快照缺失时视为 `available: false`。 */
+  /** FluxMesh分区；旧快照缺失时视为 `available: false`。 */
   share?: ShareStateDto;
 }
 
@@ -127,7 +127,7 @@ export type DaemonEvent =
   | { type: 'taskNotice'; data: TaskNoticeDto }
   /** 可移植插件视图的增量帧：不改变快照；客户端按 `session` 过滤，忽略未知会话。 */
   | { type: 'pluginViewFrame'; data: PluginViewFrameDto }
-  /** 可移植视图会话已结束（`reason`：`closed` / `expired` / `pluginUnloaded`）；不改变快照。 */
+  /** 可移植视图会话已结束（`reason`：`closed` / `expired` / `pluginUnloaded` / `requested`）；不改变快照。 */
   | { type: 'pluginViewClosed'; data: { session: string; reason: string } }
   /** 插件经 `flux.ui.toast` 请求的提示；不改变快照。 */
   | { type: 'pluginToast'; data: { identity: string; level: string; text: string } };
@@ -161,9 +161,9 @@ export type AgentEvent =
   | { type: 'captureTasksResumed'; data: string[] }
   /** 云端推送状态整体替换。 */
   | { type: 'cloudNotifyChanged'; data: CloudNotifyStateDto }
-  /** 快传分区整体替换。 */
+  /** FluxMesh分区整体替换。 */
   | { type: 'shareChanged'; data: ShareStateDto }
-  /** 单个快传会话的进度 / 路径刷新（同 sessionId 的后帧完整取代前帧）。 */
+  /** 单个FluxMesh会话的进度 / 路径刷新（同 sessionId 的后帧完整取代前帧）。 */
   | { type: 'shareProgress'; data: ShareProgressDto };
 
 /** `service.event` 事件主体（`service` + `event` 相邻标记）。 */

@@ -55,7 +55,7 @@ pub fn normalize_capture_url(value: &str) -> String {
     percent_decode(rest)
 }
 
-/// 快传分享链接的解析结果。
+/// FluxMesh分享链接的解析结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShareRef {
     /// 分享 slug：非空 `[A-Za-z0-9_-]+`。
@@ -65,7 +65,7 @@ pub struct ShareRef {
 /// 官网分享页所在主机（小写）。
 const SHARE_HOSTS: [&str; 2] = ["fluxdown.com", "fluxdown.zerx.dev"];
 
-/// 解析快传分享链接：`fluxdown://share/<slug>` 或 `https://<官网主机>/s/<slug>`
+/// 解析FluxMesh分享链接：`fluxdown://share/<slug>` 或 `https://<官网主机>/s/<slug>`
 /// （scheme / 主机大小写不敏感，允许首尾空白、末尾 `/`、查询串与片段）；
 /// 其他输入（含 slug 为空或含非法字符）为 `None`。
 ///
@@ -103,7 +103,7 @@ pub fn share_ref(value: &str) -> Option<ShareRef> {
     })
 }
 
-/// `value` 是否为快传分享链接（见 [`share_ref`]）。
+/// `value` 是否为FluxMesh分享链接（见 [`share_ref`]）。
 #[must_use]
 pub fn is_share_link(value: &str) -> bool {
     share_ref(value).is_some()

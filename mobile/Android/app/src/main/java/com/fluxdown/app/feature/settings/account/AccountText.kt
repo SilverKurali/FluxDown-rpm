@@ -73,6 +73,8 @@ internal object AccountText {
         "errReasonShareCloudNotReady" to R.string.errReasonShareCloudNotReady,
         "errReasonShareTrafficExhausted" to R.string.errReasonShareTrafficExhausted,
         "errReasonShareCloudUnavailable" to R.string.errReasonShareCloudUnavailable,
+        "errReasonShareOwnShare" to R.string.errReasonShareOwnShare,
+        "errReasonShareSourceMissing" to R.string.errReasonShareSourceMissing,
         "accountErrorValidation" to R.string.accountErrorValidation,
         "localPairingAddressInvalid" to R.string.localPairingAddressInvalid,
         "localServiceDisconnected" to R.string.localServiceDisconnected,

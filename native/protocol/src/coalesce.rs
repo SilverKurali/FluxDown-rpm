@@ -20,7 +20,7 @@ enum Key {
     Runtime(String),
     Segments(String),
     RuntimeStats,
-    /// 单个快传会话的进度 / 路径刷新（后帧完整取代前帧）。
+    /// 单个FluxMesh会话的进度 / 路径刷新（后帧完整取代前帧）。
     ShareSession(String),
     Queue,
 }

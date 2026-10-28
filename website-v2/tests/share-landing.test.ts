@@ -90,6 +90,8 @@ describe("manifest and grant validation", () => {
     expect(parseManifest({ ...raw, turnstileSiteKey: "0x4AAA" })?.turnstileSiteKey).toBe("0x4AAA");
     expect(parseManifest({ ...raw, turnstileSiteKey: null })?.turnstileSiteKey).toBeUndefined();
     expect(parseManifest({ ...raw, turnstileSiteKey: "" })?.turnstileSiteKey).toBeUndefined();
+    expect(parseManifest({ ...raw, pickupCode: "042917" })?.pickupCode).toBe("042917");
+    expect(parseManifest({ ...raw, pickupCode: null })?.pickupCode).toBeUndefined();
   });
 
   test("malformed manifests are rejected", () => {
@@ -97,6 +99,7 @@ describe("manifest and grant validation", () => {
       null, [], "x", { ...raw, cloudReady: "yes" }, { ...raw, files: "nope" }, { ...raw, totalBytes: -1 },
       { ...raw, expiresAt: "tomorrow" }, { ...raw, files: [{ index: -1, name: "a", size: 1 }] },
       { ...raw, files: [{ index: 0, name: 1, size: 1 }] }, { ...raw, turnstileSiteKey: 5 },
+      { ...raw, pickupCode: 42917 }, { ...raw, pickupCode: "12345" }, { ...raw, pickupCode: "12a456" },
       { ...raw, title: undefined },
     ]) {
       expect(parseManifest(bad)).toBeNull();

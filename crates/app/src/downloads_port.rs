@@ -538,6 +538,11 @@ impl AgentDownloadsPort {
                     method::AGENT_PLATFORM_REVEAL_TASK,
                     json!({ "taskId": task_id }),
                 ),
+                // 剪贴板不涉及前台授权，Windows 同样由常驻 agent 写入（进程常驻，X11 剪贴板内容不丢）。
+                DownloadsCommand::CopyTaskFiles { task_ids } => (
+                    method::AGENT_PLATFORM_COPY_TASK_FILES,
+                    serialize(fluxdown_protocol::PlatformCopyTaskFilesParams { task_ids })?,
+                ),
                 DownloadsCommand::RescanFiles => (method::DAEMON_TASK_RESCAN, json!({})),
                 DownloadsCommand::SubmitTorrentFile {
                     path,

@@ -25,7 +25,7 @@ function TaskDetail({ view, mode }: { view: DownloadTaskView; mode: 'docked' | '
   const isBt = view.protocol === 'bt'
   const pluginTabs = usePluginDetailTabs()
   const pluginTab = pluginTabs.find((item) => item.value === tab)
-  // 插件 tab 随插件卸载 / 禁用消失时回到常规；seeding 仅 BT 任务有；传输诊断仅快传接收任务有。
+  // 插件 tab 随插件卸载 / 禁用消失时回到常规；seeding 仅 BT 任务有；传输诊断仅FluxMesh接收任务有。
   const active: DetailTab =
     (tab === 'seeding' && !isBt) || (tab === 'shareDiag' && !hasShareDiagnostics) || (tab.startsWith('plugin:') && !pluginTab) ? 'general' : tab
   const speedHistory = useSpeedHistory(view.taskId, view.state === 'downloading', active === 'speed')

@@ -105,6 +105,12 @@ impl ExtensionsView {
         .detach();
     }
 
+    /// 站点默认被外部或本视图改动（`PluginsChanged` / 快照替换 / 写操作结束）：
+    /// 下次渲染重新读取；读取在途时待其结束后再读一次，避免旧结果覆盖。
+    pub(crate) fn invalidate_site_defaults(&mut self) {
+        self.plugins.site_defaults.requested = false;
+    }
+
     /// `identity = None` 移除该站点记录；`Some` 确认 / 更改默认插件。无论成败都重新读取。
     fn set_site_default(
         &mut self,
@@ -130,7 +136,9 @@ impl ExtensionsView {
                         translator.text_with("pluginSiteDefaultSaveFailed", &[("error", &detail)]);
                     this.toast_error(message, window, cx);
                 }
-                this.load_site_defaults(window, cx);
+                // 守护进程写入后会广播 `PluginsChanged`；失败时没有事件，因此无论成败都标记过期，
+                // 由渲染入口串行重读（读取在途时不会并发再发一次）。
+                this.invalidate_site_defaults();
                 cx.notify();
             }) else {
                 // 视图或窗口已释放，停止回写异步结果。

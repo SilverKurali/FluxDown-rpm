@@ -108,6 +108,7 @@ body {
 }
 .pp-link:hover:not(:disabled) { color: var(--fd-accent); }
 .pp-link:disabled { opacity: 0.5; cursor: wait; }
+.pp-bypass-hint { font-size: 11px; color: var(--fd-text-secondary); cursor: help; white-space: nowrap; }
 .pp-stats { display: inline-flex; align-items: center; gap: 4px; }
 .pp-stat-ok { color: var(--fd-success); }
 .pp-stat-fail { color: var(--fd-danger); }

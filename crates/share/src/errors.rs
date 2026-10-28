@@ -1,4 +1,4 @@
-//! RPC 错误 → 文案键：优先按 `reason`（`errReasonShare*`），缺失或非快传原因时给通用失败提示。
+//! RPC 错误 → 文案键：优先按 `reason`（`errReasonShare*`），缺失或非FluxMesh原因时给通用失败提示。
 
 use fluxdown_protocol::{ErrorReason, RpcErrorData};
 use fluxdown_ui_i18n::Translator;
@@ -31,6 +31,8 @@ pub fn reason_key(reason: Option<ErrorReason>) -> &'static str {
         Some(ErrorReason::ShareCloudNotReady) => "errReasonShareCloudNotReady",
         Some(ErrorReason::ShareTrafficExhausted) => "errReasonShareTrafficExhausted",
         Some(ErrorReason::ShareCloudUnavailable) => "errReasonShareCloudUnavailable",
+        Some(ErrorReason::ShareOwnShare) => "errReasonShareOwnShare",
+        Some(ErrorReason::ShareSourceMissing) => "errReasonShareSourceMissing",
         _ => GENERIC_ERROR_KEY,
     }
 }

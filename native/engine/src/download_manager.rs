@@ -2699,6 +2699,11 @@ pub struct NewTaskSpec {
     /// 未命中 resolver 插件 → fail-closed，任务直接 status=4（不发起下载
     /// `source_url`，绝不把网页 HTML 当直链保存）。
     pub resolver_item: String,
+    /// 显式 resolver 绑定（任务组成员：预览时产出清单的插件）。非空 = 只绑定该插件；它当前
+    /// 未启用或不带 resolver 时任务 fail-closed（status=4，「解析插件不可用」），绝不回退到
+    /// 其它插件。空 = 自动路由：普通任务按 `route_resolver`，带 `resolver_item` 的成员按
+    /// `match_multi_resolver`（与预览同一规则）。
+    pub resolver_plugin_id: String,
     /// HTTP Basic 认证用户名（空 = 未提供；非空时引擎生成
     /// `Authorization: Basic` 头注入 extra_headers，覆盖同名捕获头）。
     pub http_user: String,
@@ -2834,6 +2839,8 @@ struct PreparedTask {
     resolver_plugin_id: String,
     /// 多插件同时匹配且站点无确认过的默认插件（见 `plugin::routing`）。
     resolver_choice_pending: bool,
+    /// 显式绑定的插件建档时不可用（见 [`DownloadManager::plugin_bind_resolver`]）。
+    resolver_fail_closed: bool,
     is_bt: bool,
     /// `tasks.category_route` 列值（空串 = 不路由）。
     category_route: String,
@@ -2846,9 +2853,10 @@ impl PreparedTask {
         !self.resolver_plugin_id.is_empty()
     }
 
-    /// `resolver_item` 非空但未命中插件：fail-closed，任务直接以 error 落库。
+    /// fail-closed 建档：`resolver_item` 非空但未命中插件，或显式绑定的插件当前不可用。
+    /// 任务直接以 error 落库（显式绑定的插件 ID 仍保留，插件恢复后手动恢复即可解析）。
     fn resolver_unavailable(&self) -> bool {
-        !self.resolver_item.is_empty() && !self.has_resolver()
+        self.resolver_fail_closed || (!self.resolver_item.is_empty() && !self.has_resolver())
     }
 
     /// 稍后下载以 paused(2) 落库；正常创建 pending(0)。
@@ -2991,6 +2999,10 @@ pub struct CreateGroupSpec {
     /// 稍后下载：透传给每个成员的 [`NewTaskSpec::start_paused`]。
     pub start_paused: bool,
     pub items: Vec<GroupItemSpec>,
+    /// 预览时产出清单的插件 identity（`ResolvePreviewOutcome::plugin_id`），逐成员透传为
+    /// [`NewTaskSpec::resolver_plugin_id`]。空 = 旧客户端，成员按预览同款规则
+    /// （`match_multi_resolver`）选插件。
+    pub resolver_plugin_id: String,
 }
 
 /// [`DownloadManager::spawn_resolve_preview`] 的一次性结果，经 `oneshot`
@@ -3002,6 +3014,9 @@ pub struct ResolvePreviewOutcome {
     pub items: Vec<crate::model::ManifestItemInfo>,
     /// 无错误时为空。
     pub error: String,
+    /// 产出清单的插件 identity（`match_multi_resolver` 的选择）；无清单时为空。
+    /// 客户端据此建组，把成员绑定到同一个插件，保证预览与实际下载同源。
+    pub plugin_id: String,
 }
 
 impl ResolvePreviewOutcome {
@@ -3012,6 +3027,7 @@ impl ResolvePreviewOutcome {
             name: String::new(),
             items: Vec::new(),
             error: String::new(),
+            plugin_id: String::new(),
         }
     }
 
@@ -3021,6 +3037,7 @@ impl ResolvePreviewOutcome {
             name: String::new(),
             items: Vec::new(),
             error,
+            plugin_id: String::new(),
         }
     }
 }
@@ -3357,6 +3374,23 @@ struct PendingPause {
 pub enum ResolveKind {
     Start,
     Resume,
+}
+
+/// 起跑前（off-actor resolve worker）是否要为任务重新选择 resolver 插件。
+///
+/// 绑定为空串的任务（`忽略插件重试` 逃生舱的结果）不会走到这里：无绑定即不 resolve，
+/// 也就绝不会被自动重新绑定。
+#[cfg(feature = "plugins")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolverReselect {
+    /// 沿用已绑定插件。
+    No,
+    /// 多插件冲突待选（`resolver_choice_pending`）：无条件定案。
+    Pending,
+    /// 从未起跑（无落盘进度、无 `resolver_item`）的任务：若已绑定插件不再命中
+    /// （被禁用 / 待授权 / 熔断 / 规则不再匹配）而其它插件命中，则按当前路由重新选择；
+    /// 无其它候选时仍 fail-closed。有进度的任务不属此类——中途换 resolver 可能写坏文件。
+    IfSuperseded,
 }
 
 /// off-actor resolve 的回流结果。worker 无条件发送（含 panic 归一），交
@@ -4078,21 +4112,109 @@ impl DownloadManager {
         self.plugin_retry_rx.take()
     }
 
-    /// 建任务时的 resolver 绑定：`(插件 ID, 是否待多插件选择)`；无命中为空串。
+    /// 建任务时的 resolver 绑定：`(插件 ID, 是否待多插件选择, 是否 fail-closed 建档)`。
+    ///
+    /// - `explicit` 非空（任务组成员：预览时产出清单的插件）：**无论该插件当前是否可用都绑定
+    ///   它**，绝不回退到其它插件。不可用（未启用 / 待授权 / 已卸载 / 无 resolver）时第三项为
+    ///   `true`：任务带着绑定以 status=4 落库，等插件恢复后手动恢复即经该插件正常解析，
+    ///   期间恢复则由 resolve 的常规错误 fail-closed；
+    /// - 其余情形见 [`Self::plugin_auto_resolver`]。
     #[cfg(feature = "plugins")]
-    async fn plugin_route_resolver(&self, url: &str) -> (String, bool) {
-        let route = match &self.plugin_manager {
-            Some(pm) => pm.route_resolver(url).await,
-            None => None,
+    async fn plugin_bind_resolver(
+        &self,
+        url: &str,
+        explicit: &str,
+        group_id: &str,
+        resolver_item: &str,
+    ) -> (String, bool, bool) {
+        let Some(pm) = &self.plugin_manager else {
+            return (String::new(), false, false);
         };
-        route.map_or_else(
+        if !explicit.is_empty() {
+            let available = pm.resolver_available(explicit).await;
+            if !available {
+                log_info!(
+                    "[manager] group resolver {explicit} is not available, members fail closed"
+                );
+            }
+            return (explicit.to_owned(), false, !available);
+        }
+        let group_member = !group_id.is_empty() && !resolver_item.is_empty();
+        let (identity, pending) = self.plugin_auto_resolver(url, group_member).await;
+        (identity, pending, false)
+    }
+    #[cfg(not(feature = "plugins"))]
+    async fn plugin_bind_resolver(
+        &self,
+        _url: &str,
+        _explicit: &str,
+        _group_id: &str,
+        _resolver_item: &str,
+    ) -> (String, bool, bool) {
+        (String::new(), false, false)
+    }
+
+    /// 没有显式绑定时的自动路由：任务组成员按预览同款规则 `match_multi_resolver`（保证
+    /// 成员与清单同源），其余任务（含 RSS 二段解析条目）按 `route_resolver`。无命中为空串。
+    #[cfg(feature = "plugins")]
+    async fn plugin_auto_resolver(&self, url: &str, group_member: bool) -> (String, bool) {
+        let Some(pm) = &self.plugin_manager else {
+            return (String::new(), false);
+        };
+        if group_member {
+            return (
+                pm.match_multi_resolver(url).await.unwrap_or_default(),
+                false,
+            );
+        }
+        pm.route_resolver(url).await.map_or_else(
             || (String::new(), false),
             |route| (route.identity, route.choice_pending),
         )
     }
-    #[cfg(not(feature = "plugins"))]
-    async fn plugin_route_resolver(&self, _url: &str) -> (String, bool) {
-        (String::new(), false)
+
+    /// 二段解析任务（`resolver_item` 非空）的绑定为空（旧版 fail-closed 建档、卸载清绑定、
+    /// 忽略插件重试遗留）：按创建时同一规则重新绑定并写库。返回绑定的插件；`None` = 没有
+    /// 任何插件可用，调用方必须 fail-closed——二段任务的链接是分享页，绝不能直接下载。
+    #[cfg(feature = "plugins")]
+    async fn rebind_second_stage(&self, task_id: &str) -> Option<String> {
+        let task = match self.db.load_task_by_id(task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => return None,
+            Err(error) => {
+                crate::logger::report_error(
+                    "download-manager",
+                    "load task for second-stage rebind",
+                    &error,
+                );
+                return None;
+            }
+        };
+        let (identity, _) = self
+            .plugin_auto_resolver(&task.url, !task.group_id.is_empty())
+            .await;
+        if identity.is_empty() {
+            return None;
+        }
+        if let Err(error) = self.db.set_task_resolver(task_id, &identity).await {
+            crate::logger::report_error("download-manager", "persist second-stage rebind", &error);
+            return None;
+        }
+        log_info!("[manager] second-stage task {task_id} rebound to {identity}");
+        Some(identity)
+    }
+
+    /// 二段解析任务无可用 resolver：以 status=4 + 「解析插件不可用」收尾，不发起下载。
+    #[cfg(feature = "plugins")]
+    async fn fail_second_stage_unavailable(&self, task_id: &str) {
+        log_info!("[manager] second-stage task {task_id} has no usable resolver, failing closed");
+        persist_task_failure(
+            task_id,
+            RESOLVER_UNAVAILABLE_MESSAGE.to_string(),
+            &self.db,
+            &self.progress_tx,
+        )
+        .await;
     }
 
     /// 前置预解析（多文件清单，B2 契约）：off-actor、只读，不建任务、不写库。
@@ -4184,6 +4306,7 @@ impl DownloadManager {
                             .map(manifest_item_to_info)
                             .collect(),
                         error: String::new(),
+                        plugin_id: identity,
                     },
                     None => ResolvePreviewOutcome::empty(),
                 },
@@ -4227,7 +4350,7 @@ impl DownloadManager {
         kind: ResolveKind,
         generation: u64,
         unattended: bool,
-        choice_pending: bool,
+        reselect: ResolverReselect,
         cancel: CancellationToken,
     ) {
         use futures_util::FutureExt;
@@ -4242,7 +4365,15 @@ impl DownloadManager {
             let mut identity = identity;
             // 多插件冲突待选：首次 resolve 前定案（站点默认 / 无人值守回退 / 询问用户），
             // 写回任务绑定后再用选中的插件解析。二段解析沿用母任务插件，绝不询问。
-            if choice_pending && !second_stage {
+            let reselect_now = !second_stage
+                && match reselect {
+                    ResolverReselect::No => false,
+                    ResolverReselect::Pending => true,
+                    ResolverReselect::IfSuperseded => {
+                        pm.bound_resolver_superseded(&req.url, &identity).await
+                    }
+                };
+            if reselect_now {
                 let choice = tokio::select! {
                     c = pm.choose_task_resolver(
                         &task_id,
@@ -4429,10 +4560,29 @@ impl DownloadManager {
                         if let Some(PendingResolve::Start { mut queued, .. }) =
                             self.pending_resolve.remove(&task_id)
                         {
-                            if let Some(res) = applied {
-                                apply_resolve_to_queued(&mut queued, res);
+                            // 以实际解析的插件为准（起跑前重选可能已改绑），请求补丁归属它。
+                            queued.resolver_plugin_id = out.identity.clone();
+                            // 解析窗口内插件被卸载会清掉 DB 绑定。普通任务：丢弃结果、按原始
+                            // 链接继续（卸载语义）。二段解析任务的链接是分享页，绝不能直接下载：
+                            // 交回 do_start_task 的守卫重新绑定（无可用插件则 fail-closed）。
+                            let unbound = self
+                                .db
+                                .get_task_resolver(&task_id)
+                                .await
+                                .is_ok_and(|bound| bound.is_empty());
+                            if unbound {
+                                queued.resolver_plugin_id.clear();
+                                if queued.resolver_item.is_empty() {
+                                    queued.resolved = true;
+                                } else {
+                                    self.active_tasks.remove(&task_id);
+                                }
+                            } else {
+                                if let Some(res) = applied {
+                                    apply_resolve_to_queued(&mut queued, res);
+                                }
+                                queued.resolved = true;
                             }
-                            queued.resolved = true;
                             self.do_start_task(*queued).await;
                             self.drain_queue().await;
                         }
@@ -4441,7 +4591,8 @@ impl DownloadManager {
                         self.pending_resolve.remove(&task_id);
                         self.active_tasks.remove(&task_id);
                         // Some(res) 改写；None → 空 ResolveResult 表示放行（用原 url）。
-                        // 经 resume_applied 字段传给 do_resume_task（避免改其签名/所有调用点）。
+                        // 经 resume_applied 字段传给 do_resume_task（避免改其签名/所有调用点）；
+                        // do_resume_task 体首无条件取走该条目（含 DB 绑定已被卸载清空的分支）。
                         self.resume_applied
                             .insert(task_id.clone(), applied.unwrap_or_default());
                         self.do_resume_task(&task_id).await;
@@ -4450,7 +4601,25 @@ impl DownloadManager {
                 }
             }
             Err(e) => {
-                let msg = format!("[插件] {}: {}", out.identity, e);
+                // 「[插件]」前缀 = 客户端可提供「忽略插件重试」；二段解析任务（任务组成员 /
+                // 插件订阅条目）的原始链接是分享页，忽略插件会被拒绝，换用不同前缀。
+                let second_stage = match self.db.get_task_resolver_item(&task_id).await {
+                    Ok(item) => !item.is_empty(),
+                    Err(error) => {
+                        crate::logger::report_error(
+                            "download-manager",
+                            "read resolver item",
+                            &error,
+                        );
+                        false
+                    }
+                };
+                let prefix = if second_stage {
+                    "[解析插件]"
+                } else {
+                    "[插件]"
+                };
+                let msg = format!("{prefix} {}: {}", out.identity, e);
                 if let Err(error) = self.db.update_task_status(&task_id, 4, &msg).await {
                     crate::logger::report_error("download-manager", "persist task state", &error);
                 }
@@ -4923,6 +5092,7 @@ impl DownloadManager {
     async fn begin_resolve_start(&mut self, queued: QueuedTask) {
         let task_id = queued.task_id.clone();
         let identity = queued.resolver_plugin_id.clone();
+        let has_audio_track = queued.audio_url.is_some();
         // 占位插入 active_tasks（用原始 url 算 is_bt，真实 generation/cancel_token）：
         // resolve 期间任务可被 pause/cancel 触达、正确占并发计数；再入时被覆盖。
         self.generation += 1;
@@ -4963,7 +5133,9 @@ impl DownloadManager {
             },
         );
         let unattended = self.db.is_task_unattended(&task_id).await.unwrap_or(false);
-        let choice_pending = self.resolver_choice_pending(&task_id).await;
+        let reselect = self
+            .resolver_reselect(&task_id, &req.resolver_item, has_audio_track)
+            .await;
         self.mark_resolving(&task_id).await;
         self.spawn_resolve_worker(
             task_id,
@@ -4972,24 +5144,48 @@ impl DownloadManager {
             ResolveKind::Start,
             spawn_gen,
             unattended,
-            choice_pending,
+            reselect,
             resolve_token,
         );
     }
 
-    /// 任务是否仍待多插件选择。读库失败按「不询问」处理：沿用已绑定的回退插件，
-    /// 与该插件独占匹配时的行为一致。
+    /// 起跑前是否要为任务重新选择 resolver 插件（见 [`ResolverReselect`]）。读库失败按
+    /// 「不重选」处理：沿用已绑定插件，与该插件独占匹配时的行为一致。
     #[cfg(feature = "plugins")]
-    async fn resolver_choice_pending(&self, task_id: &str) -> bool {
+    async fn resolver_reselect(
+        &self,
+        task_id: &str,
+        resolver_item: &str,
+        has_audio_track: bool,
+    ) -> ResolverReselect {
         match self.db.is_task_resolver_choice_pending(task_id).await {
-            Ok(pending) => pending,
+            Ok(true) => return ResolverReselect::Pending,
+            Ok(false) => {}
             Err(error) => {
                 crate::logger::report_error(
                     "download-manager",
                     "load plugin choice pending flag",
                     &error,
                 );
-                false
+                return ResolverReselect::No;
+            }
+        }
+        // 二段解析任务沿用母任务插件；已有落盘进度的任务中途换 resolver 可能写坏文件。
+        if !resolver_item.is_empty() {
+            return ResolverReselect::No;
+        }
+        match self.db.load_task_by_id(task_id).await {
+            Ok(Some(task)) if self.never_started(&task, has_audio_track).await => {
+                ResolverReselect::IfSuperseded
+            }
+            Ok(_) => ResolverReselect::No,
+            Err(error) => {
+                crate::logger::report_error(
+                    "download-manager",
+                    "load task for resolver reselect",
+                    &error,
+                );
+                ResolverReselect::No
             }
         }
     }
@@ -5183,7 +5379,9 @@ impl DownloadManager {
                 generation: spawn_gen,
             },
         );
-        let choice_pending = self.resolver_choice_pending(task_id).await;
+        let reselect = self
+            .resolver_reselect(task_id, &req.resolver_item, false)
+            .await;
         self.mark_resolving(task_id).await;
         self.spawn_resolve_worker(
             task_id.to_string(),
@@ -5192,7 +5390,7 @@ impl DownloadManager {
             ResolveKind::Resume,
             spawn_gen,
             unattended,
-            choice_pending,
+            reselect,
             resolve_token,
         );
     }
@@ -8566,6 +8764,7 @@ impl DownloadManager {
             start_paused,
             group_id,
             resolver_item,
+            resolver_plugin_id: explicit_resolver,
             http_user,
             http_password,
             save_site_auth,
@@ -8726,8 +8925,11 @@ impl DownloadManager {
                 }
             }
         };
-        let (resolver_plugin_id, choice_pending) = self.plugin_route_resolver(&url).await;
-        // 二段解析任务（resolver_item 非空）沿用来源插件，不进入多插件选择。
+        let (resolver_plugin_id, choice_pending, resolver_fail_closed) = self
+            .plugin_bind_resolver(&url, &explicit_resolver, &group_id, &resolver_item)
+            .await;
+        // 二段解析任务（resolver_item 非空）不进入多插件选择：组成员由预览同款规则 / 显式
+        // 绑定定案，RSS 条目沿用 `route_resolver` 的首选。
         let resolver_choice_pending = choice_pending && resolver_item.is_empty();
         // 稍后下载的 hint 任务（一次性 URL，不探测）：名字为空时按 URL 推断占位名
         // （含预签名 URL 的 `response-content-disposition`），随创建行一并落库，
@@ -8818,6 +9020,7 @@ impl DownloadManager {
             unattended_selection,
             resolver_plugin_id,
             resolver_choice_pending,
+            resolver_fail_closed,
             is_bt,
             category_route,
             request_method,
@@ -8855,6 +9058,7 @@ impl DownloadManager {
     /// 单个已落库任务的后续发布：webhook、解析失败进度、稍后下载探测、入队。
     async fn publish_created_task(&mut self, task: PreparedTask) {
         let has_resolver = task.has_resolver();
+        let resolver_unavailable = task.resolver_unavailable();
         let initial_status = task.initial_status();
         let PreparedTask {
             task_id,
@@ -8905,7 +9109,7 @@ impl DownloadManager {
         // fail-closed：resolver_item 非空但未命中插件（或 plugins feature 关，
         // has_resolver 恒空）→ 任务已以 error 落库，绝不发起对 source_url 的下载
         // （那会把网页 HTML/分享页当直链保存）。
-        if !resolver_item.is_empty() && !has_resolver {
+        if resolver_unavailable {
             self.sink.emit(EngineEvent::TaskProgress {
                 task_id,
                 status: 4,
@@ -9636,19 +9840,48 @@ impl DownloadManager {
         #[cfg(feature = "plugins")]
         let mut queued = queued;
         #[cfg(feature = "plugins")]
-        if !queued.resolver_plugin_id.is_empty() && !queued.resolved {
+        if !queued.resolved
+            && (!queued.resolver_plugin_id.is_empty() || !queued.resolver_item.is_empty())
+        {
             // 绑定以 DB 为准（与 do_resume_task 对称）：排队期间插件被卸载会清掉 DB 绑定，
-            // 内存里的 QueuedTask 仍带着失效的 resolver，此时按原始链接下载。
-            let unbound = self
-                .db
-                .get_task_resolver(&queued.task_id)
-                .await
-                .is_ok_and(|bound| bound.is_empty());
-            if unbound {
-                queued.resolver_plugin_id.clear();
-            } else {
-                self.begin_resolve_start(queued).await;
-                return;
+            // 内存里的 QueuedTask 仍带着失效的 resolver。读库失败按「仍绑定」处理。
+            let second_stage = !queued.resolver_item.is_empty();
+            match self.db.get_task_resolver(&queued.task_id).await {
+                Ok(bound) if bound.is_empty() => {
+                    queued.resolver_plugin_id.clear();
+                    if second_stage {
+                        // 二段解析任务的链接是分享页，绝不按原始链接下载：重新绑定，
+                        // 仍无可用插件则 fail-closed。
+                        match self.rebind_second_stage(&queued.task_id).await {
+                            Some(identity) => {
+                                queued.resolver_plugin_id = identity;
+                                self.begin_resolve_start(queued).await;
+                            }
+                            None => self.fail_second_stage_unavailable(&queued.task_id).await,
+                        }
+                        return;
+                    }
+                }
+                Ok(bound) => {
+                    if queued.resolver_plugin_id.is_empty() {
+                        queued.resolver_plugin_id = bound;
+                    }
+                    self.begin_resolve_start(queued).await;
+                    return;
+                }
+                Err(error) => {
+                    crate::logger::report_error(
+                        "download-manager",
+                        "load task resolver for start guard",
+                        &error,
+                    );
+                    if queued.resolver_plugin_id.is_empty() {
+                        self.fail_second_stage_unavailable(&queued.task_id).await;
+                    } else {
+                        self.begin_resolve_start(queued).await;
+                    }
+                    return;
+                }
             }
         }
         let QueuedTask {
@@ -10961,15 +11194,41 @@ impl DownloadManager {
     async fn do_resume_task(&mut self, task_id: &str) {
         // 插件惰性解析守卫（体首，协议判定前）：命中 resolver 且非再入 → off-actor
         // resolve 后经 resume_applied 再入；对称占位防 resumeAll 并发双 resolve。
+        // `resume_applied` 条目无条件在此取走：resolve 窗口内插件被卸载会清空 DB 绑定，
+        // 此时丢弃已失效的解析结果、按原始链接继续（卸载语义），不让条目滞留。
         #[cfg(feature = "plugins")]
         let mut resolver_identity = String::new();
         #[cfg(feature = "plugins")]
         let plugin_applied: Option<crate::plugin::ResolveResult> = {
-            let resolver = self.db.get_task_resolver(task_id).await.unwrap_or_default();
+            let mut resolver = self.db.get_task_resolver(task_id).await.unwrap_or_default();
+            let reentered = self.resume_applied.remove(task_id);
             if resolver.is_empty() {
+                // 二段解析任务（任务组成员）的链接是分享页，绝不能按原始链接下载：绑定为空
+                // （旧版 fail-closed 建档 / 卸载清绑定 / 忽略插件重试）时按创建规则重新绑定，
+                // 仍无可用插件则 fail-closed。再入结果属于已失效的绑定，一并丢弃。
+                let second_stage = match self.db.get_task_resolver_item(task_id).await {
+                    Ok(item) => !item.is_empty(),
+                    Err(error) => {
+                        crate::logger::report_error(
+                            "download-manager",
+                            "load resolver item for resume guard",
+                            &error,
+                        );
+                        true
+                    }
+                };
+                if second_stage {
+                    match self.rebind_second_stage(task_id).await {
+                        Some(identity) => {
+                            self.begin_resolve_resume(task_id, identity).await;
+                        }
+                        None => self.fail_second_stage_unavailable(task_id).await,
+                    }
+                    return;
+                }
                 None
-            } else if let Some(res) = self.resume_applied.remove(task_id) {
-                resolver_identity = resolver;
+            } else if let Some(res) = reentered {
+                resolver_identity = std::mem::take(&mut resolver);
                 Some(res) // 再入
             } else {
                 self.begin_resolve_resume(task_id, resolver).await;
@@ -13525,6 +13784,7 @@ impl DownloadManager {
                 start_paused: spec.start_paused,
                 group_id: group_id.clone(),
                 resolver_item: item.resolver_item.clone(),
+                resolver_plugin_id: spec.resolver_plugin_id.clone(),
                 ..Default::default()
             })
             .await;
@@ -18542,6 +18802,34 @@ mod tests {
             "an unbound resolver must not enter resolve"
         );
         assert!(mgr.active_tasks.contains_key("a"));
+        cancel_all_active(&mgr);
+    }
+
+    /// resolve 窗口内插件被卸载（DB 绑定已清）：Resume 再入留下的 `resume_applied` 条目
+    /// 必须被 `do_resume_task` 取走（按原始链接继续），不能滞留到下一次 resume 被误用。
+    #[cfg(feature = "plugins")]
+    #[tokio::test]
+    async fn resume_applied_is_consumed_when_binding_was_cleared() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        db.seed_builtin_queues().await.expect("seed");
+        insert_paused_task_in_queue(&db, "a", "").await;
+        let mut mgr = sched_manager(&db, 1);
+        mgr.resume_applied.insert(
+            "a".to_string(),
+            crate::plugin::ResolveResult {
+                url: "http://127.0.0.1:1/stale-resolved.bin".to_string(),
+                ..Default::default()
+            },
+        );
+
+        mgr.do_resume_task("a").await;
+
+        assert!(
+            !mgr.resume_applied.contains_key("a"),
+            "a re-entry result must never outlive the resume that consumed it"
+        );
         cancel_all_active(&mgr);
     }
 

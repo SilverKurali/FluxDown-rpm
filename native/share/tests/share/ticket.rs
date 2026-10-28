@@ -2,7 +2,8 @@
 
 use fluxdown_share::ticket::{encode_public_key, sign_ticket};
 use fluxdown_share::{
-    KeyEntry, KeyRing, SecretKey, TicketError, TicketExpectation, parse_ticket, verify_ticket,
+    KeyEntry, KeyRing, SCOPE_BRIDGE, SCOPE_RECV, SCOPE_SWARM, SecretKey, TicketError,
+    TicketExpectation, parse_ticket, verify_ticket,
 };
 
 use crate::common::payload;
@@ -46,6 +47,7 @@ fn check(
             now_unix: now,
             share_id: share,
             peer: peer.public(),
+            scopes: &[SCOPE_RECV, SCOPE_BRIDGE],
         },
     )
     .map(|p| p.sid.clone())
@@ -255,4 +257,37 @@ fn key_ring_replace_is_atomic() {
     // 失败后原密钥仍可用。
     assert!(check(&fx, &good(&fx), None, &fx.receiver, NOW).is_ok());
     assert!(!fx.ring.is_empty());
+}
+
+/// swarm 票据（带 `root`）只在调用方列出 `swarm` 作用域时被接受；recv 票据在 swarm 端被拒绝。
+#[test]
+fn swarm_scope_is_only_accepted_when_listed() {
+    let fx = fx();
+    let mut p = payload("share-1", &fx.receiver.public().to_z32(), NOW + 60);
+    p.scope = "swarm".into();
+    p.root = Some("ab".repeat(32));
+    let raw = sign_ticket(&fx.issuer, &p).unwrap();
+    // 默认（recv / bridge）口径下被拒绝。
+    assert_eq!(
+        check(&fx, &raw, None, &fx.receiver, NOW),
+        Err(TicketError::WrongScope("swarm".into()))
+    );
+    let ticket = parse_ticket(&raw).unwrap();
+    let expect = |scopes: &'static [&'static str]| TicketExpectation {
+        now_unix: NOW,
+        share_id: None,
+        peer: fx.receiver.public(),
+        scopes,
+    };
+    let payload = verify_ticket(&fx.ring, &ticket, &expect(&[SCOPE_SWARM])).unwrap();
+    assert_eq!(payload.root.as_deref(), Some("ab".repeat(32).as_str()));
+    // recv 票据在只接受 swarm 的一端同样被拒绝。
+    let recv = parse_ticket(&good(&fx)).unwrap();
+    assert_eq!(
+        verify_ticket(&fx.ring, &recv, &expect(&[SCOPE_SWARM])).map(drop),
+        Err(TicketError::WrongScope("recv".into()))
+    );
+    // recv / bridge 票据不带 root 字段（字节与旧版本一致）。
+    let json = serde_json::to_value(recv.payload()).unwrap();
+    assert!(json.get("root").is_none());
 }

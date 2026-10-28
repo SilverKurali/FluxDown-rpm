@@ -224,6 +224,24 @@ impl ShareSettingsView {
         self.commit(|c| c.default_notify_on_claim = value, window, cx);
     }
 
+    pub(super) fn set_default_swarm(
+        &mut self,
+        value: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit(|c| c.default_swarm = Some(value), window, cx);
+    }
+
+    pub(super) fn set_auto_provide(
+        &mut self,
+        value: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit(|c| c.auto_provide = Some(value), window, cx);
+    }
+
     pub(super) fn set_portmapper(
         &mut self,
         value: &str,

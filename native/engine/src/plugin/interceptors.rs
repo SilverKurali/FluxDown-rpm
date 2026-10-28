@@ -81,14 +81,15 @@ impl PluginManager {
     ) -> Result<Option<String>, PluginError> {
         let (manifest, streak, source, dev_mode) = {
             let snapshot = self.plugins.read().await.clone();
-            let Some(p) = snapshot
-                .iter()
-                .find(|p| p.manifest.identity == identity && p.enabled)
-            else {
-                return Err(PluginError::Runtime(format!(
-                    "插件 {identity} 已卸载或被禁用"
-                )));
+            let Some(p) = snapshot.iter().find(|p| p.manifest.identity == identity) else {
+                return Err(PluginError::Runtime(format!("插件 {identity} 已卸载")));
             };
+            if !p.enabled {
+                return Err(PluginError::Runtime(format!(
+                    "插件 {identity} {}",
+                    p.disabled_reason.describe()
+                )));
+            }
             let source = p.intercept_source().await;
             (p.manifest.clone(), p.timeout_streak.clone(), source, p.dev)
         };

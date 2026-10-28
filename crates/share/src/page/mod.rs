@@ -1,4 +1,4 @@
-//! 快传管理页（活动栏路由内容）：顶部取件码 / 链接输入，下方「我的分享 / 接收记录 / 网络诊断」三个页签。
+//! FluxMesh管理页（活动栏路由内容）：顶部取件码 / 链接输入，下方「我的分享 / 接收记录 / 网络诊断」三个页签。
 //!
 //! 状态只读 [`ShareHub`]；接收记录的翻页与网络诊断的取数只在对应页签实际渲染（可见）时发起。
 //!
@@ -34,7 +34,7 @@ use crate::{
 /// 接收记录首页两次取数之间的最短间隔（毫秒）。
 const RECORDS_MIN_REFRESH_MS: u64 = 1_000;
 
-/// 快传管理页（活动栏路由内容）：取件码 / 链接输入 + 我的分享 / 接收记录 / 网络诊断三个页签。
+/// FluxMesh管理页（活动栏路由内容）：取件码 / 链接输入 + 我的分享 / 接收记录 / 网络诊断三个页签。
 pub struct ShareView {
     hub: Entity<ShareHub>,
     translator: Entity<Translator>,
@@ -43,8 +43,10 @@ pub struct ShareView {
     input_invalid: bool,
     tab: ManageTab,
     network: Entity<NetworkTab>,
-    /// 正在提交停止的分享 ID。
-    stopping: HashSet<String>,
+    /// 正在提交操作（停止 / 开始 / 删除）的分享 ID，防重入。
+    busy: HashSet<String>,
+    /// 「我的分享」多选集合（分享 ID）；分享从列表消失时在 `absorb_hub` 里剔除。
+    selected: HashSet<String>,
     // 接收记录
     feed: ReceivedFeed,
     last_records: Vec<ShareReceiveRecordDto>,
@@ -56,7 +58,7 @@ pub struct ShareView {
 }
 
 impl ShareView {
-    /// 创建管理页：`hub` 是跨窗口共享的快传状态；输入框与列表只在本视图内持有 UI 状态。
+    /// 创建管理页：`hub` 是跨窗口共享的FluxMesh状态；输入框与列表只在本视图内持有 UI 状态。
     pub fn new(hub: Entity<ShareHub>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let translator = hub.read(cx).translator().clone();
         let placeholder = text(translator.read(cx), "sharePickupPlaceholder");
@@ -86,7 +88,8 @@ impl ShareView {
             input_invalid: false,
             tab: ManageTab::Mine,
             network,
-            stopping: HashSet::new(),
+            busy: HashSet::new(),
+            selected: HashSet::new(),
             feed: ReceivedFeed::default(),
             last_records: Vec::new(),
             epoch: Instant::now(),
@@ -109,6 +112,11 @@ impl ShareView {
         let request = self.hub.update(cx, |hub, _| hub.take_manage_request());
         if let Some(request) = request {
             self.apply_manage_request(request, cx);
+        }
+        if !self.selected.is_empty() {
+            let state = self.hub.read(cx).state();
+            self.selected
+                .retain(|id| state.shares.iter().any(|share| &share.id == id));
         }
         let changed = self.hub.read(cx).state().receive_records != self.last_records;
         if changed {

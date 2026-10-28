@@ -163,6 +163,7 @@ struct ProtocolChannelTests {
         #expect(HostMethod.agentShareSessionKill == "agent.share.sessionKill")
         #expect(HostMethod.agentShareConvertToCloud == "agent.share.convertToCloud")
         #expect(HostMethod.agentShareDeleteCloudCopy == "agent.share.deleteCloudCopy")
+        #expect(HostMethod.agentShareStopProviding == "agent.share.stopProviding")
         #expect(HostCapability.agentShare == "agent.share")
         #expect(HostMethod.agentProfileSendDeleteCode == "agent.profile.sendDeleteCode")
         #expect(HostMethod.agentProfileDeleteAccount == "agent.profile.deleteAccount")

@@ -113,7 +113,7 @@ impl WatchedExtensions {
 
 /// L0 判定一条候选链接。
 pub fn classify(link: &str, extensions: &WatchedExtensions) -> Verdict {
-    // 快传分享链接（`https://fluxdown.com/s/<slug>` 无监视扩展名）原样接受，不走 URL 启发式。
+    // FluxMesh分享链接（`https://fluxdown.com/s/<slug>` 无监视扩展名）原样接受，不走 URL 启发式。
     if share_ref(link).is_some() {
         return Verdict::Accept;
     }

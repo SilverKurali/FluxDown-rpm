@@ -356,6 +356,7 @@ impl Inner {
             let now = account.counters.snapshot();
             bytes.cdn = now.cdn.saturating_sub(account.base.cdn);
             bytes.bridge = now.bridge.saturating_sub(account.base.bridge);
+            bytes.peer = now.peer.saturating_sub(account.base.peer);
         }
         for path in st.paths.values() {
             let carried = match self.cfg.role {

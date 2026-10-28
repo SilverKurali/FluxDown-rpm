@@ -2,6 +2,12 @@ import { describe, expect, test } from 'bun:test'
 import type { ShareDto, ShareNetStatusDto, ShareReceiveRecordDto, ShareTaskFactsDto } from '../../lib/rpc'
 import {
   CLOUD_STATE_KEYS,
+  canStartShare,
+  canStopShare,
+  isSourceMissing,
+  planShareBatch,
+  pruneSelection,
+  selectAllState,
   bytesSplit,
   canDeleteCloudCopy,
   canSwitchBridge,
@@ -202,12 +208,15 @@ describe('source badge', () => {
   })
 
   test('badge label and tone follow the path', () => {
-    expect(shareSourceBadge(facts({}))).toEqual({ pathKind: 'directLan', labelKey: 'sharePathDirectLan', tone: 'success' })
+    expect(shareSourceBadge(facts({}))).toEqual({ pathKind: 'directLan', labelKey: 'sharePathDirectLan', tone: 'success', peers: 0 })
     expect(shareSourceBadge(facts({ pathKind: 'directWan' }))?.tone).toBe('success')
-    expect(shareSourceBadge(facts({ pathKind: 'relay' }))).toEqual({ pathKind: 'relay', labelKey: 'sharePathRelay', tone: 'warning' })
-    expect(shareSourceBadge(facts({ pathKind: 'cdn' }))).toEqual({ pathKind: 'cdn', labelKey: 'shareBadgeCloud', tone: 'success' })
-    expect(shareSourceBadge(facts({ pathKind: 'bridge' }))).toEqual({ pathKind: 'bridge', labelKey: 'shareBadgeBridge', tone: 'neutral' })
+    expect(shareSourceBadge(facts({ pathKind: 'relay' }))).toEqual({ pathKind: 'relay', labelKey: 'sharePathRelay', tone: 'warning', peers: 0 })
+    expect(shareSourceBadge(facts({ pathKind: 'cdn' }))).toEqual({ pathKind: 'cdn', labelKey: 'shareBadgeCloud', tone: 'success', peers: 0 })
+    expect(shareSourceBadge(facts({ pathKind: 'bridge' }))).toEqual({ pathKind: 'bridge', labelKey: 'shareBadgeBridge', tone: 'neutral', peers: 0 })
     expect(shareSourceBadge(facts({ pathKind: 'unknown' }))?.tone).toBe('neutral')
+    expect(shareSourceBadge(facts({ pathKind: 'swarm', swarmPeers: 3 }))).toEqual({ pathKind: 'swarm', labelKey: 'sharePathSwarm', tone: 'success', peers: 3 })
+    expect(sourceBytesRows({ direct: 0, relay: 0, cdn: 0, bridge: 0, peer: 9 }).map((row) => [row.kind, row.bytes]).at(-1)).toEqual(['peer', 9])
+    expect(bytesSplit({ direct: 1, relay: 0, cdn: 0, bridge: 0, peer: 3 }).percent).toBe(25)
   })
 
   test('bridge switch is offered on active share-receive tasks not already on the bridge', () => {
@@ -412,5 +421,62 @@ describe('cloud storage', () => {
   test('retry reuses the share tier only when it is a cloud tier', () => {
     expect(cloudRetryTierId({ tierId: 'cloud-7d' }, policy.retentionTiers)).toBe('cloud-7d')
     expect(cloudRetryTierId({ tierId: '24h' }, policy.retentionTiers)).toBeUndefined()
+  })
+})
+
+describe('batch share actions', () => {
+  const stopped = share({ id: 'stopped', status: 'stopped' })
+  const expired = share({ id: 'expired', status: 'expired' })
+  const active = share({ id: 'active', status: 'active' })
+  const missing = share({ id: 'missing', status: 'stopped', sourceMissing: true })
+  const missingCloud = share({ id: 'missing-cloud', status: 'stopped', sourceMissing: true, cloudState: 'ready' })
+  const activeMissing = share({ id: 'active-missing', status: 'active', sourceMissing: true })
+  const activeMissingCloud = share({ id: 'active-missing-cloud', status: 'active', sourceMissing: true, cloudState: 'ready' })
+  const unknown = share({ id: 'unknown', status: 'unknown' })
+
+  test('start needs a stopped / expired share whose source is still there', () => {
+    expect(canStartShare(stopped)).toBe(true)
+    expect(canStartShare(expired)).toBe(true)
+    expect(canStartShare(active)).toBe(false)
+    expect(canStartShare(unknown)).toBe(false)
+    expect(canStartShare(missing)).toBe(false)
+  })
+
+  test('missing badge: ended shares always, active ones only without a ready cloud copy', () => {
+    expect(isSourceMissing(stopped)).toBe(false)
+    expect(isSourceMissing(missing)).toBe(true)
+    expect(isSourceMissing(missingCloud)).toBe(true)
+    expect(isSourceMissing(activeMissing)).toBe(true)
+    expect(isSourceMissing(activeMissingCloud)).toBe(false)
+  })
+
+  test('a stopped share with a missing source cannot start even with a cloud copy', () => {
+    expect(canStartShare(missingCloud)).toBe(false)
+  })
+
+  test('stop only applies to active shares', () => {
+    expect(canStopShare(active)).toBe(true)
+    expect(canStopShare(stopped)).toBe(false)
+    expect(canStopShare(expired)).toBe(false)
+  })
+
+  test('plan picks applicable subsets and delete covers everything', () => {
+    const plan = planShareBatch([stopped, active, missing, expired, unknown])
+    expect(plan.start.map((s) => s.id)).toEqual(['stopped', 'expired'])
+    expect(plan.stop.map((s) => s.id)).toEqual(['active'])
+    expect(plan.remove.map((s) => s.id)).toEqual(['stopped', 'active', 'missing', 'expired', 'unknown'])
+    expect(planShareBatch([missing])).toEqual({ start: [], stop: [], remove: [missing] })
+  })
+
+  test('select-all state', () => {
+    expect(selectAllState(0, 3)).toBe(false)
+    expect(selectAllState(2, 3)).toBe('indeterminate')
+    expect(selectAllState(3, 3)).toBe(true)
+    expect(selectAllState(0, 0)).toBe(false)
+  })
+
+  test('selection drops shares that are gone', () => {
+    const kept = pruneSelection(new Set(['a', 'b', 'c']), [{ id: 'a' }, { id: 'c' }])
+    expect([...kept]).toEqual(['a', 'c'])
   })
 })

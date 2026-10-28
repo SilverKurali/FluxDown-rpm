@@ -16,4 +16,6 @@ mod http;
 #[cfg(test)]
 mod sources;
 #[cfg(test)]
+mod swarm;
+#[cfg(test)]
 mod ticket;

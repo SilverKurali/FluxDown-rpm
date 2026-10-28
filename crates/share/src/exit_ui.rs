@@ -1,4 +1,4 @@
-//! 退出流程：完全退出前，若有实时分享仍有接收方没收完，按「快传」设置的退出处理询问 / 自动转为
+//! 退出流程：完全退出前，若有实时分享仍有接收方没收完，按「FluxMesh」设置的退出处理询问 / 自动转为
 //! 云端暂存，并在阻塞进度框里等上传完成后再退出。决策本身是纯函数（[`crate::model::exit`]）。
 //!
 //! app 在真正退出的两条路径（菜单 / ⌘Q、非驻留模式关主窗口）上先问 [`needs_exit_gate`]：为 `false`
@@ -54,13 +54,13 @@ fn decision(hub: &ShareHub) -> ExitDecision {
     decide_exit(state, hub.signed_in(), state.local_config.exit_behavior)
 }
 
-/// 退出前是否需要先处理快传（询问或自动转换）。为 `false` 时调用方应直接退出。
+/// 退出前是否需要先处理FluxMesh（询问或自动转换）。为 `false` 时调用方应直接退出。
 #[must_use]
 pub fn needs_exit_gate(hub: &Entity<ShareHub>, cx: &App) -> bool {
     decision(hub.read(cx)) != ExitDecision::Quit
 }
 
-/// 在 `window` 上执行退出前的快传处理；处理完成（或用户选择直接退出）时调用 `proceed`，
+/// 在 `window` 上执行退出前的FluxMesh处理；处理完成（或用户选择直接退出）时调用 `proceed`，
 /// 用户取消则什么都不做。没有需要处理的分享时立即 `proceed`。
 pub fn run_exit_gate(
     hub: &Entity<ShareHub>,

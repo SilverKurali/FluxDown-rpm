@@ -1,5 +1,5 @@
-// 任务详情「传输诊断」页：快传接收任务的路径时间线、各路径 RTT / 丢包 / cwnd / 速率、对端 NAT 与运营商。
-// 只在任务有快传事实（`snapshot.share.taskFacts`）时作为 tab 出现；挂载期间按 2 秒轮询该会话。
+// 任务详情「传输诊断」页：FluxMesh接收任务的路径时间线、各路径 RTT / 丢包 / cwnd / 速率、对端 NAT 与运营商。
+// 只在任务有FluxMesh事实（`snapshot.share.taskFacts`）时作为 tab 出现；挂载期间按 2 秒轮询该会话。
 
 import { useT } from '../../i18n'
 import { Spinner } from '../../ui'

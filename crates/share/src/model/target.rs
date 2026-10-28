@@ -11,7 +11,7 @@ pub enum PanelTarget {
     Share(String),
 }
 
-/// 快传管理页的页签。
+/// FluxMesh管理页的页签。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ManageTab {
     #[default]

@@ -21,6 +21,9 @@ pub const SCOPE_RECV: &str = "recv";
 /// 票据作用域：网关桥接（`rep` 是 share-gateway 的 endpoint ID，网关代接收方经 iroh 取块并转发）。
 pub const SCOPE_BRIDGE: &str = "bridge";
 
+/// 票据作用域：共享（接收方向持有同一内容的对端取块，票据额外绑定内容根哈希 `root`）。
+pub const SCOPE_SWARM: &str = "swarm";
+
 /// 目前唯一支持的票据版本。
 pub const TICKET_VERSION: u32 = 1;
 
@@ -50,8 +53,8 @@ pub enum TicketError {
     /// 签名不匹配。
     #[error("ticket signature is invalid")]
     BadSignature,
-    /// 作用域既不是 `recv` 也不是 `bridge`。
-    #[error("ticket scope {0:?} does not allow receiving")]
+    /// 作用域不在调用方允许的范围内。
+    #[error("ticket scope {0:?} is not accepted here")]
     WrongScope(String),
     /// 已过期。
     #[error("ticket expired")]
@@ -181,6 +184,8 @@ pub struct TicketExpectation<'a> {
     pub share_id: Option<&'a str>,
     /// QUIC 握手确认的对端 endpoint ID，必须等于票据 `rep`。
     pub peer: EndpointId,
+    /// 允许的作用域；其余作用域即使签名有效也以 [`TicketError::WrongScope`] 拒绝。
+    pub scopes: &'a [&'a str],
 }
 
 /// 验票：版本 → 密钥 → 签名 → 作用域 → 有效期 → 分享 → 对端，任何一项不符即拒绝。
@@ -206,7 +211,7 @@ pub fn verify_ticket<'t>(
         .key
         .verify(&ticket.payload_bytes, &signature)
         .map_err(|_| TicketError::BadSignature)?;
-    if payload.scope != SCOPE_RECV && payload.scope != SCOPE_BRIDGE {
+    if !expect.scopes.contains(&payload.scope.as_str()) {
         return Err(TicketError::WrongScope(payload.scope.clone()));
     }
     if expect.now_unix >= payload.exp {

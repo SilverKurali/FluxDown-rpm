@@ -89,6 +89,7 @@ pub(super) fn summary(summary: &core::SessionSummary) -> ShareSessionSummaryDto 
             relay: summary.bytes.relay,
             cdn: summary.bytes.cdn,
             bridge: summary.bytes.bridge,
+            peer: summary.bytes.peer,
         },
         paths: summary
             .paths

@@ -1,9 +1,9 @@
 /**
- * 快传分享落地页的 FluxCloud 服务端代理核心：`/s/<slug>` 页面（SSR）与
+ * FluxMesh分享落地页的 FluxCloud 服务端代理核心：`/s/<slug>` 页面（SSR）与
  * `/api/cloud/share/public/**` 路由共用，浏览器只连本站。
  *
  * 上游契约（FluxCloud，公开、无鉴权、按访客 IP 限频）：
- * - `GET  /api/v1/share/public/{slug}` → 清单 `{ id, slug, title, files[], totalBytes, expiresAt, cloudReady, turnstileSiteKey? }`
+ * - `GET  /api/v1/share/public/{slug}` → 清单 `{ id, slug, title, files[], totalBytes, expiresAt, cloudReady, pickupCode?, turnstileSiteKey? }`
  * - `POST /api/v1/share/public/{slug}/download { fileIndex, turnstileToken? }` → `{ url, expiresAt }`（签名 CDN 链接）
  * - 失败为 HTTP 状态 + `{ code, message }`：404 / 410 `share_ended|share_takedown` / 409 `share_cloud_not_ready` /
  *   403 `traffic_exhausted` / `turnstile_required|turnstile_failed` / 429。

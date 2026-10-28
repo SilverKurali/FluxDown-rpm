@@ -70,7 +70,7 @@ fn init_at(agent_data_dir: &Path, engine_data_dir: &Path) {
         .with_writer(LogFileWriter)
         .with_filter(build_filter());
     let subscriber = tracing_subscriber::registry().with(fmt_layer);
-    // iroh / 快传 tracing 另走内存环形缓冲（诊断页），不受上面主输出过滤的影响。
+    // iroh / FluxMesh tracing 另走内存环形缓冲（诊断页），不受上面主输出过滤的影响。
     #[cfg(feature = "share-p2p")]
     let subscriber = subscriber.with(crate::share::logs::layer());
     if let Err(error) = tracing::subscriber::set_global_default(subscriber) {

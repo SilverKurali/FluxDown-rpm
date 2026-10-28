@@ -1,4 +1,4 @@
-// 快传面板 / 接收确认框的外壳：桌面居中对话框，窄屏（≤820px）底部抽屉（`Sheet side="bottom"`）。
+// FluxMesh面板 / 接收确认框的外壳：桌面居中对话框，窄屏（≤820px）底部抽屉（`Sheet side="bottom"`）。
 
 import type { ReactNode } from 'react'
 import { Dialog, Sheet, useIsMobile } from '../../ui'

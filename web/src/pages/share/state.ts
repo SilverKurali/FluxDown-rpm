@@ -1,4 +1,4 @@
-// 快传状态选择器：全部从 `AgentSnapshot.share` 派生（`shareChanged` 整段替换、`shareProgress` 按会话刷新）。
+// FluxMesh状态选择器：全部从 `AgentSnapshot.share` 派生（`shareChanged` 整段替换、`shareProgress` 按会话刷新）。
 
 import { CAPABILITY_AGENT_SHARE, useAgent, useRpcSelector } from '../../lib/rpc'
 import type {
@@ -26,6 +26,8 @@ export const EMPTY_LOCAL_CONFIG: ShareLocalConfigDto = {
   defaultTierId: null,
   defaultMaxClaims: 0,
   defaultNotifyOnClaim: true,
+  defaultSwarm: null,
+  autoProvide: null,
 }
 
 const EMPTY_POLICY: SharePolicySummaryDto = {
@@ -53,7 +55,7 @@ const EMPTY_NET: ShareNetStatusDto = {
   relayLatencyMs: {},
 }
 
-/** 旧快照 / 未编入快传：`available = false`，全部入口隐藏。 */
+/** 旧快照 / 未编入FluxMesh：`available = false`，全部入口隐藏。 */
 export const EMPTY_SHARE: ShareStateDto = {
   enabled: false,
   available: false,
@@ -69,19 +71,19 @@ export const EMPTY_SHARE: ShareStateDto = {
 
 const selectShare = (snapshot: { share?: ShareStateDto }): ShareStateDto => snapshot.share ?? EMPTY_SHARE
 
-/** 快传分区完整状态。 */
+/** FluxMesh分区完整状态。 */
 export function useShareState(): ShareStateDto {
   return useAgent(selectShare, EMPTY_SHARE)
 }
 
 const selectCapability = (state: RpcState): boolean => state.hello?.capabilities.includes(CAPABILITY_AGENT_SHARE) ?? false
 
-/** agent 编入快传（hello 带 `agent.share`）。 */
+/** agent 编入FluxMesh（hello 带 `agent.share`）。 */
 export function useShareCapability(): boolean {
   return useRpcSelector(selectCapability)
 }
 
-/** 快传入口是否可见：能力存在且服务可用（`available`）。 */
+/** FluxMesh入口是否可见：能力存在且服务可用（`available`）。 */
 export function useShareAvailable(): boolean {
   const capability = useShareCapability()
   const available = useAgent((snapshot) => snapshot.share?.available === true, false)

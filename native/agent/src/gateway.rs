@@ -187,7 +187,7 @@ impl GatewayService {
         self
     }
 
-    /// 装配快传服务（`agent.share.*`）。只有服务存在时才下发 `agent.share` 能力。
+    /// 装配FluxMesh服务（`agent.share.*`）。只有服务存在时才下发 `agent.share` 能力。
     #[cfg(feature = "share-p2p")]
     #[must_use]
     pub fn with_share(mut self, share: Option<Arc<crate::share::ShareService>>) -> Self {
@@ -213,7 +213,7 @@ impl GatewayService {
         }
     }
 
-    /// 未编入快传：明确报不可用，不做假成功。
+    /// 未编入FluxMesh：明确报不可用，不做假成功。
     #[cfg(not(feature = "share-p2p"))]
     async fn share_rpc(
         &self,
@@ -652,13 +652,15 @@ impl GatewayService {
                 // 互联服务未装配（如精简测试网关）：明确报不支持，不做假成功。
                 None => Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false)),
             },
-            // 快传（`agent.share.*`）：服务未编入 / 未装配时统一报 `ShareUnavailable`。
+            // FluxMesh（`agent.share.*`）：服务未编入 / 未装配时统一报 `ShareUnavailable`。
             method::AGENT_SHARE_CONFIG
             | method::AGENT_SHARE_SET_LOCAL_CONFIG
             | method::AGENT_SHARE_CREATE
             | method::AGENT_SHARE_LIST
             | method::AGENT_SHARE_UPDATE
             | method::AGENT_SHARE_STOP
+            | method::AGENT_SHARE_RESUME
+            | method::AGENT_SHARE_DELETE
             | method::AGENT_SHARE_RESOLVE
             | method::AGENT_SHARE_RECEIVE
             | method::AGENT_SHARE_DISMISS_PENDING
@@ -668,7 +670,8 @@ impl GatewayService {
             | method::AGENT_SHARE_LOGS
             | method::AGENT_SHARE_SESSION_KILL
             | method::AGENT_SHARE_CONVERT_TO_CLOUD
-            | method::AGENT_SHARE_DELETE_CLOUD_COPY => {
+            | method::AGENT_SHARE_DELETE_CLOUD_COPY
+            | method::AGENT_SHARE_STOP_PROVIDING => {
                 self.share_rpc(&request.method, request.params).await
             }
             method::AGENT_CAPTURE_SUBMIT => {
@@ -701,6 +704,11 @@ impl GatewayService {
             method::AGENT_PLATFORM_REVEAL_TASK => {
                 self.platform_task(params_or_empty(request.params), true)
                     .await
+            }
+            method::AGENT_PLATFORM_COPY_TASK_FILES => {
+                let params =
+                    parse_params::<fluxdown_protocol::PlatformCopyTaskFilesParams>(request.params)?;
+                self.platform_copy_task_files(params).await
             }
             method::AGENT_PLATFORM_OPEN_PATH => {
                 let params =
@@ -1441,6 +1449,41 @@ impl GatewayService {
         })
         .await
         .map(|()| serde_json::json!({ "ok": true }))
+    }
+
+    /// `agent.platform.copyTaskFiles`：逐个向 daemon 取任务事实（与打开 / 定位同一来源），再在阻塞
+    /// 线程上整体写入系统剪贴板。
+    async fn platform_copy_task_files(
+        &self,
+        params: fluxdown_protocol::PlatformCopyTaskFilesParams,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        let mut task_ids = params.task_ids;
+        if task_ids.is_empty()
+            || task_ids.len() > fluxdown_protocol::PLATFORM_COPY_TASK_FILES_MAX
+            || task_ids.iter().any(String::is_empty)
+        {
+            return Err(invalid_field("taskIds"));
+        }
+        if !crate::platform::copies_files_to_clipboard() {
+            return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
+        }
+        // 剪贴板里的文件顺序无意义（文件管理器粘贴时自行排序），排序去重即可。
+        task_ids.sort_unstable();
+        task_ids.dedup();
+        let mut tasks = Vec::with_capacity(task_ids.len());
+        for task_id in task_ids {
+            let task: fluxdown_protocol::TaskDto = self
+                .daemon
+                .call(
+                    fluxdown_protocol::method::DAEMON_TASK_GET,
+                    Some(serde_json::json!({ "taskId": task_id })),
+                )
+                .await?;
+            tasks.push(task);
+        }
+        platform_blocking(move || crate::platform::copy_task_files(&tasks))
+            .await
+            .map(|()| serde_json::json!({ "ok": true }))
     }
 
     async fn ui_connected(&self) {
@@ -2202,7 +2245,8 @@ impl GatewayService {
 
     /// 本连接的 `system.hello` 应答：在服务级能力之外，只有可在主机上打开 / 定位任务产物的
     /// 连接（本机来源且本构建能启动系统打开器）才带 `agent.openTaskFiles`，客户端据此决定
-    /// 是否展示「打开文件 / 在文件夹中显示」。
+    /// 是否展示「打开文件 / 在文件夹中显示」；同为本机来源且本构建 / 会话有系统剪贴板时才带
+    /// `agent.copyTaskFiles`（「复制文件」）。
     fn session_hello(&self, allow_local_platform: bool) -> ServiceHello {
         let mut hello = self.hello.clone();
         if allow_local_platform && crate::platform::LAUNCHES_PATHS {
@@ -2210,13 +2254,18 @@ impl GatewayService {
                 .capabilities
                 .push(method::CAPABILITY_AGENT_OPEN_TASK_FILES.to_owned());
         }
+        if allow_local_platform && crate::platform::copies_files_to_clipboard() {
+            hello
+                .capabilities
+                .push(method::CAPABILITY_AGENT_COPY_TASK_FILES.to_owned());
+        }
         hello
     }
 }
 
 /// 允许「本机来源」在 server 模式下调用的 `agent.platform.*` 子集。
 ///
-/// 只放行「与本机文件系统交互、但无系统级副作用」的两个打开动作。**不含**
+/// 只放行「与本机文件系统交互、但无系统级副作用」的打开 / 定位 / 复制任务产物到剪贴板。**不含**
 /// 自启 / 文件关联 / 协议注册 / `openPath` 之类可写注册表或任意路径的动作——那些仍
 /// 一律拒绝，即使来源是本机。
 fn local_platform_method_allowed(method: &str) -> bool {
@@ -2224,6 +2273,7 @@ fn local_platform_method_allowed(method: &str) -> bool {
         method,
         fluxdown_protocol::method::AGENT_PLATFORM_OPEN_TASK
             | fluxdown_protocol::method::AGENT_PLATFORM_REVEAL_TASK
+            | fluxdown_protocol::method::AGENT_PLATFORM_COPY_TASK_FILES
     )
 }
 
@@ -4511,6 +4561,7 @@ mod tests {
             let requests = [
                 fluxdown_protocol::method::AGENT_PLATFORM_OPEN_TASK,
                 fluxdown_protocol::method::AGENT_PLATFORM_REVEAL_TASK,
+                fluxdown_protocol::method::AGENT_PLATFORM_COPY_TASK_FILES,
                 fluxdown_protocol::method::AGENT_PLATFORM_OPEN_PATH,
                 fluxdown_protocol::method::AGENT_PLATFORM_INTEGRATION_GET,
                 fluxdown_protocol::method::AGENT_PLATFORM_SET_AUTOSTART,
@@ -4532,14 +4583,14 @@ mod tests {
                     failure.error.data.map(|data| data.code),
                 );
             }
-            // 本机来源：打开 / 定位任务产物进入参数校验（缺 taskId）；远程来源一律 Unsupported。
+            // 本机来源：打开 / 定位 / 复制任务产物进入参数校验（缺 taskId / taskIds）；远程来源一律 Unsupported。
             let task_files = if local {
                 ApplicationErrorCode::InvalidArgument
             } else {
                 ApplicationErrorCode::Unsupported
             };
             for (id, name) in (1..).zip(requests) {
-                let expected = if id <= 2 {
+                let expected = if id <= 3 {
                     task_files
                 } else {
                     ApplicationErrorCode::Unsupported
@@ -4552,16 +4603,19 @@ mod tests {
             }
             lanes.shutdown().await;
         }
-        assert!(
-            !harness
-                .service
-                .session_hello(false)
-                .capabilities
-                .iter()
-                .any(|capability| capability
-                    == fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES),
-            "remote connections must not advertise task file actions"
-        );
+        let remote_hello = harness.service.session_hello(false);
+        for capability in [
+            fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES,
+            fluxdown_protocol::method::CAPABILITY_AGENT_COPY_TASK_FILES,
+        ] {
+            assert!(
+                !remote_hello
+                    .capabilities
+                    .iter()
+                    .any(|item| item == capability),
+                "remote connections must not advertise {capability}"
+            );
+        }
         harness.finish().await;
     }
 
@@ -4593,14 +4647,21 @@ mod tests {
         let RpcResponse::Success(hello) = hello else {
             panic!("hello failed: {hello:?}");
         };
-        let advertised = hello.result["capabilities"]
-            .as_array()
-            .expect("capabilities")
-            .iter()
-            .any(|capability| {
-                capability == fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES
-            });
-        assert_eq!(advertised, crate::platform::LAUNCHES_PATHS);
+        let advertises = |name: &str| {
+            hello.result["capabilities"]
+                .as_array()
+                .expect("capabilities")
+                .iter()
+                .any(|capability| capability == name)
+        };
+        assert_eq!(
+            advertises(fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES),
+            crate::platform::LAUNCHES_PATHS
+        );
+        assert_eq!(
+            advertises(fluxdown_protocol::method::CAPABILITY_AGENT_COPY_TASK_FILES),
+            crate::platform::copies_files_to_clipboard()
+        );
         assert!(
             !harness
                 .service

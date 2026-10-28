@@ -1,4 +1,4 @@
-//! FluxDown 快传（临时文件分享）核心：宿主无关的 Rust 库，设计见 `docs/temp-share-design.md`。
+//! FluxDown FluxMesh（临时文件分享）核心：宿主无关的 Rust 库，设计见 `docs/temp-share-design.md`。
 //!
 //! 不依赖 agent / engine / daemon / GPUI / 数据库；宿主（agent）负责：持久化私钥、从 FluxCloud 拉取
 //! 网络策略与票据公钥、维护 [`ShareRegistry`]、把 [`ShareTelemetrySink`] 接到 FluxCloud、
@@ -20,6 +20,7 @@
 //! - [`receiver`]：[`ReceiveSession`]，块取数与校验；直连失败时回落到宿主提供的 [`ChunkSource`]。
 //! - [`adapter`]：[`LocalAdapter`]，回环 HTTP 区间适配器。
 //! - [`observe`]：[`ShareTelemetrySink`] 与 [`SessionEvent`]。
+//! - [`swarm`]：共享（多源共享）：内容表、`fluxdown/swarm/1` 提供端与接收端多对端调度。
 
 #![deny(missing_docs)]
 
@@ -32,6 +33,7 @@ pub mod receiver;
 pub mod sender;
 mod session;
 pub mod source;
+pub mod swarm;
 pub mod ticket;
 pub mod timefmt;
 pub mod types;
@@ -53,9 +55,12 @@ pub use source::{
     ChunkSource, SourceBytes, SourceError, SourceFuture, SourceKind, SourcePreference,
     SourceRequest,
 };
+pub use swarm::{
+    ChunkSet, ContentEntry, ContentRegistry, ContentSource, SWARM_ALPN, SwarmFile, SwarmPeer,
+};
 pub use ticket::{
-    KeyEntry, KeyRing, KeysResponse, SCOPE_BRIDGE, SCOPE_RECV, TicketError, TicketExpectation,
-    parse_ticket, verify_ticket,
+    KeyEntry, KeyRing, KeysResponse, SCOPE_BRIDGE, SCOPE_RECV, SCOPE_SWARM, TicketError,
+    TicketExpectation, parse_ticket, verify_ticket,
 };
 pub use types::*;
 pub use wire::ALPN;

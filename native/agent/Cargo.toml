@@ -113,7 +113,7 @@ desktop = [
 # 否则对前端请求回 503 提示页。
 web-ui = []
 
-# 快传（临时文件分享，iroh P2P）：默认开启，桌面 / headless server 官方构建都编入。
+# FluxMesh（临时文件分享，iroh P2P）：默认开启，桌面 / headless server 官方构建都编入。
 # 移动端经 `fluxdown_mobile` 的 `share-p2p` 转发（iOS 商店 flavor `--no-default-features` 剔除 iroh）。
 # 关闭后不下发 `agent.share` 能力，`agent.share.*` 恒报 `shareUnavailable`，分享链接不会落成下载任务。
 default = ["share-p2p"]

@@ -1,4 +1,4 @@
-//! 快传服务：装配 `fluxdown_share` 引擎、状态投影、端点生命周期与事件循环。
+//! FluxMesh服务：装配 `fluxdown_share` 引擎、状态投影、端点生命周期与事件循环。
 //!
 //! 宿主模式沿用 `LinkService`：`Arc::new_cyclic` 持自身 `Weak`；游离任务只持 `Weak`
 //! （否则状态目录锁永远不释放，嵌入式宿主无法同进程重启）；`run` 在宿主关停清单里，取消即结束。
@@ -18,14 +18,15 @@ use fluxdown_protocol::{
     ShareReceiveRecordDto, ShareReceiveStatus, ShareResolveDto, ShareStateDto, WsServerMsg,
 };
 use fluxdown_share::{
-    KeyRing, ReceiveSession, SessionEvent, SessionRole, ShareEndpoint, ShareRegistry,
+    ContentRegistry, KeyRing, ReceiveSession, SessionEvent, SessionRole, ShareEndpoint,
+    ShareRegistry,
 };
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::cloud::{CloudConfig, ResolveResponse};
-use super::store::{ShareStore, StoredShare};
+use super::store::{ShareStore, StoredProvide, StoredShare};
 use super::telemetry::{self, Telemetry};
 use super::time::parse_rfc3339_secs;
 use super::upload::UploadEntry;
@@ -71,7 +72,7 @@ pub struct ShareServiceParts {
     pub store: Arc<StateStore>,
     pub cloud: CloudApi,
     pub tasks: Arc<dyn LinkTaskCreator>,
-    /// 来自 `/tasks/events` SSE 的快传事件（`share.claimed` / `share.sessionKill` / `share.changed`）。
+    /// 来自 `/tasks/events` SSE 的FluxMesh事件（`share.claimed` / `share.sessionKill` / `share.changed`）。
     pub cloud_events: mpsc::UnboundedReceiver<Value>,
     /// 统一出口：云端暂存的分片上传、CDN 下载、桥接取块都经它取网络方案（`verified_payload = false`）。
     pub egress: crate::egress::Egress,
@@ -89,6 +90,8 @@ pub(super) struct ReceiveTask {
     pub token: String,
     pub status: i32,
     pub created: Instant,
+    /// 该任务对应清单里的文件下标（共享按它取本会话已校验的块位图与块哈希）。
+    pub file_index: u32,
 }
 
 impl ReceiveTask {
@@ -153,9 +156,17 @@ pub(super) struct Inner {
     /// 本机对分享表的修改计数（建 / 改 / 停 / 到期 / 云端副本变化 / 对账落地都加一）：对账在请求前记下，
     /// 落地时不一致就作废这次列表重来，避免请求期间的本机修改被旧列表覆盖（停掉的分享复活、新建的被判停止）。
     pub share_epoch: u64,
+    /// 各次接收的共享状态（`provides.json`）。
+    pub provides: Vec<StoredProvide>,
+    /// 云端不认识共享接口（404）：本次运行内不再查询与登记。
+    pub swarm_unsupported: bool,
+    /// 下一次共享登记的时刻；`None` = 没有待办。
+    pub announce_at: Option<Instant>,
+    /// 待向云端撤销的共享登记（文件根哈希）。
+    pub withdraw: Vec<String>,
 }
 
-/// 快传服务。
+/// FluxMesh服务。
 pub struct ShareService {
     pub(super) weak: Weak<Self>,
     pub(super) cloud: CloudApi,
@@ -183,6 +194,8 @@ pub struct ShareService {
     /// 分享表 / 接收记录落盘串行化：快照与写入在同一把锁内，避免并发写共用临时文件撕裂文件、
     /// 或旧快照晚于新快照落盘。
     pub(super) persist: Mutex<()>,
+    /// 本机能向别人提供的内容（端点的共享服务端只读它）；由 `sync_content` 整体重算。
+    pub(super) content: ContentRegistry,
     #[cfg(test)]
     pub(super) addr_hint: StdMutex<Option<TestAddrHint>>,
 }
@@ -203,12 +216,14 @@ impl ShareService {
         let local = store.load_config().await;
         let shares = store.load_shares().await;
         let records = store.load_records().await;
+        let provides = store.load_provides().await;
         logs::set_level(local.iroh_log_level);
         let (session_tx, session_rx) = mpsc::unbounded_channel();
         let inner = Inner {
             local,
             shares,
             records,
+            provides,
             ..Inner::default()
         };
         let http = Arc::new(super::source::SourceHttp::new(parts.egress.clone()));
@@ -233,6 +248,7 @@ impl ShareService {
             inner: StdMutex::new(inner),
             lifecycle: Mutex::new(()),
             persist: Mutex::new(()),
+            content: ContentRegistry::new(),
             #[cfg(test)]
             addr_hint: StdMutex::new(None),
         }))
@@ -244,7 +260,7 @@ impl ShareService {
 
     // ───────────── 事件循环 ─────────────
 
-    /// 事件循环：会话事件、daemon 任务事件、云端 SSE 快传事件、到期计时；取消即结束。
+    /// 事件循环：会话事件、daemon 任务事件、云端 SSE FluxMesh事件、到期计时；取消即结束。
     pub async fn run(self: Arc<Self>, cancel: CancellationToken) {
         if self.started.swap(true, Ordering::SeqCst) {
             return;
@@ -272,9 +288,18 @@ impl ShareService {
             self.weak.clone(),
             cancel.child_token(),
         ));
-        self.initial_sync().await;
+        // 启动检查只针对上次运行留下的分享：之后新建的分享不属于「重启恢复」。
+        let persisted: Vec<String> = self.with(|i| {
+            i.shares
+                .iter()
+                .filter(|s| s.dto.status == fluxdown_protocol::ShareStatus::Active)
+                .map(|s| s.dto.id.clone())
+                .collect()
+        });
+        self.initial_sync(&persisted).await;
         loop {
             let deadline = self.next_expiry_delay();
+            let announce_deadline = self.next_announce_delay();
             tokio::select! {
                 () = cancel.cancelled() => break,
                 () = self.wake.notified() => {}
@@ -284,6 +309,12 @@ impl ShareService {
                         None => std::future::pending().await,
                     }
                 } => self.on_expiry().await,
+                () = async {
+                    match announce_deadline {
+                        Some(delay) => tokio::time::sleep(delay).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.announce().await,
                 event = session_rx.recv() => match event {
                     Some(event) => self.handle_session_event(event).await,
                     None => break,
@@ -311,7 +342,7 @@ impl ShareService {
     }
 
     /// 启动时的一次性同步：载入云端策略、重新登记仍有效的分享。没有本机分享时不做任何网络请求之外的事。
-    async fn initial_sync(self: &Arc<Self>) {
+    async fn initial_sync(self: &Arc<Self>, persisted_active: &[String]) {
         if let Err(error) = self.config(false).await {
             tracing::debug!(reason = ?error.reason, "share policy unavailable at startup");
         }
@@ -321,8 +352,9 @@ impl ShareService {
                 .any(|s| s.dto.status == fluxdown_protocol::ShareStatus::Active)
         });
         if has_active {
-            self.restore_shares().await;
+            self.restore_shares(persisted_active).await;
         }
+        self.restore_provides().await;
         self.publish().await;
     }
 
@@ -349,11 +381,17 @@ impl ShareService {
     fn next_expiry_delay(&self) -> Option<Duration> {
         let now = fluxdown_share::timefmt::now_unix_secs();
         let next = self.with(|i| {
-            i.shares
+            let shares = i
+                .shares
                 .iter()
                 .filter(|s| s.dto.status == fluxdown_protocol::ShareStatus::Active)
-                .filter_map(|s| parse_rfc3339_secs(&s.dto.expires_at))
-                .min()
+                .filter_map(|s| parse_rfc3339_secs(&s.dto.expires_at));
+            let provides = i
+                .provides
+                .iter()
+                .filter(|s| s.state == fluxdown_protocol::ShareProvideState::Providing)
+                .filter_map(|s| parse_rfc3339_secs(s.share_expires_at.as_deref()?));
+            shares.chain(provides).min()
         })?;
         Some(Duration::from_secs(next.saturating_sub(now)))
     }
@@ -375,8 +413,14 @@ impl ShareService {
             }
             changed
         });
+        let provides_ended = self.with(|i| i.end_expired_provides(now));
+        if provides_ended {
+            self.persist_provides().await;
+        }
         if changed {
             self.persist_shares().await;
+        }
+        if changed || provides_ended {
             self.refresh_endpoint_later();
             self.publish().await;
         }
@@ -489,6 +533,9 @@ impl ShareService {
                 });
                 self.publish().await;
             }
+            SessionEvent::SourceChanged { share_id } => self.on_source_changed(&share_id).await,
+            // 共享提供的内容被改 / 删：停止提供并撤销登记。
+            SessionEvent::ContentChanged { root_hash } => self.on_content_changed(&root_hash).await,
         }
     }
 
@@ -605,7 +652,8 @@ impl ShareService {
             }
             any
         });
-        if any {
+        let provides_changed = self.drop_provide_tasks(ids).await;
+        if any || provides_changed {
             self.after_task_change().await;
         }
     }
@@ -651,13 +699,18 @@ impl ShareService {
 
     /// 任务状态变化后的收尾：移除已完成任务、关闭无人使用的会话、更新记录、调整端点。
     async fn after_task_change(&self) {
-        let (closing, adapter, records_changed) = self.with(|i| {
+        let (closing, adapter, records_changed, finished) = self.with(|i| {
             let done: Vec<String> = i
                 .receive_tasks
                 .iter()
                 .filter(|(_, t)| t.status == 3)
                 .map(|(id, _)| id.clone())
                 .collect();
+            // 完成的任务在移除前取出它的清单文件：共享的记录转为提供整个文件。
+            let finished = done
+                .iter()
+                .filter_map(|id| i.finished_provide_file(id))
+                .collect::<Vec<_>>();
             for id in done {
                 i.drop_task(&id);
             }
@@ -706,7 +759,7 @@ impl ShareService {
             } else {
                 None
             };
-            (closing, adapter, records_changed)
+            (closing, adapter, records_changed, finished)
         });
         for session in closing {
             session.close().await;
@@ -717,6 +770,7 @@ impl ShareService {
         if records_changed {
             self.persist_records().await;
         }
+        self.add_provide_files(finished).await;
         self.refresh_endpoint().await;
         self.publish().await;
     }

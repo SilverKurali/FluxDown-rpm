@@ -81,6 +81,7 @@ pub fn build_menus(translator: &Translator) -> Vec<Menu> {
         MenuItem::separator(),
         MenuItem::action(t(translator, "openFile"), dl::OpenSelected),
         MenuItem::action(t(translator, "openFolder"), dl::RevealSelected),
+        MenuItem::action(t(translator, "copyFileAction"), dl::CopySelectedFiles),
         MenuItem::action(t(translator, "copyUrl"), dl::CopySelectedUrl),
         MenuItem::action(t(translator, "renameTask"), dl::RenameSelected),
         MenuItem::action(t(translator, "webChangeUrl"), dl::ChangeSelectedUrl),
@@ -237,6 +238,7 @@ fn install_download_fallbacks(cx: &mut App) {
     forward_to_downloads::<dl::ClearFinished>(cx);
     forward_to_downloads::<dl::OpenSelected>(cx);
     forward_to_downloads::<dl::RevealSelected>(cx);
+    forward_to_downloads::<dl::CopySelectedFiles>(cx);
     forward_to_downloads::<dl::CopySelectedUrl>(cx);
     forward_to_downloads::<dl::RenameSelected>(cx);
     forward_to_downloads::<dl::ChangeSelectedUrl>(cx);

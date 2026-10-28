@@ -27,7 +27,7 @@ use crate::downloader::DownloadError;
 use crate::logger::{log_info, log_warn};
 #[cfg(feature = "plugins")]
 use crate::plugin::{PluginManager, ResolveRequest, ResolveResult};
-use crate::proxy_config::{ProxyConfig, normalize_no_proxy};
+use crate::proxy_config::{ProxyConfig, proxy_bypass_list};
 
 /// 出口方案无法得出。
 #[derive(Debug, thiserror::Error)]
@@ -132,14 +132,15 @@ pub struct EgressPlan {
 }
 
 /// 把全局代理设置解析成具体代理：`System` 读系统设置（可能起子进程，需在阻塞上下文调用），
-/// `Auto` 与未配置一样直连（同下载任务的兜底 client）。
+/// `Auto` 与未配置一样直连（同下载任务的兜底 client）。直连名单与下载任务 client 同口径：
+/// 环回恒直连 + 归一化后的用户 / 系统名单。
 #[must_use]
 pub fn proxy_endpoint(proxy: &ProxyConfig) -> Option<ProxyEndpoint> {
     let resolved = proxy.resolve();
     let url = resolved.to_proxy_url()?;
     Some(ProxyEndpoint {
         url,
-        no_proxy: normalize_no_proxy(&resolved.no_proxy_list),
+        no_proxy: proxy_bypass_list(&resolved.no_proxy_list),
     })
 }
 

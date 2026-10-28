@@ -92,6 +92,8 @@ pub struct SourceBytes {
     pub cdn: u64,
     /// 网关桥接。
     pub bridge: u64,
+    /// 共享对端（持有同一文件的其他设备）。
+    pub peer: u64,
 }
 
 /// 会话级累计（跨重连保持）。
@@ -99,6 +101,7 @@ pub struct SourceBytes {
 pub(crate) struct SourceCounters {
     cdn: AtomicU64,
     bridge: AtomicU64,
+    peer: AtomicU64,
 }
 
 impl SourceCounters {
@@ -109,10 +112,15 @@ impl SourceCounters {
         };
     }
 
+    pub(crate) fn add_peer(&self, bytes: u64) {
+        self.peer.fetch_add(bytes, Ordering::Relaxed);
+    }
+
     pub(crate) fn snapshot(&self) -> SourceBytes {
         SourceBytes {
             cdn: self.cdn.load(Ordering::Relaxed),
             bridge: self.bridge.load(Ordering::Relaxed),
+            peer: self.peer.load(Ordering::Relaxed),
         }
     }
 }

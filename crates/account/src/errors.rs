@@ -129,6 +129,8 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         ErrorReason::ShareCloudNotReady => "errReasonShareCloudNotReady",
         ErrorReason::ShareTrafficExhausted => "errReasonShareTrafficExhausted",
         ErrorReason::ShareCloudUnavailable => "errReasonShareCloudUnavailable",
+        ErrorReason::ShareOwnShare => "errReasonShareOwnShare",
+        ErrorReason::ShareSourceMissing => "errReasonShareSourceMissing",
         ErrorReason::PaymentDisabled
         | ErrorReason::PaymentGatewayFailed
         | ErrorReason::PlanNotPurchasable

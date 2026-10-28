@@ -1,5 +1,5 @@
 /**
- * 快传分享落地页的举报入口：一个紧凑的「举报」按钮，展开后是小表单。
+ * FluxMesh分享落地页的举报入口：一个紧凑的「举报」按钮，展开后是小表单。
  *
  * 提交到同源代理 `POST /api/cloud/share/public/<slug>/report`（见 src/lib/share-proxy.ts，FluxCloud 每 IP 5 次 / 小时）。
  * 发给上游的 reason 是固定中文文本（`REPORT_REASON_VALUE`，后台审核员阅读），界面文案按语言显示。
@@ -125,7 +125,7 @@ export default function ShareReport({
     <form className="flex max-w-[560px] flex-col gap-4" onSubmit={(event) => void submit(event)}>
       <div className="flex flex-col gap-1">
         <h2 className="font-medium text-fg">{labels.title}</h2>
-        <p className="text-sm text-fg-muted">{labels.intro}</p>
+        <p className="text-sm text-muted">{labels.intro}</p>
       </div>
       <label className="flex flex-col gap-1.5">
         <span className="eyebrow-plain">{labels.reasonLabel}</span>
@@ -169,7 +169,7 @@ export default function ShareReport({
       </label>
       {siteKey && (
         <div className="flex flex-col gap-2">
-          {!token && <p className="text-sm text-fg-muted">{labels.verify}</p>}
+          {!token && <p className="text-sm text-muted">{labels.verify}</p>}
           <TurnstileWidget
             ref={widget}
             siteKey={siteKey}

@@ -131,6 +131,8 @@ pub(super) struct CreateBody<'a> {
     pub max_claims: Option<u32>,
     pub notify_on_claim: bool,
     pub endpoint_id: &'a str,
+    /// 加入共享（多设备按内容互相取块）。
+    pub swarm: bool,
 }
 
 /// `ShareDto`（云端）。
@@ -167,6 +169,9 @@ pub(super) struct CloudShare {
     pub cloud_state: String,
     #[serde(default)]
     pub cloud_bytes: i64,
+    /// 加入共享；旧云端不带。
+    #[serde(default)]
+    pub swarm: bool,
 }
 
 impl CloudShare {
@@ -254,6 +259,9 @@ pub(super) struct ResolveShare {
     /// 分享方设备此刻是否在线（云端知道时才带）。
     #[serde(default)]
     pub sender_online: Option<bool>,
+    /// 云端此刻能列出的其他在线持有该内容的设备数；旧云端不带。
+    #[serde(default)]
+    pub swarm_peers: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -263,6 +271,50 @@ pub(super) struct ResolveResponse {
     pub ticket: String,
     #[serde(default)]
     pub guest_token: Option<String>,
+}
+
+/// `POST /share/swarm/peers` 响应。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PeersResponse {
+    #[serde(default)]
+    pub files: Vec<PeersFile>,
+    #[serde(default)]
+    pub refresh_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PeersFile {
+    pub file_index: u32,
+    #[allow(dead_code)]
+    pub root_hash: String,
+    pub ticket: String,
+    #[serde(default)]
+    pub peers: Vec<CloudPeer>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CloudPeer {
+    pub endpoint_id: String,
+    #[serde(default)]
+    pub complete: bool,
+}
+
+/// `POST /share/swarm/announce` 响应（顺序与请求的 `entries` 一致）。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AnnounceResponse {
+    #[serde(default)]
+    pub entries: Vec<AnnounceResult>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AnnounceResult {
+    pub root_hash: String,
+    pub state: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -373,7 +425,7 @@ pub(super) struct CompleteBody<'a> {
     pub parts: &'a [super::upload_state::DonePart],
 }
 
-/// 云端错误 → 稳定的 RPC 错误（快传专属原因优先，其余沿用通用映射）。
+/// 云端错误 → 稳定的 RPC 错误（FluxMesh专属原因优先，其余沿用通用映射）。
 pub(super) fn share_error(error: &CloudError) -> RpcErrorData {
     use ApplicationErrorCode as Code;
     let mapped = match (error.code.as_deref(), error.status) {

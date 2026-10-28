@@ -8,12 +8,42 @@ import type { ShareReceiveRecordDto } from '../../lib/rpc'
 import { Badge, Button, EmptyState, toast, useIsMobile } from '../../ui'
 import { accountErrorKey } from '../settings/sections/account/errorText'
 import { formatBytes } from '../downloads/dialogs/utils'
-import { RECEIVE_STATUS_KEYS, dateTimeLabel, mergeReceiveRecords } from './model'
+import { RECEIVE_STATUS_KEYS, PROVIDE_STATE_KEYS, dateTimeLabel, mergeReceiveRecords } from './model'
 import { useShareRecords } from './state'
 
 const PAGE = 20
 
 const statusTone = (status: ShareReceiveRecordDto['status']) => (status === 'completed' ? 'success' : status === 'failed' ? 'destructive' : 'accent')
+
+function ProvideCell({ record, onStopped }: { record: ShareReceiveRecordDto; onStopped: (next: ShareReceiveRecordDto) => void }) {
+  const t = useT()
+  const [busy, setBusy] = useState(false)
+  const state = record.provideState ?? 'off'
+  const key = PROVIDE_STATE_KEYS[state]
+  if (key === null) return null
+  return (
+    <span className="inline-flex items-center gap-2">
+      <Badge tone={state === 'providing' ? 'success' : 'neutral'}>{t(key)}</Badge>
+      {state === 'providing' ? (
+        <button
+          type="button"
+          disabled={busy}
+          className="shrink-0 text-xs text-primary underline-offset-2 hover:underline disabled:opacity-50"
+          onClick={() => {
+            setBusy(true)
+            rpc.agent.share
+              .stopProviding({ recordId: record.id })
+              .then(onStopped)
+              .catch((error: unknown) => toast.error(t(accountErrorKey(error))))
+              .finally(() => setBusy(false))
+          }}
+        >
+          {t('shareStopProviding')}
+        </button>
+      ) : null}
+    </span>
+  )
+}
 
 interface Paging {
   records: readonly ShareReceiveRecordDto[]
@@ -57,6 +87,8 @@ export function ReceiveRecords() {
     }
   }
 
+  const stopped = (next: ShareReceiveRecordDto) =>
+    setPaging((previous) => ({ ...previous, records: previous.records.map((record) => (record.id === next.id ? next : record)) }))
   const records = mergeReceiveRecords(live, paging.records)
   if (records.length === 0) {
     return <EmptyState icon={Download} title={t('shareReceivedEmpty')} />
@@ -77,6 +109,7 @@ export function ReceiveRecords() {
                 {formatBytes(record.totalBytes)}
               </div>
               <div className="tabular text-xs text-text-tertiary">{dateTimeLabel(record.startedAt)}</div>
+              <ProvideCell record={record} onStopped={stopped} />
             </li>
           ))}
         </ul>
@@ -90,6 +123,7 @@ export function ReceiveRecords() {
                 <th className="px-3 py-2 font-normal">{t('shareColSize')}</th>
                 <th className="px-3 py-2 font-normal">{t('shareColStarted')}</th>
                 <th className="px-3 py-2 font-normal">{t('shareColStatus')}</th>
+                <th className="px-3 py-2 font-normal">{t('shareColProvide')}</th>
               </tr>
             </thead>
             <tbody>
@@ -108,6 +142,9 @@ export function ReceiveRecords() {
                   <td className="tabular px-3 py-2 text-xs text-muted-foreground">{dateTimeLabel(record.startedAt)}</td>
                   <td className="px-3 py-2">
                     <Badge tone={statusTone(record.status)}>{t(RECEIVE_STATUS_KEYS[record.status])}</Badge>
+                  </td>
+                  <td className="px-3 py-2">
+                    <ProvideCell record={record} onStopped={stopped} />
                   </td>
                 </tr>
               ))}

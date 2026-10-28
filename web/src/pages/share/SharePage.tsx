@@ -1,4 +1,4 @@
-// 快传页（活动栏路由 `/share`，可隐藏）：顶部 6 位取件码 / 分享链接输入框，下方三个页签
+// FluxMesh页（活动栏路由 `/share`，可隐藏）：顶部 6 位取件码 / 分享链接输入框，下方三个页签
 // [我的分享 | 接收记录 | 网络诊断]。对应 GPUI `crates/share` 的管理页。
 
 import { Share2 } from 'lucide-react'

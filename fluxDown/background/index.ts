@@ -13,7 +13,7 @@ import { logWarn } from "@/utils/error-log";
 import { installBackgroundErrorLog } from "@/utils/error-log-background";
 import { loadSettings, persistSettings } from "@/utils/settings";
 import type { ContentMessage } from "./protocol";
-import { restoreBreakerState } from "./breaker";
+import { installBypassKey, restoreBreakerState } from "./breaker";
 import { installBrowserDownloadNotices } from "./browser-downloads";
 import { installCaptureTracker } from "./capture-tracker";
 import {
@@ -77,6 +77,7 @@ export function startBackground(): void {
 
   installSettingsCacheListener();
   installRequestCache();
+  installBypassKey();
   installTabState();
   installProbe();
   installRulesStore();

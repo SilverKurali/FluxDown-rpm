@@ -140,16 +140,18 @@ pub struct BytesSplit {
     pub relay: u64,
     pub cdn: u64,
     pub bridge: u64,
+    pub peer: u64,
     /// 直连占全部来源字节的比例（四舍五入的整数百分比）；还没有字节为 `None`。
     pub direct_percent: Option<u8>,
 }
 
 impl BytesSplit {
-    /// 直连 / 中继之外有字节的来源：`(文案键, 字节数)`，云端暂存在前，桥接在后。
+    /// 直连 / 中继之外有字节的来源：`(文案键, 字节数)`，云端暂存在前，桥接、共享依次在后。
     pub fn extras(&self) -> impl Iterator<Item = (&'static str, u64)> {
         [
             ("shareDiagSrcCloud", self.cdn),
             ("shareDiagSrcBridge", self.bridge),
+            ("shareDiagSrcPeer", self.peer),
         ]
         .into_iter()
         .filter(|(_, bytes)| *bytes > 0)
@@ -161,7 +163,8 @@ pub fn bytes_split(bytes: &ShareSessionBytesDto) -> BytesSplit {
     let total = u128::from(bytes.direct)
         + u128::from(bytes.relay)
         + u128::from(bytes.cdn)
-        + u128::from(bytes.bridge);
+        + u128::from(bytes.bridge)
+        + u128::from(bytes.peer);
     let direct_percent = (u128::from(bytes.direct) * 100 + total / 2)
         .checked_div(total)
         .map(|percent| u8::try_from(percent.min(100)).unwrap_or(100));
@@ -170,6 +173,7 @@ pub fn bytes_split(bytes: &ShareSessionBytesDto) -> BytesSplit {
         relay: bytes.relay,
         cdn: bytes.cdn,
         bridge: bytes.bridge,
+        peer: bytes.peer,
         direct_percent,
     }
 }
@@ -493,6 +497,7 @@ mod tests {
             relay: 0,
             cdn: 2,
             bridge: 1,
+            peer: 0,
         });
         assert_eq!(split.direct_percent, Some(25));
         assert_eq!(
@@ -504,6 +509,21 @@ mod tests {
             ..ShareSessionBytesDto::default()
         });
         assert_eq!(direct_only.extras().count(), 0);
+    }
+
+    #[test]
+    fn bytes_split_lists_peer_bytes_after_bridge() {
+        let split = bytes_split(&ShareSessionBytesDto {
+            direct: 1,
+            bridge: 1,
+            peer: 2,
+            ..ShareSessionBytesDto::default()
+        });
+        assert_eq!(split.direct_percent, Some(25));
+        assert_eq!(
+            split.extras().collect::<Vec<_>>(),
+            [("shareDiagSrcBridge", 1), ("shareDiagSrcPeer", 2)]
+        );
     }
 
     #[test]

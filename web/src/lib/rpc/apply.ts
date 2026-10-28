@@ -33,7 +33,7 @@ export function runtimeRetained(status: number): boolean {
 }
 
 /**
- * 应用一条快传会话进度（对应 Rust `ShareStateDto::apply_progress`）：刷新匹配 `sessionId` 的接收方行与
+ * 应用一条FluxMesh会话进度（对应 Rust `ShareStateDto::apply_progress`）：刷新匹配 `sessionId` 的接收方行与
  * 任务事实的路径；未知会话原样返回。后帧完整取代前帧，所以同一会话的相邻帧可合并。
  */
 export function applyShareProgress(share: ShareStateDto, event: ShareProgressDto): ShareStateDto {

@@ -1,4 +1,4 @@
-//! 「快传」设置页的纯逻辑：文本输入的解析 / 回显、选项列表、整体提交前的差异判定。
+//! 「FluxMesh」设置页的纯逻辑：文本输入的解析 / 回显、选项列表、整体提交前的差异判定。
 //!
 //! `agent.share.setLocalConfig` 整体替换 [`ShareLocalConfigDto`]：视图以当前值为底稿改一个字段后整体提交，
 //! 这里负责「改什么」的纯函数（端口 / 额外地址 / 限速的解析，档位 / 次数 / 中继的候选，是否 no-op），不依赖 GPUI。
@@ -352,6 +352,8 @@ pub fn normalized(config: &ShareLocalConfigDto) -> ShareLocalConfigDto {
         .filter(|bytes| *bytes != 0);
     config.pinned_relay = config.pinned_relay.filter(|url| !url.is_empty());
     config.default_tier_id = config.default_tier_id.filter(|id| !id.is_empty());
+    config.default_swarm = config.default_swarm.filter(|v| !*v);
+    config.auto_provide = config.auto_provide.filter(|v| !*v);
     config
 }
 
@@ -732,6 +734,15 @@ mod tests {
         assert!(is_noop(&base(), &other));
         other.default_max_claims = 3;
         assert!(!is_noop(&base(), &other));
+        let mut swarm = base();
+        swarm.default_swarm = Some(true);
+        swarm.auto_provide = Some(true);
+        assert!(is_noop(&base(), &swarm));
+        swarm.default_swarm = Some(false);
+        assert!(!is_noop(&base(), &swarm));
+        swarm.default_swarm = None;
+        swarm.auto_provide = Some(false);
+        assert!(!is_noop(&base(), &swarm));
     }
 
     #[test]

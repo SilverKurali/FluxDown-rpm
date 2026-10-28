@@ -1,5 +1,6 @@
 // 任务行 / 分组头右键菜单（移植 task_table.rs 的 `context_menu_items` 与 `group_context_menu`）。
-// 「打开文件 / 在文件夹中显示」仅在 agent 下发 `agent.openTaskFiles`（同机）时出现，其余情况用浏览器下载已完成文件。
+// 「打开文件 / 在文件夹中显示」仅在 agent 下发 `agent.openTaskFiles`（同机）时出现，「复制文件」仅在下发
+// `agent.copyTaskFiles`（同机桌面会话）时出现；远程 / NAS 连接都用浏览器下载已完成文件。
 
 import {
   AppWindow,
@@ -7,6 +8,7 @@ import {
   CircleCheck,
   Copy,
   Download,
+  Files,
   Layers,
   Link2,
   FolderOpen,
@@ -28,6 +30,7 @@ import type { PluginCommandRef } from '../../plugins/contributions'
 import type { MenuEntry } from '../../../ui'
 import {
   canOpenGroupFolder,
+  canCopyTaskFiles,
   canOpenTaskFile,
   canRedownload,
   canRevealTaskFile,
@@ -36,6 +39,7 @@ import {
   confirmIgnorePluginRetry,
   copySourceLink,
   copyUrls,
+  copyTaskFiles,
   deleteGroup,
   deleteViews,
   downloadViewsFiles,
@@ -164,7 +168,16 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail, selecti
       onSelect: () => void revealTaskFile(only.taskId),
     })
   }
-  // 分享：未编入快传时不出现；未完成 / 文件丢失 / 远程任务 / 未登录时置灰并在说明行给出原因（多选合成一个分享）。
+  if (canCopyTaskFiles(views)) {
+    entries.push({
+      type: 'item',
+      key: 'copy-files',
+      label: t('copyFileAction'),
+      icon: Files,
+      onSelect: () => void copyTaskFiles(views),
+    })
+  }
+  // 分享：未编入FluxMesh时不出现；未完成 / 文件丢失 / 远程任务 / 未登录时置灰并在说明行给出原因（多选合成一个分享）。
   const shareState = peekSendState(views)
   if (shareState !== 'hidden') {
     entries.push({

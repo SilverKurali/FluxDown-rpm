@@ -238,6 +238,11 @@ pub enum DownloadsCommand {
     RevealTask {
         task_id: String,
     },
+    /// 把已完成任务的产物以文件形式写入系统剪贴板（`agent.platform.copyTaskFiles`，可在文件管理器
+    /// 里粘贴）；任一产物已不在磁盘上即整体失败（`notFound`）。
+    CopyTaskFiles {
+        task_ids: Vec<String>,
+    },
     /// 重扫已完成任务的产物是否仍在下载目录（`daemon.task.rescan`，结果经
     /// `fileMissingChanged` 事件回流）。
     RescanFiles,
@@ -2459,7 +2464,7 @@ mod tests {
             Some(SharePathKind::Relay)
         );
 
-        // 快传不可用：入口门控随之关闭。
+        // FluxMesh不可用：入口门控随之关闭。
         controller.apply_event(&agent(AgentEvent::ShareChanged(
             fluxdown_protocol::ShareStateDto::default(),
         )));

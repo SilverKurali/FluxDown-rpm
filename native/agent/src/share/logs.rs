@@ -1,4 +1,4 @@
-//! iroh / 快传的内存 tracing 环形缓冲（诊断页「iroh 日志」）。
+//! iroh / FluxMesh的内存 tracing 环形缓冲（诊断页「iroh 日志」）。
 //!
 //! 全进程一份：`logging.rs` / `server_mode.rs` 装订阅者时挂上 [`layer`]，它只收 `iroh*` 与
 //! `fluxdown_share` 目标、级别不低于当前设置的事件；缓冲有界，只在内存。

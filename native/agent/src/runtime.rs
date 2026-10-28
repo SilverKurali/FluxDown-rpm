@@ -827,7 +827,7 @@ pub(crate) struct CloudServices {
     pub(crate) device_meta_task: tokio::task::JoinHandle<()>,
     pub(crate) cdn_task: tokio::task::JoinHandle<()>,
     pub(crate) notify_task: tokio::task::JoinHandle<()>,
-    /// 快传服务（`share-p2p` 编入且装配成功时存在）。
+    /// FluxMesh服务（`share-p2p` 编入且装配成功时存在）。
     #[cfg(feature = "share-p2p")]
     pub(crate) share: Option<Arc<crate::share::ShareService>>,
     #[cfg(feature = "share-p2p")]
@@ -909,7 +909,7 @@ pub(crate) async fn start_cloud_services(
                 let task = tokio::spawn(service.clone().run(cancel.clone()));
                 (Some(service), task)
             }
-            // 快传不可用不拖垮 agent：不装配服务，`agent.share` 能力不下发。
+            // FluxMesh不可用不拖垮 agent：不装配服务，`agent.share` 能力不下发。
             Err(error) => {
                 tracing::error!(error = %format!("{error:#}"), "share service could not start");
                 (None, tokio::spawn(async {}))

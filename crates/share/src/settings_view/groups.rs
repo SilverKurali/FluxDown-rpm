@@ -87,6 +87,12 @@ impl ShareSettingsView {
             Self::set_default_notify,
             cx,
         );
+        let swarm = self.switch(
+            "share-set-swarm",
+            config.default_swarm.unwrap_or(true),
+            Self::set_default_swarm,
+            cx,
+        );
         let rows = vec![
             setting_row(
                 RowSpec::new(
@@ -117,6 +123,17 @@ impl ShareSettingsView {
                     "shareSetDefaultNotify",
                     "shareSetDefaultNotifyDesc",
                     notify,
+                ),
+                window,
+                cx,
+            ),
+            setting_row(
+                RowSpec::new(
+                    translator,
+                    "swarm",
+                    "shareSetDefaultSwarm",
+                    "shareSetDefaultSwarmDesc",
+                    swarm,
                 ),
                 window,
                 cx,
@@ -324,7 +341,24 @@ impl ShareSettingsView {
             .as_ref()
             .is_some_and(|edits| edits.rate_invalid)
             .then(|| text(translator, "shareSetErrRate"));
+        let auto_provide = self.switch(
+            "share-set-auto-provide",
+            config.auto_provide.unwrap_or(true),
+            Self::set_auto_provide,
+            cx,
+        );
         let rows = vec![
+            setting_row(
+                RowSpec::new(
+                    translator,
+                    "autoProvide",
+                    "shareSetAutoProvide",
+                    "shareSetAutoProvideDesc",
+                    auto_provide,
+                ),
+                window,
+                cx,
+            ),
             setting_row(
                 RowSpec::new(
                     translator,

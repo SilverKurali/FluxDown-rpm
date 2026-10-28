@@ -112,6 +112,8 @@ export type ErrorReason =
   | 'shareCloudNotReady'
   | 'shareTrafficExhausted'
   | 'shareCloudUnavailable'
+  | 'shareOwnShare'
+  | 'shareSourceMissing'
   | 'unknown';
 
 /** `error.data`：应用错误的机器可读详情。 */

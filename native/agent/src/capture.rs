@@ -192,7 +192,7 @@ impl CaptureService {
         }
     }
 
-    /// 接入分享链接出口（快传服务）；缺省没有，分享链接按「快传不可用」拒绝。
+    /// 接入分享链接出口（FluxMesh服务）；缺省没有，分享链接按「FluxMesh不可用」拒绝。
     #[must_use]
     pub fn with_share_links(
         mut self,
@@ -264,7 +264,7 @@ impl CaptureService {
             .into_iter()
             .flat_map(split_batch)
             .collect::<Vec<_>>();
-        // 分享链接不是下载地址：交给快传服务解析，等 UI 确认后才建任务；绝不落成下载任务。
+        // 分享链接不是下载地址：交给FluxMesh服务解析，等 UI 确认后才建任务；绝不落成下载任务。
         let (share_requests, requests): (Vec<_>, Vec<_>) = requests
             .into_iter()
             .partition(|request| fluxdown_protocol::capture_link::is_share_link(&request.url));
@@ -451,6 +451,7 @@ impl CaptureService {
                 name: String::new(),
                 source_url: request.url,
                 error: String::new(),
+                plugin_id: String::new(),
                 items: Vec::new(),
             });
         }

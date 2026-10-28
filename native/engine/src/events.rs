@@ -171,6 +171,12 @@ pub enum EngineEvent {
         reason: String,
     },
 
+    /// 插件状态（列表 / 设置 / 站点默认）发生变化，携带最新完整列表。
+    /// 客户端整体替换插件列表并重新拉取插件相关查询。
+    /// 仅 `plugins` feature 下由 `PluginManager::publish_state` 发出。
+    #[cfg(feature = "plugins")]
+    PluginsChanged(Vec<crate::plugin::PluginInfo>),
+
     /// BT 重复添加检测：新任务的 info-hash 已被另一任务持有（下载或做种），
     /// 引擎已删除新建的占位任务行（不产生失败任务）。宿主据此提示用户并
     /// 可跳转已有任务（兼容 WebSocket 事件为 `duplicateTorrent`）。
@@ -204,8 +210,12 @@ pub enum EngineEvent {
     },
     /// 可移植视图渲染 / 事件处理失败（会话仍保持打开，下一次渲染可恢复）。
     PluginViewFailed { session: String, message: String },
-    /// 可移植视图会话已结束（`reason`：`closed` / `expired` / `pluginUnloaded`）。
+    /// 可移植视图会话已结束（`reason`：`closed` / `expired` / `pluginUnloaded` /
+    /// `requested`——插件经 `ctx.close()` 请求关闭承载容器）。
     PluginViewClosed { session: String, reason: String },
+    /// 插件经 `ctx.navigate()` 请求主界面跳转；`target` 为已校验的路由 id
+    /// （内置 `downloads` / `rss` / `webhooks` / `share`，或 `plugin:<identity>:<view>`）。
+    PluginViewNavigate { session: String, target: String },
     /// 插件经 `flux.ui.toast` 请求的提示（`level`：info/success/warning/error）。
     PluginToast {
         identity: String,

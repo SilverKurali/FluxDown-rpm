@@ -131,7 +131,7 @@ pub(crate) fn toggles() -> Vec<ActivityBarToggle> {
 }
 
 /// 偏好 → 活动栏可选入口可见性；幂等，窗口创建与每次偏好快照/事件都走这里。
-/// 快传入口还要求 agent 端快传可用（未编入 / 云端关闭时整个入口隐藏）。
+/// FluxMesh入口还要求 agent 端FluxMesh可用（未编入 / 云端关闭时整个入口隐藏）。
 pub(crate) fn apply_visibility(
     shell: &mut ShellView,
     preferences: &BTreeMap<String, serde_json::Value>,

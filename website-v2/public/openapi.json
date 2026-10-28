@@ -3445,6 +3445,10 @@
           "referrer": {
             "type": "string"
           },
+          "resolverPluginId": {
+            "type": "string",
+            "description": "预解析命中的插件（[`ResolvePreviewResponse::plugin_id`] 原样回传）。非空 = 成员任务\n固定绑定该插件，建组时它已不可用（禁用 / 卸载 / 无 resolver）则成员以「解析插件不可用」\nfail-closed 落库；空 = 旧客户端，引擎按预解析同一规则（仅 `multi` resolver）重新选择。"
+          },
           "saveDir": {
             "type": "string",
             "description": "基础保存目录（组根目录 = `save_dir/sanitize(group_name)`）；\n空 = 使用全局默认保存目录。"
@@ -4995,6 +4999,10 @@
           },
           "name": {
             "type": "string"
+          },
+          "pluginId": {
+            "type": "string",
+            "description": "产出本清单的插件 identity（无清单时为空）；建组时原样填入\n[`CreateGroupRequest::resolver_plugin_id`]，保证成员任务交给同一插件二段解析。"
           },
           "sourceUrl": {
             "type": "string"

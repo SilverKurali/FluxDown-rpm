@@ -68,7 +68,7 @@ pub fn open(cx: &mut App) {
         attach(&session, &extensions, cx);
         extensions.update(cx, |extensions, cx| {
             extensions
-                .set_plugin_view_factory(crate::plugin_contributions::settings_view_factory(), cx);
+                .set_plugin_view_factory(crate::plugin_contributions::dialog_view_factory(), cx);
         });
         cx.subscribe(&extensions, |_, event, cx| match event {
             ExtensionsEvent::OpenPluginView { plugin, view } => {

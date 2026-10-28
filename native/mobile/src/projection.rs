@@ -238,7 +238,7 @@ impl Projection {
             | AgentEvent::UpdateChanged(_)
             | AgentEvent::CaptureTasksStarted(_)
             | AgentEvent::CaptureTasksResumed(_)
-            // 快传（`agent.share.*`）暂不进移动端：只推进投影，不下发分区 / 通知。
+            // FluxMesh（`agent.share.*`）暂不进移动端：只推进投影，不下发分区 / 通知。
             | AgentEvent::ShareChanged(_)
             | AgentEvent::ShareProgress(_)
             | AgentEvent::SessionRevoked(_) => {

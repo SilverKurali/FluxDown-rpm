@@ -1047,6 +1047,18 @@ pub struct PlatformOpenPathParams {
     pub reveal: bool,
 }
 
+/// `agent.platform.copyTaskFiles` 参数：要写入系统剪贴板的任务（产物必须已在磁盘上）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformCopyTaskFilesParams {
+    /// 非空；重复 id 只计一次，上限 [`PLATFORM_COPY_TASK_FILES_MAX`]。
+    pub task_ids: Vec<String>,
+}
+
+/// 一次 `agent.platform.copyTaskFiles` 最多写入的任务数（防止整表误选拖垮 daemon 逐个查询）。
+pub const PLATFORM_COPY_TASK_FILES_MAX: usize = 1000;
+
 /// 按文件（而非扩展名）取图标的扩展名（小写）：图标内嵌在文件自身里。其余类型的图标只由
 /// 扩展名关联决定，调用方按扩展名缓存即可。`.lnk` / `.url` 故意不在内：它们的图标路径可以
 /// 指向远程共享，按文件解析会向外发起认证。

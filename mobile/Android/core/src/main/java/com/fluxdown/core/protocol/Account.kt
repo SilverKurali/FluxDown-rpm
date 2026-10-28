@@ -605,6 +605,8 @@ object AccountRules {
         "shareCloudNotReady" -> "errReasonShareCloudNotReady"
         "shareTrafficExhausted" -> "errReasonShareTrafficExhausted"
         "shareCloudUnavailable" -> "errReasonShareCloudUnavailable"
+        "shareOwnShare" -> "errReasonShareOwnShare"
+        "shareSourceMissing" -> "errReasonShareSourceMissing"
         else -> null
     }
 

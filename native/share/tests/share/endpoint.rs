@@ -20,6 +20,7 @@ fn params(policy: NetworkPolicy, local: LocalEndpointConfig) -> ShareEndpointPar
         client_version: "0.0.0-test".into(),
         keys: KeyRing::new(),
         registry: ShareRegistry::new(),
+        content: fluxdown_share::ContentRegistry::new(),
         observers: Observers::default(),
     }
 }

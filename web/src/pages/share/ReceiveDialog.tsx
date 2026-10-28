@@ -6,6 +6,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useT } from '../../i18n'
+import type { TFunction } from '../../i18n'
 import { RpcError, rpc, useConfigValue } from '../../lib/rpc'
 import type { ShareResolveDto } from '../../lib/rpc'
 import { toastRpcError } from '../../lib/rpcToast'
@@ -86,12 +87,15 @@ export function ReceivePending({ preview }: { preview: ShareResolveDto }) {
   return <ReceiveConfirm key={preview.resolveId} preview={preview} onDone={() => undefined} onCancel={dismiss} />
 }
 
-function sourceChips(t: (key: string) => string, sources: ShareResolveDto['sources']): { key: string; ok: boolean; label: string }[] {
+function sourceChips(t: TFunction, sources: ShareResolveDto['sources']): { key: string; ok: boolean; label: string }[] {
   const sender =
     sources.senderOnline === null
       ? { key: 'sender', ok: false, label: t('shareSourceSenderUnknown') }
       : { key: 'sender', ok: sources.senderOnline, label: t(sources.senderOnline ? 'shareSourceSenderOnline' : 'shareSourceSenderOffline') }
-  return [sender, { key: 'cloud', ok: sources.cloudCopy, label: t('shareSourceCloud') }, { key: 'bridge', ok: sources.bridge, label: t('shareSourceBridge') }]
+  const chips = [sender, { key: 'cloud', ok: sources.cloudCopy, label: t('shareSourceCloud') }, { key: 'bridge', ok: sources.bridge, label: t('shareSourceBridge') }]
+  const swarmPeers = sources.swarmPeers ?? 0
+  if (swarmPeers > 0) chips.push({ key: 'swarm', ok: true, label: t('shareSourceSwarm', { count: swarmPeers }) })
+  return chips
 }
 
 function ReceiveConfirm({ preview, onDone, onCancel }: { preview: ShareResolveDto; onDone: () => void; onCancel: () => void }) {

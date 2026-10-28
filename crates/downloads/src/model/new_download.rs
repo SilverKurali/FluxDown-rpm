@@ -106,13 +106,13 @@ pub(crate) fn parse_entries(text: &str, loose: bool) -> Vec<UrlEntry> {
     parse_input(text, loose).entries
 }
 
-/// [`parse_entries`] 的完整结果：条目 + 首条 aria2c 命令带出的请求信息 + 快传分享链接。
+/// [`parse_entries`] 的完整结果：条目 + 首条 aria2c 命令带出的请求信息 + FluxMesh分享链接。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ParsedInput {
     pub(crate) entries: Vec<UrlEntry>,
     /// 第一条产出了条目的 aria2c 命令的头部信息（其余命令的不采用）；没有时为空。
     pub(crate) hints: RequestHints,
-    /// 快传分享链接（`fluxdown://share/<slug>`、官网 `/s/<slug>`），按出现顺序去重。
+    /// FluxMesh分享链接（`fluxdown://share/<slug>`、官网 `/s/<slug>`），按出现顺序去重。
     /// 它们不是下载链接：不进 `entries`，由对话框交给接收确认流程。
     pub(crate) share_links: Vec<String>,
 }
@@ -188,7 +188,7 @@ pub(crate) fn parse_input(text: &str, loose: bool) -> ParsedInput {
     }
 }
 
-/// 行里的快传分享链接。手动输入只认行首的词（后面的内容是附注，与普通链接一致）；
+/// 行里的FluxMesh分享链接。手动输入只认行首的词（后面的内容是附注，与普通链接一致）；
 /// 宽松模式（TXT 导入）还接受行内任意位置并去掉末尾标点。
 fn share_link_in_line(line: &str, loose: bool) -> Option<&str> {
     let first = line.split_whitespace().next()?;
@@ -272,7 +272,7 @@ fn leading_manual_url(text: &str) -> Option<&str> {
 }
 
 /// 是否以可建任务的链接开头（`http(s)://` / `ftp://` / `thunder://` / `magnet:?` /
-/// `ed2k://`，以及快传 `fluxdown://share/` 深链，忽略大小写）。
+/// `ed2k://`，以及FluxMesh `fluxdown://share/` 深链，忽略大小写）。
 pub(super) fn starts_with_link(text: &str) -> bool {
     [
         "https://",
@@ -1039,7 +1039,7 @@ mod tests {
     fn loose_parse_finds_inline_share_links_and_trims_punctuation() {
         assert_eq!(
             share_links(
-                "快传：fluxdown://share/abc.\nsee https://fluxdown.com/s/xyz). ok",
+                "FluxMesh：fluxdown://share/abc.\nsee https://fluxdown.com/s/xyz). ok",
                 true
             ),
             ["fluxdown://share/abc", "https://fluxdown.com/s/xyz"]

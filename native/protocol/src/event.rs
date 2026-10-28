@@ -375,7 +375,7 @@ pub struct AgentSnapshot {
     /// 云端推送状态（未登录时只保留本机上报开关与隐私字段，`overview` 为空）。
     #[serde(default)]
     pub cloud_notify: crate::CloudNotifyStateDto,
-    /// 快传分区（本构建未编入快传时保持默认：`available == false`）。
+    /// FluxMesh分区（本构建未编入FluxMesh时保持默认：`available == false`）。
     #[serde(default)]
     pub share: crate::ShareStateDto,
 }
@@ -489,8 +489,9 @@ pub enum DaemonEvent {
     /// 常驻插件宿主的可移植视图增量帧。不改变 daemon 快照；agent 原样转发给全部 UI
     /// 连接，客户端按 `session` 过滤、忽略未知会话。
     PluginViewFrame(crate::PluginViewFrameDto),
-    /// 可移植视图会话已结束（`reason`：`closed` / `expired` / `pluginUnloaded`）。
-    /// 不改变 daemon 快照；agent 原样转发。
+    /// 可移植视图会话已结束（`reason`：`closed` / `expired` / `pluginUnloaded` /
+    /// `requested`——插件经 `ctx.close()` 请求关闭承载它的容器，见
+    /// [`crate::VIEW_CLOSE_REASON_REQUESTED`]）。不改变 daemon 快照；agent 原样转发。
     PluginViewClosed {
         session: String,
         reason: String,
@@ -544,9 +545,9 @@ pub enum AgentEvent {
     /// `sessionExpired`；账号停用 → `accountDisabled`）。一次性通知，不进快照；紧随其后会有
     /// `SessionChanged(None)`。用户主动登出 / 删除本设备不发送。
     SessionRevoked(crate::ErrorReason),
-    /// 快传分区整体替换（`AgentSnapshot.share`）。
+    /// FluxMesh分区整体替换（`AgentSnapshot.share`）。
     ShareChanged(crate::ShareStateDto),
-    /// 单个快传会话的进度 / 路径刷新，高频；同一 `sessionId` 的后帧完整取代前帧（见
+    /// 单个FluxMesh会话的进度 / 路径刷新，高频；同一 `sessionId` 的后帧完整取代前帧（见
     /// [`crate::coalesce::FrameQueue`]）。
     ShareProgress(crate::ShareProgressDto),
 }

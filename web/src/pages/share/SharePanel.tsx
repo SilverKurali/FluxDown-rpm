@@ -137,11 +137,11 @@ function ShareBody({ share, nowMs, onClose }: { share: ShareDto; nowMs: number; 
   const { policySummary, netStatus } = useShareState()
   const status = shareDisplayStatus(share, nowMs)
   const live = status === 'active'
-  const [pending, setPending] = useState<'tier' | 'claims' | 'notify' | null>(null)
+  const [pending, setPending] = useState<'tier' | 'claims' | 'notify' | 'swarm' | null>(null)
   const [stopping, setStopping] = useState(false)
   const expires = dateTimeLabel(share.expiresAt)
 
-  const update = async (kind: 'tier' | 'claims' | 'notify', patch: Omit<ShareUpdateParams, 'id'>) => {
+  const update = async (kind: 'tier' | 'claims' | 'notify' | 'swarm', patch: Omit<ShareUpdateParams, 'id'>) => {
     setPending(kind)
     try {
       await rpc.agent.share.update({ id: share.id, ...patch })
@@ -267,6 +267,17 @@ function ShareBody({ share, nowMs, onClose }: { share: ShareDto; nowMs: number; 
               onCheckedChange={(notifyOnClaim) => void update('notify', { notifyOnClaim })}
             />
             <span className="text-xs text-foreground">{t(share.notifyOnClaim ? 'shareNotifyOn' : 'shareNotifyOff')}</span>
+          </span>
+        </Chip>
+        <Chip label={t('shareChipSwarm')}>
+          <span className="flex items-center gap-1.5 pr-1.5">
+            <Switch
+              checked={share.swarm ?? false}
+              disabled={!live || pending === 'swarm'}
+              aria-label={t('shareChipSwarm')}
+              onCheckedChange={(swarm) => void update('swarm', { swarm })}
+            />
+            <span className="text-xs text-foreground">{t(share.swarm ? 'shareSwarmOn' : 'shareSwarmOff')}</span>
           </span>
         </Chip>
       </div>

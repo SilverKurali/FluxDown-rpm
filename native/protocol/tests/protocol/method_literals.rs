@@ -26,6 +26,7 @@ fn canonical_capability_literals_are_exact_and_unique() {
         "agent.deviceLink",
         "agent.externalCapture",
         "agent.openTaskFiles",
+        "agent.copyTaskFiles",
         "agent.share",
     ];
     let client = &["client.selections"];

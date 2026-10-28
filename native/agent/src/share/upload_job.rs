@@ -85,12 +85,9 @@ pub(super) struct JobFile {
 }
 
 impl JobFile {
-    /// 本机文件与清单登记时一致（大小 + 修改时间，与发送方“文件被改”检测同一口径）。
+    /// 本机文件与清单登记时一致（口径见 [`file_unchanged`]）。
     pub(super) async fn matches_disk(&self) -> bool {
-        match tokio::fs::metadata(&self.path).await {
-            Ok(meta) => unchanged(&meta, self.size, self.mtime_ms),
-            Err(_) => false,
-        }
+        file_unchanged(&self.path, self.size, self.mtime_ms).await
     }
 
     pub(super) fn from_manifest(index: u32, path: std::path::PathBuf, file: &ShareFile) -> Self {
@@ -102,6 +99,27 @@ impl JobFile {
             root_hash: file.root_hash.clone(),
         }
     }
+}
+
+/// 本机文件与清单登记时一致（大小 + 修改时间，与发送方“文件被改”检测同一口径）；读不到元数据也算不一致。
+pub(super) async fn file_unchanged(path: &std::path::Path, size: u64, mtime_ms: i64) -> bool {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => unchanged(&meta, size, mtime_ms),
+        Err(_) => false,
+    }
+}
+
+/// 清单里的全部源文件都与本机一致（`paths[i]` 对应 `files[i]`）。
+pub(super) async fn sources_intact(files: &[ShareFile], paths: &[std::path::PathBuf]) -> bool {
+    if files.len() != paths.len() {
+        return false;
+    }
+    for (file, path) in files.iter().zip(paths) {
+        if !file_unchanged(path, file.size, file.mtime_ms).await {
+            return false;
+        }
+    }
+    true
 }
 
 fn unchanged(meta: &std::fs::Metadata, size: u64, mtime_ms: i64) -> bool {

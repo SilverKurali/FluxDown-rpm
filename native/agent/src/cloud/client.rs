@@ -757,7 +757,7 @@ impl CloudClient {
         Ok(response)
     }
 
-    /// 带调用方自备 Bearer（快传游客会话令牌）的调用：令牌不属于账号会话，不做刷新重放。
+    /// 带调用方自备 Bearer（FluxMesh游客会话令牌）的调用：令牌不属于账号会话，不做刷新重放。
     pub(crate) async fn with_bearer<P: Serialize, R: DeserializeOwned>(
         &self,
         method: Method,
@@ -794,7 +794,7 @@ impl CloudClient {
         Ok(Some((body, new_etag)))
     }
 
-    /// 是否持有登录凭据（快传据此在账号鉴权与游客鉴权之间选择）。
+    /// 是否持有登录凭据（FluxMesh据此在账号鉴权与游客鉴权之间选择）。
     pub(crate) async fn has_account(&self) -> bool {
         self.is_authenticated().await
     }

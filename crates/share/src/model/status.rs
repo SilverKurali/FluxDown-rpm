@@ -1,7 +1,8 @@
 //! 状态派生：本机网络健康度与摘要行、路径 / NAT / 分享状态的文案键、分享列表排序。
 
 use fluxdown_protocol::{
-    ShareDto, ShareNatType, ShareNetStatusDto, SharePathKind, ShareReceiveStatus, ShareStatus,
+    ShareCloudState, ShareDto, ShareNatType, ShareNetStatusDto, SharePathKind, ShareProvideState,
+    ShareReceiveStatus, ShareStatus,
 };
 
 /// 本机作为分享方「别人此刻能否找到并直连」的粗分级，驱动状态点颜色与文案。
@@ -113,7 +114,19 @@ pub const fn path_kind_key(kind: SharePathKind) -> &'static str {
         SharePathKind::Relay => "sharePathRelay",
         SharePathKind::Cdn => "shareBadgeCloud",
         SharePathKind::Bridge => "shareBadgeBridge",
+        SharePathKind::Swarm => "sharePathSwarm",
         SharePathKind::Unknown => "sharePathUnknown",
+    }
+}
+
+/// 共享状态文案键；未共享（`Off`）不显示。
+#[must_use]
+pub const fn provide_state_key(state: ShareProvideState) -> Option<&'static str> {
+    match state {
+        ShareProvideState::Off => None,
+        ShareProvideState::Providing => Some("shareProvideActive"),
+        ShareProvideState::Ended => Some("shareProvideEnded"),
+        ShareProvideState::Stopped => Some("shareProvideStopped"),
     }
 }
 
@@ -152,6 +165,60 @@ pub fn is_editable(share: &ShareDto) -> bool {
     share.status == ShareStatus::Active
 }
 
+/// 是否显示「文件缺失」：已停止 / 已过期的分享只要源文件缺失就显示；
+/// 分享中的仅在没有就绪云端副本（云端副本仍可提供）时显示。
+#[must_use]
+pub fn source_missing_badge(share: &ShareDto) -> bool {
+    share.source_missing
+        && (share.status != ShareStatus::Active || share.cloud_state != ShareCloudState::Ready)
+}
+
+/// 「我的分享」列表上的批量 / 行内操作。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShareAction {
+    /// 恢复分享（同一分享，重新分配取件码）：仅已停止 / 已过期且源文件仍在的分享。
+    Start,
+    /// 停止分享：仅仍有效的分享。
+    Stop,
+    /// 删除分享记录：任何状态都可以（分享中的由 agent 先停止）。
+    Delete,
+}
+
+impl ShareAction {
+    /// 该操作是否适用于这条分享。
+    #[must_use]
+    pub fn applies(self, share: &ShareDto) -> bool {
+        match self {
+            Self::Start => {
+                matches!(share.status, ShareStatus::Stopped | ShareStatus::Expired)
+                    && !share.source_missing
+            }
+            Self::Stop => share.status == ShareStatus::Active,
+            Self::Delete => true,
+        }
+    }
+}
+
+/// 一组选中分享上各批量操作是否可用（至少有一项适用）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BatchActions {
+    pub start: bool,
+    pub stop: bool,
+    pub delete: bool,
+}
+
+/// 汇总选中分享的批量操作可用性；空集合全部不可用。
+#[must_use]
+pub fn batch_actions<'a>(shares: impl IntoIterator<Item = &'a ShareDto>) -> BatchActions {
+    shares
+        .into_iter()
+        .fold(BatchActions::default(), |acc, share| BatchActions {
+            start: acc.start || ShareAction::Start.applies(share),
+            stop: acc.stop || ShareAction::Stop.applies(share),
+            delete: acc.delete || ShareAction::Delete.applies(share),
+        })
+}
+
 /// 分享标题行的主文案：只有一个文件时显示该文件名，否则用分享标题。
 #[must_use]
 pub fn share_headline(share: &ShareDto) -> &str {
@@ -167,12 +234,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use fluxdown_protocol::{
-        ShareDto, ShareFileDto, ShareHomeRelayDto, ShareNatType, ShareNetStatusDto, ShareStatus,
+        ShareCloudState, ShareDto, ShareFileDto, ShareHomeRelayDto, ShareNatType,
+        ShareNetStatusDto, ShareStatus,
     };
 
     use super::{
-        NetHealth, NetSegment, home_relay_latency, is_editable, net_health, net_segments,
-        ordered_shares, share_headline,
+        BatchActions, NetHealth, NetSegment, ShareAction, batch_actions, home_relay_latency,
+        is_editable, net_health, net_segments, ordered_shares, share_headline,
+        source_missing_badge,
     };
 
     fn net() -> ShareNetStatusDto {
@@ -271,5 +340,97 @@ mod tests {
         assert_eq!(share_headline(&share), "a.zip");
         share.files.clear();
         assert_eq!(share_headline(&share), "");
+    }
+
+    #[test]
+    fn action_applicability_follows_status_and_source() {
+        let make = |status, source_missing| ShareDto {
+            status,
+            source_missing,
+            ..ShareDto::default()
+        };
+        let cases = [
+            // (状态, 源文件缺失, 开始, 停止, 删除)
+            (ShareStatus::Active, false, false, true, true),
+            (ShareStatus::Active, true, false, true, true),
+            (ShareStatus::Stopped, false, true, false, true),
+            (ShareStatus::Stopped, true, false, false, true),
+            (ShareStatus::Expired, false, true, false, true),
+            (ShareStatus::Expired, true, false, false, true),
+            (ShareStatus::Unknown, false, false, false, true),
+        ];
+        for (status, missing, start, stop, delete) in cases {
+            let share = make(status, missing);
+            assert_eq!(
+                ShareAction::Start.applies(&share),
+                start,
+                "{status:?}/{missing}"
+            );
+            assert_eq!(
+                ShareAction::Stop.applies(&share),
+                stop,
+                "{status:?}/{missing}"
+            );
+            assert_eq!(
+                ShareAction::Delete.applies(&share),
+                delete,
+                "{status:?}/{missing}"
+            );
+        }
+    }
+
+    #[test]
+    fn badge_ignores_ready_cloud_copy_only_while_active() {
+        let make = |status, cloud_state| ShareDto {
+            status,
+            source_missing: true,
+            cloud_state,
+            ..ShareDto::default()
+        };
+        let ready = ShareCloudState::Ready;
+        let idle = ShareCloudState::Idle;
+        assert!(!source_missing_badge(&make(ShareStatus::Active, ready)));
+        assert!(source_missing_badge(&make(ShareStatus::Active, idle)));
+        assert!(source_missing_badge(&make(ShareStatus::Stopped, ready)));
+        assert!(source_missing_badge(&make(ShareStatus::Expired, idle)));
+        assert!(!ShareAction::Start.applies(&make(ShareStatus::Stopped, ready)));
+        assert!(!source_missing_badge(&ShareDto::default()));
+    }
+
+    #[test]
+    fn batch_actions_need_at_least_one_applicable_share() {
+        let make = |status, source_missing| ShareDto {
+            status,
+            source_missing,
+            ..ShareDto::default()
+        };
+        assert_eq!(batch_actions([]), BatchActions::default());
+        let only_missing = [make(ShareStatus::Stopped, true)];
+        assert_eq!(
+            batch_actions(&only_missing),
+            BatchActions {
+                start: false,
+                stop: false,
+                delete: true
+            }
+        );
+        let mixed = [
+            make(ShareStatus::Stopped, true),
+            make(ShareStatus::Expired, false),
+        ];
+        assert!(batch_actions(&mixed).start);
+        assert!(!batch_actions(&mixed).stop);
+        let with_active = [
+            make(ShareStatus::Active, false),
+            make(ShareStatus::Stopped, true),
+        ];
+        assert_eq!(
+            batch_actions(&with_active),
+            BatchActions {
+                start: false,
+                stop: true,
+                delete: true
+            }
+        );
     }
 }

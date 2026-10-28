@@ -93,6 +93,7 @@ async fn resolve(State(mock): State<MockState>, Json(body): Json<Value>) -> Resp
             rep: receiver.to_owned(),
             exp: now_unix_secs() + 3600,
             scope: "recv".into(),
+            root: None,
         },
     )
     .unwrap();

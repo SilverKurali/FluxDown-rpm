@@ -1,4 +1,4 @@
-//! 客户端设置「快传」页：渲染 `ShareLocalConfigDto` 的全部字段。
+//! 客户端设置「FluxMesh」页：渲染 `ShareLocalConfigDto` 的全部字段。
 //!
 //! 页面由 `crates/settings` 作为内容槽位托管（不依赖本 crate），所以行 / 分组的外观在这里
 //! 按 `crates/settings/src/ui.rs` 的同一套 token 本地复刻：标题 + 描述在左，控件在右。

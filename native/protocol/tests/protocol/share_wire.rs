@@ -1,12 +1,13 @@
-//! 快传（`agent.share.*`）的 wire 契约：方法名、事件、DTO 往返、错误 reason 字面量、版本。
+//! FluxMesh（`agent.share.*`）的 wire 契约：方法名、事件、DTO 往返、错误 reason 字面量、版本。
 
 use std::collections::HashSet;
 
 use fluxdown_protocol::method::{
     AGENT_CAPABILITIES, AGENT_SHARE_CONFIG, AGENT_SHARE_CONVERT_TO_CLOUD, AGENT_SHARE_CREATE,
-    AGENT_SHARE_DELETE_CLOUD_COPY, AGENT_SHARE_DIAGNOSTICS, AGENT_SHARE_DISMISS_PENDING,
-    AGENT_SHARE_LIST, AGENT_SHARE_LOGS, AGENT_SHARE_RECEIVE, AGENT_SHARE_RECEIVE_RECORDS,
-    AGENT_SHARE_RESOLVE, AGENT_SHARE_SESSION_KILL, AGENT_SHARE_SET_LOCAL_CONFIG, AGENT_SHARE_STOP,
+    AGENT_SHARE_DELETE, AGENT_SHARE_DELETE_CLOUD_COPY, AGENT_SHARE_DIAGNOSTICS,
+    AGENT_SHARE_DISMISS_PENDING, AGENT_SHARE_LIST, AGENT_SHARE_LOGS, AGENT_SHARE_RECEIVE,
+    AGENT_SHARE_RECEIVE_RECORDS, AGENT_SHARE_RESOLVE, AGENT_SHARE_RESUME, AGENT_SHARE_SESSION_KILL,
+    AGENT_SHARE_SET_LOCAL_CONFIG, AGENT_SHARE_STOP, AGENT_SHARE_STOP_PROVIDING,
     AGENT_SHARE_SWITCH_TO_BRIDGE, AGENT_SHARE_UPDATE, ALL_METHODS, CAPABILITY_AGENT_SHARE,
 };
 use fluxdown_protocol::{
@@ -14,10 +15,10 @@ use fluxdown_protocol::{
     ShareCloudState, ShareConfigDto, ShareConnectionMode, ShareConvertToCloudParams,
     ShareCreateParams, ShareDiagnosticsDto, ShareDismissPendingParams, ShareDto, ShareExitBehavior,
     ShareHashingDto, ShareLocalConfigDto, ShareLogLevel, ShareLogsParams, ShareMode, ShareNatType,
-    ShareNetSnapshotDto, SharePathKind, SharePolicySummaryDto, ShareProgressDto,
-    ShareReceiveParams, ShareReceiveRecordsPage, ShareReceiverDto, ShareResolveDto,
-    ShareSessionBytesDto, ShareStateDto, ShareStatus, ShareTaskFactsDto, ShareUploadDto,
-    ShareUploadStatus, apply_agent_event,
+    ShareNetSnapshotDto, SharePathKind, SharePolicySummaryDto, ShareProgressDto, ShareProvideState,
+    ShareReceiveParams, ShareReceiveRecordDto, ShareReceiveRecordsPage, ShareReceiverDto,
+    ShareResolveDto, ShareSessionBytesDto, ShareSourcesDto, ShareStateDto, ShareStatus,
+    ShareTaskFactsDto, ShareUploadDto, ShareUploadStatus, apply_agent_event,
 };
 use serde_json::{Value, json};
 
@@ -30,6 +31,8 @@ fn every_share_method_is_canonical_unique_and_literal() {
         (AGENT_SHARE_LIST, "agent.share.list"),
         (AGENT_SHARE_UPDATE, "agent.share.update"),
         (AGENT_SHARE_STOP, "agent.share.stop"),
+        (AGENT_SHARE_RESUME, "agent.share.resume"),
+        (AGENT_SHARE_DELETE, "agent.share.delete"),
         (AGENT_SHARE_RESOLVE, "agent.share.resolve"),
         (AGENT_SHARE_RECEIVE, "agent.share.receive"),
         (AGENT_SHARE_DISMISS_PENDING, "agent.share.dismissPending"),
@@ -40,6 +43,7 @@ fn every_share_method_is_canonical_unique_and_literal() {
         (AGENT_SHARE_SESSION_KILL, "agent.share.sessionKill"),
         (AGENT_SHARE_CONVERT_TO_CLOUD, "agent.share.convertToCloud"),
         (AGENT_SHARE_DELETE_CLOUD_COPY, "agent.share.deleteCloudCopy"),
+        (AGENT_SHARE_STOP_PROVIDING, "agent.share.stopProviding"),
     ];
     for (constant, literal) in expected {
         assert_eq!(constant, literal);
@@ -62,7 +66,7 @@ fn every_share_method_is_canonical_unique_and_literal() {
 
 #[test]
 fn protocol_version_covers_the_share_events() {
-    assert_eq!(PROTOCOL_VERSION, 19);
+    assert_eq!(PROTOCOL_VERSION, 21);
     assert_eq!(MIN_PROTOCOL_VERSION, 19);
 }
 
@@ -90,6 +94,8 @@ fn share_error_reason_literals_are_exact() -> Result<(), serde_json::Error> {
         (ErrorReason::ShareCloudNotReady, "shareCloudNotReady"),
         (ErrorReason::ShareTrafficExhausted, "shareTrafficExhausted"),
         (ErrorReason::ShareCloudUnavailable, "shareCloudUnavailable"),
+        (ErrorReason::ShareOwnShare, "shareOwnShare"),
+        (ErrorReason::ShareSourceMissing, "shareSourceMissing"),
     ];
     for (reason, literal) in cases {
         assert_eq!(serde_json::to_value(reason)?, json!(literal));
@@ -315,6 +321,21 @@ fn cloud_fields_round_trip_and_default_for_older_payloads() -> Result<(), serde_
     assert_eq!(old.cloud_state, ShareCloudState::Idle);
     assert_eq!(old.cloud_bytes, 0);
     assert!(old.upload.is_none());
+    assert!(!old.source_missing);
+
+    let missing = ShareDto {
+        id: "s1".to_owned(),
+        source_missing: true,
+        ..Default::default()
+    };
+    let wire = serde_json::to_value(&missing)?;
+    assert_eq!(wire["sourceMissing"], json!(true));
+    assert_eq!(serde_json::from_value::<ShareDto>(wire)?, missing);
+    let intact = serde_json::to_value(ShareDto::default())?;
+    assert!(
+        intact.get("sourceMissing").is_none(),
+        "源文件完好时不下发 sourceMissing"
+    );
 
     let policy: SharePolicySummaryDto = serde_json::from_value(json!({
         "retentionTiers": [{ "id": "cloud-24h", "hours": 24 }, { "id": "cloud-14d", "hours": 336 }],
@@ -345,6 +366,31 @@ fn cloud_fields_round_trip_and_default_for_older_payloads() -> Result<(), serde_
     let params: ShareConvertToCloudParams =
         serde_json::from_value(json!({ "id": "s1", "tierId": "cloud-72h" }))?;
     assert_eq!(params.tier_id.as_deref(), Some("cloud-72h"));
+    Ok(())
+}
+
+#[test]
+fn swarm_fields_default_for_older_payloads() -> Result<(), serde_json::Error> {
+    let bytes: ShareSessionBytesDto = serde_json::from_value(json!({ "direct": 1, "relay": 2 }))?;
+    assert_eq!(bytes.peer, 0);
+    let facts: ShareTaskFactsDto = serde_json::from_value(json!({ "isShareReceive": true }))?;
+    assert_eq!(facts.swarm_peers, 0);
+    let sources: ShareSourcesDto = serde_json::from_value(json!({ "cloudCopy": true }))?;
+    assert_eq!(sources.swarm_peers, 0);
+    let record: ShareReceiveRecordDto =
+        serde_json::from_value(json!({ "id": "r1", "title": "t", "startedAt": "now" }))?;
+    assert_eq!(record.provide_state, ShareProvideState::Off);
+    let weird: ShareReceiveRecordDto = serde_json::from_value(
+        json!({ "id": "r1", "title": "t", "startedAt": "now", "provideState": "weird" }),
+    )?;
+    assert_eq!(weird.provide_state, ShareProvideState::Off);
+    let providing: ShareReceiveRecordDto = serde_json::from_value(
+        json!({ "id": "r1", "title": "t", "startedAt": "now", "provideState": "providing" }),
+    )?;
+    assert_eq!(providing.provide_state, ShareProvideState::Providing);
+    assert_eq!(serde_json::to_value(SharePathKind::Swarm)?, json!("swarm"));
+    let config: ShareLocalConfigDto = serde_json::from_value(json!({}))?;
+    assert_eq!((config.default_swarm, config.auto_provide), (None, None));
     Ok(())
 }
 

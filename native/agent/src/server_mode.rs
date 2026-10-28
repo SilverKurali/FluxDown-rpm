@@ -297,7 +297,7 @@ pub fn run_blocking(host: crate::shell::ShellHost) -> AgentResult {
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
     );
     let subscriber = tracing_subscriber::registry().with(fmt_layer);
-    // iroh / 快传 tracing 另走内存环形缓冲（诊断页）。
+    // iroh / FluxMesh tracing 另走内存环形缓冲（诊断页）。
     #[cfg(feature = "share-p2p")]
     let subscriber = subscriber.with(crate::share::logs::layer());
     if let Err(error) = subscriber.try_init() {

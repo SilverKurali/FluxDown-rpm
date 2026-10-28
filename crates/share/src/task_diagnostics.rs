@@ -1,4 +1,4 @@
-//! 任务详情「传输诊断」页签：一个快传接收任务所属会话的路径时间线、逐路径统计与会话摘要。
+//! 任务详情「传输诊断」页签：一个FluxMesh接收任务所属会话的路径时间线、逐路径统计与会话摘要。
 //!
 //! 视图嵌在详情面板 / 详情窗口里：自己滚动、紧凑、不创建窗口。空闲静默：只在视图实际渲染（可见）时
 //! 取数；hub 变化经节流合并，隐藏期间不产生请求（状态机见 [`crate::model::refresh::VisibleRefresh`]）。
@@ -58,7 +58,7 @@ pub struct ShareDiagnosticsView {
 }
 
 impl ShareDiagnosticsView {
-    /// 创建某个下载任务的「传输诊断」视图；任务没有快传会话时显示空状态。
+    /// 创建某个下载任务的「传输诊断」视图；任务没有FluxMesh会话时显示空状态。
     pub fn new(
         hub: Entity<ShareHub>,
         task_id: String,

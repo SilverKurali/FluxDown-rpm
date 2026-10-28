@@ -70,7 +70,7 @@ impl Lifecycle {
         self
     }
 
-    /// 登记退出前收尾（快传：退出时把仍有接收方的实时分享转为云端暂存）。只接受第一次登记。
+    /// 登记退出前收尾（FluxMesh：退出时把仍有接收方的实时分享转为云端暂存）。只接受第一次登记。
     pub fn set_before_quit(&self, hook: Arc<dyn BeforeQuit>) {
         if self.before_quit.set(hook).is_err() {
             tracing::warn!("a before-quit hook is already registered");

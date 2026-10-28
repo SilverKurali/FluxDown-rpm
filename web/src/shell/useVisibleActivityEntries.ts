@@ -3,7 +3,7 @@ import { useShareAvailable } from '../pages/share/state'
 import { ACTIVITY_ENTRIES } from './activity'
 import type { ActivityEntry } from './activity'
 
-/** 条目可见性判定（偏好缺省 = 显示；无偏好键的条目固定显示）。桌面外壳无论条目放在哪个区域都按它过滤。快传入口另需 agent 编入快传且服务可用。 */
+/** 条目可见性判定（偏好缺省 = 显示；无偏好键的条目固定显示）。桌面外壳无论条目放在哪个区域都按它过滤。FluxMesh入口另需 agent 编入FluxMesh且服务可用。 */
 export function useActivityEntryVisible(): (entry: ActivityEntry) => boolean {
   const rss = usePrefBool('ui.show_activity_rss', true)
   const webhooks = usePrefBool('ui.show_activity_webhooks', true)

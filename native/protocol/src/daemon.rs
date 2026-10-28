@@ -1441,6 +1441,11 @@ pub struct CreateGroupRequest {
     /// 稍后下载：true = 建组后不启动，待「启动队列」或用户手动恢复。
     #[serde(default)]
     pub start_paused: bool,
+    /// 预解析命中的插件（[`ResolvePreviewResponse::plugin_id`] 原样回传）。非空 = 成员任务
+    /// 固定绑定该插件，建组时它已不可用（禁用 / 卸载 / 无 resolver）则成员以「解析插件不可用」
+    /// fail-closed 落库；空 = 旧客户端，引擎按预解析同一规则（仅 `multi` resolver）重新选择。
+    #[serde(default)]
+    pub resolver_plugin_id: String,
     /// 组成员清单（不可为空，见本类型文档）。
     #[serde(default)]
     pub items: Vec<GroupItemRequest>,
@@ -1486,6 +1491,10 @@ pub struct ResolvePreviewResponse {
     /// 无错误时为空。
     #[serde(default)]
     pub error: String,
+    /// 产出本清单的插件 identity（无清单时为空）；建组时原样填入
+    /// [`CreateGroupRequest::resolver_plugin_id`]，保证成员任务交给同一插件二段解析。
+    #[serde(default)]
+    pub plugin_id: String,
     #[serde(default)]
     pub items: Vec<PreviewItemDto>,
 }

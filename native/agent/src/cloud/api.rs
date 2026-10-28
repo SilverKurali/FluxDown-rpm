@@ -562,9 +562,9 @@ impl CloudApi {
         self.client.set_endpoint(base_url).await
     }
 
-    // ───────────── 快传（`/api/v1/share/*`，契约见 docs/temp-share-design.md §9.2） ─────────────
+    // ───────────── FluxMesh（`/api/v1/share/*`，契约见 docs/temp-share-design.md §9.2） ─────────────
 
-    /// 是否持有登录凭据：快传在账号鉴权与游客鉴权之间据此选择。
+    /// 是否持有登录凭据：FluxMesh在账号鉴权与游客鉴权之间据此选择。
     pub async fn has_account(&self) -> bool {
         self.client.has_account().await
     }
@@ -675,6 +675,36 @@ impl CloudApi {
         .await
     }
 
+    /// `POST /share/shares/{id}/resume`：重新开始已停止 / 已过期的分享（同 id、同链接，重新分配取件码）。
+    pub async fn share_resume<R: serde::de::DeserializeOwned>(
+        &self,
+        id: &str,
+        guest_token: Option<&str>,
+    ) -> Result<R, CloudError> {
+        self.share_owner_call(
+            Method::POST,
+            &format!("/api/v1/share/shares/{}/resume", encode(id)),
+            None::<&Value>,
+            guest_token,
+        )
+        .await
+    }
+
+    /// `DELETE /share/shares/{id}/record`：删除分享记录（分享中的云端先按停止处理）。
+    pub async fn share_delete_record(
+        &self,
+        id: &str,
+        guest_token: Option<&str>,
+    ) -> Result<Value, CloudError> {
+        self.share_owner_call(
+            Method::DELETE,
+            &format!("/api/v1/share/shares/{}/record", encode(id)),
+            None::<&Value>,
+            guest_token,
+        )
+        .await
+    }
+
     /// `POST /share/shares/{id}/upload`：登记要上传的文件，返回每个文件的上传方案（分片预签名地址，只含缺失分片，可重复调用续传）。
     pub async fn share_upload_plan<P: Serialize, R: serde::de::DeserializeOwned>(
         &self,
@@ -759,6 +789,25 @@ impl CloudApi {
         body: &P,
     ) -> Result<R, CloudError> {
         self.share_public_or_account("/api/v1/share/bridge-ticket", body)
+            .await
+    }
+
+    /// `POST /share/swarm/peers`：按内容查在线提供者并换取 swarm 票据（旧云端 404 = 不支持共享）。
+    pub async fn share_swarm_peers<P: Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        body: &P,
+    ) -> Result<R, CloudError> {
+        self.share_public_or_account("/api/v1/share/swarm/peers", body)
+            .await
+    }
+
+    /// `POST /share/swarm/announce`：登记 / 撤销共享提供者；靠 endpoint 签名鉴权，不带 Bearer。
+    pub async fn share_swarm_announce<P: Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        body: &P,
+    ) -> Result<R, CloudError> {
+        self.client
+            .public(Method::POST, "/api/v1/share/swarm/announce", Some(body))
             .await
     }
 

@@ -96,7 +96,7 @@ pub enum DetailMode {
 enum DetailTab {
     General,
     Speed,
-    /// 快传接收任务的传输诊断（内容由宿主工厂提供）。
+    /// FluxMesh接收任务的传输诊断（内容由宿主工厂提供）。
     ShareDiagnostics,
     Seeding,
     Log,
@@ -105,7 +105,7 @@ enum DetailTab {
     Plugin(u16),
 }
 
-/// 可见 tab 顺序：内置 tab（做种仅 BT 任务、传输诊断仅快传接收任务）后接全部插件 tab。
+/// 可见 tab 顺序：内置 tab（做种仅 BT 任务、传输诊断仅FluxMesh接收任务）后接全部插件 tab。
 fn visible_tabs(is_bt: bool, share_diagnostics: bool, plugin_tabs: usize) -> Vec<DetailTab> {
     let builtin = [
         DetailTab::General,
@@ -970,18 +970,21 @@ impl TaskDetailView {
         let Some(factory) = self.host.plugin_tab_view.clone() else {
             return div().into_any_element();
         };
+        let Some(tab) = self.plugin_tabs.get(usize::from(index)).cloned() else {
+            return div().into_any_element();
+        };
         let key = (index, self.task_id.clone());
         let view = match self.plugin_views.get(&key) {
             Some(view) => view.clone(),
             None => {
-                let view = factory(index, self.task_id.clone(), window, cx);
+                let view = factory(&tab, self.task_id.clone(), window, cx);
                 self.plugin_views.insert(key, view.clone());
                 view
             }
         };
         div().size_full().child(view).into_any_element()
     }
-    /// 「传输诊断」页签可见：宿主提供了页面工厂、快传可用，且本任务是快传接收任务。
+    /// 「传输诊断」页签可见：宿主提供了页面工厂、FluxMesh可用，且本任务是FluxMesh接收任务。
     fn share_diagnostics_visible(&self) -> bool {
         let share = self.store.share();
         self.host.share_diagnostics_view.is_some()
@@ -2365,7 +2368,7 @@ impl gpui::Render for TaskDetailView {
         if self.tab == DetailTab::Seeding {
             self.sync_seed_inputs(window, cx);
         }
-        // 页签依赖的快传事实消失（任务不再是快传接收任务 / 快传不可用）：回到「常规」并丢弃缓存。
+        // 页签依赖的FluxMesh事实消失（任务不再是FluxMesh接收任务 / FluxMesh不可用）：回到「常规」并丢弃缓存。
         if !self.share_diagnostics_visible() {
             if self.tab == DetailTab::ShareDiagnostics {
                 self.tab = DetailTab::General;
@@ -2775,7 +2778,7 @@ mod tests {
                 DetailTab::Advanced,
             ]
         );
-        // 传输诊断只给快传接收任务；不带插件 tab 时保持原顺序。
+        // 传输诊断只给FluxMesh接收任务；不带插件 tab 时保持原顺序。
         assert!(!visible_tabs(false, false, 0).contains(&DetailTab::ShareDiagnostics));
         assert!(visible_tabs(false, true, 0).contains(&DetailTab::ShareDiagnostics));
     }

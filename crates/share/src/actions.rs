@@ -1,4 +1,4 @@
-//! 跨视图复用的快传动作：不属于某一个窗口，调用方只给 hub 与触发窗口。
+//! 跨视图复用的FluxMesh动作：不属于某一个窗口，调用方只给 hub 与触发窗口。
 
 use fluxdown_ui_i18n::Translator;
 use gpui::{AnyWindowHandle, App, AsyncApp, Entity, Window};
@@ -25,6 +25,23 @@ pub fn switch_to_bridge(hub: &Entity<ShareHub>, task_id: &str, window: &Window, 
         (hub.api(), hub.translator().read(cx).clone())
     };
     let future = api.switch_to_bridge(task_id);
+    cx.spawn(async move |cx| {
+        if let Err(error) = future.await {
+            notify_error(handle, cx, error_text(&translator, &error));
+        }
+    })
+    .detach();
+}
+
+/// 接收记录「停止共享」：调用 `agent.share.stopProviding`。行状态由随后的 `ShareChanged` 刷新；
+/// 失败时在触发窗口弹出带类型的错误文案。
+pub fn stop_providing(hub: &Entity<ShareHub>, record_id: &str, window: &Window, cx: &mut App) {
+    let handle = window.window_handle();
+    let (api, translator): (_, Translator) = {
+        let hub = hub.read(cx);
+        (hub.api(), hub.translator().read(cx).clone())
+    };
+    let future = api.stop_providing(record_id);
     cx.spawn(async move |cx| {
         if let Err(error) = future.await {
             notify_error(handle, cx, error_text(&translator, &error));

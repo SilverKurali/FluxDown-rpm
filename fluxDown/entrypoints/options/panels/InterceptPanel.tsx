@@ -10,6 +10,7 @@ import {
   BUILTIN_EXTENSIONS,
   DEFAULT_SETTINGS,
   normalizeExtension,
+  type BypassKey,
   type InterceptMode,
 } from "@/utils/settings";
 import { settings, updateSettings } from "../lib/store";
@@ -135,6 +136,18 @@ export function InterceptPanel(): JSX.Element | null {
         checked={s.interceptMagnet}
         onChange={(v) => void updateSettings({ interceptMagnet: v })}
       />
+
+      <SettingRow title={t("options.intercept.bypassKey")} desc={t("options.intercept.bypassKeyDesc")}>
+        <Select<BypassKey>
+          value={s.bypassKey}
+          onChange={(v) => void updateSettings({ bypassKey: v })}
+          options={[
+            { value: "alt", label: t("options.intercept.bypassKeyAlt") },
+            { value: "shift", label: "Shift" },
+            { value: "off", label: t("options.intercept.bypassKeyOff") },
+          ]}
+        />
+      </SettingRow>
 
       <SettingRow title={t("options.intercept.minSize")} desc={t("options.rules.minFileSizeDesc")}>
         <div class="opt-stack-gap">

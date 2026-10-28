@@ -1,5 +1,5 @@
 ---
-description: RSS 过滤 / 文件名解析 / Webhook 事件与端点 / 线程数风险档改动须同步 Web、扩展与各端
+description: RSS 过滤 / 文件名解析 / Webhook 事件与端点 / 线程数风险档 / 代理直连名单归一化改动须同步 Web、扩展、agent 与各端
 condition: '[\s\S]'
 scope: "tool:edit, tool:write"
 globs:
@@ -13,10 +13,12 @@ globs:
   - '**/native/protocol/src/daemon_config.rs'
   - '**/native/engine/src/segment_coordinator.rs'
   - '**/web/src/lib/threadsRisk.ts'
+  - '**/native/engine/src/proxy_config.rs'
+  - '**/native/agent/src/system_proxy.rs'
 interruptMode: never
 ---
 
-你正在改动引擎侧纯逻辑（RSS 过滤 / 文件名 / Webhook / 线程数）的一侧。下列条目里，标题是事实源一侧、「→」后是必须同回合同步的镜像端：改任一侧都要把另一侧过一遍；有共享夹具的先改夹具用例，再改两侧实现，两侧测试都要跑（`/verify` 第 3 步）。只改了一侧就交付 = 不完整。
+你正在改动引擎侧纯逻辑（RSS 过滤 / 文件名 / Webhook / 线程数 / 代理直连名单）的一侧。下列条目里，标题是事实源一侧、「→」后是必须同回合同步的镜像端：改任一侧都要把另一侧过一遍；有共享夹具的先改夹具用例，再改两侧实现，两侧测试都要跑（`/verify` 第 3 步）。只改了一侧就交付 = 不完整。
 
 ## `engine/src/rss/filter.rs`
 
@@ -37,3 +39,7 @@ interruptMode: never
 ## 线程数上限与风险档（`native/protocol/src/daemon_config.rs`：`MAX_TASK_SEGMENTS` = 512 / `HIGH_SEGMENTS_WARN_ABOVE` = 64 / `SEVERE_SEGMENTS_WARN_ABOVE` = 256）
 
 → 引擎 `segment_coordinator::MAX_SEGMENTS`（显式线程数硬上限；Auto 仍由 advisor / `HINT_UNCAP_MAX` 封顶 64）+ `web/src/lib/threadsRisk.ts` + Web `config.ts` 与移动端 `SettingsCatalog` 的 `default_segments` 范围；GPUI / Web 在设置、队列、新建下载三处 > 64 动态展示风险提示（`RevealCallout`）
+
+## `native/engine/src/proxy_config.rs::normalize_no_proxy` 与 `parse_scutil_exceptions`（直连名单归一化、macOS `ExceptionsList`）
+
+→ `native/agent/src/system_proxy.rs`（`normalize_no_proxy` / `parse_scutil`；agent 不依赖引擎，故各持一份）：`*.x` → `.x`、`a.b.*` 与缩写网段 `169.254/16` → CIDR、`<local>` → 环回 + 私网段近似，两侧写法与用例逐条对齐；环回恒直连两侧都保留

@@ -17,6 +17,7 @@ use super::convert;
 use super::service::{CONFIG_TTL, CachedConfig, Inner, ShareService, unavailable};
 use super::store::StoredShare;
 use super::time::parse_rfc3339_secs;
+use super::upload_job::sources_intact;
 
 /// 接收方连上来后到对账之间的合并窗口。
 const SHARE_SYNC_COALESCE: Duration = Duration::from_secs(1);
@@ -69,48 +70,58 @@ impl Inner {
                 dto
             })
             .collect();
-        let task_facts =
-            self.receive_tasks
-                .iter()
-                .map(|(task_id, task)| {
-                    // 同一分享最新的接收会话（按开始时间）承载该任务。
-                    let session = self
-                        .sessions
-                        .iter()
-                        .filter(|(_, m)| {
-                            m.role == fluxdown_share::SessionRole::Receiver
-                                && m.share_id == task.share_id
-                        })
-                        .max_by(|a, b| a.1.started_at.cmp(&b.1.started_at));
-                    // 最近交付块来自云端副本 / 桥接时，来源徽标以它为准（此时直连路径的状态与该任务无关）。
-                    let source = self
-                        .receive_sessions
-                        .get(&task.token)
-                        .and_then(fluxdown_share::ReceiveSession::active_source);
-                    let facts = ShareTaskFactsDto {
-                        is_share_receive: true,
-                        path_kind: match source {
-                            Some(fluxdown_share::SourceKind::Cdn) => SharePathKind::Cdn,
-                            Some(fluxdown_share::SourceKind::Bridge) => SharePathKind::Bridge,
-                            None => session
-                                .map_or(Default::default(), |(_, m)| convert::path_kind(m.path)),
+        let task_facts = self
+            .receive_tasks
+            .iter()
+            .map(|(task_id, task)| {
+                // 同一分享最新的接收会话（按开始时间）承载该任务。
+                let session = self
+                    .sessions
+                    .iter()
+                    .filter(|(_, m)| {
+                        m.role == fluxdown_share::SessionRole::Receiver
+                            && m.share_id == task.share_id
+                    })
+                    .max_by(|a, b| a.1.started_at.cmp(&b.1.started_at));
+                // 最近交付块来自云端副本 / 桥接时，来源徽标以它为准（此时直连路径的状态与该任务无关）。
+                let source = self
+                    .receive_sessions
+                    .get(&task.token)
+                    .and_then(fluxdown_share::ReceiveSession::active_source);
+                let swarm_peers = self
+                    .receive_sessions
+                    .get(&task.token)
+                    .map_or(0, fluxdown_share::ReceiveSession::swarm_peers);
+                let facts = ShareTaskFactsDto {
+                    is_share_receive: true,
+                    path_kind: match source {
+                        Some(fluxdown_share::SourceKind::Cdn) => SharePathKind::Cdn,
+                        Some(fluxdown_share::SourceKind::Bridge) => SharePathKind::Bridge,
+                        // 分享方的会话已结束 / 不存在，但仍有共享对端在供块。
+                        None => match session {
+                            Some((_, m)) if !m.ended => convert::path_kind(m.path),
+                            _ if swarm_peers > 0 => SharePathKind::Swarm,
+                            Some((_, m)) => convert::path_kind(m.path),
+                            None => Default::default(),
                         },
-                        peer_nat_type: ShareNatType::Unknown,
-                        peer_isp: None,
-                        share_id: Some(task.share_id.clone()),
-                        session_id: session.map(|(id, _)| id.clone()),
-                        relay_stuck: source.is_none()
-                            && session.is_some_and(|(_, m)| m.relay_stuck && !m.ended),
-                    };
-                    (task_id.clone(), facts)
-                })
-                .collect();
+                    },
+                    peer_nat_type: ShareNatType::Unknown,
+                    peer_isp: None,
+                    share_id: Some(task.share_id.clone()),
+                    session_id: session.map(|(id, _)| id.clone()),
+                    relay_stuck: source.is_none()
+                        && session.is_some_and(|(_, m)| m.relay_stuck && !m.ended),
+                    swarm_peers,
+                };
+                (task_id.clone(), facts)
+            })
+            .collect();
         let receive_records = self
             .records
             .iter()
             .rev()
             .take(fluxdown_protocol::SHARE_STATE_RECEIVE_RECORDS)
-            .cloned()
+            .map(|record| self.record_dto(record))
             .collect();
         ShareStateDto {
             enabled,
@@ -268,6 +279,7 @@ impl ShareService {
                 events: Some(self.session_tx.clone()),
                 telemetry: Some(self.telemetry.clone()),
             },
+            content: self.content.clone(),
         })
         .map_err(|error| {
             tracing::warn!(error = %format!("{error:#}"), "share endpoint rejected the policy");
@@ -293,6 +305,8 @@ impl ShareService {
     /// 分享被停止 / 过期后不立即关端点：留一段宽限让还连着的接收方拿到「分享已结束」而不是「分享方离线」，
     /// 之后再按空闲规则收尾。一次性计时，没有周期性工作。
     pub(super) fn refresh_endpoint_later(&self) {
+        // 停止 / 到期的内容立刻不再提供；端点本身留宽限期。
+        self.sync_content();
         let weak = self.weak.clone();
         tokio::spawn(async move {
             tokio::time::sleep(super::service::ENDED_GRACE).await;
@@ -341,13 +355,14 @@ impl ShareService {
     /// 空闲静默：有有效分享或进行中的接收任务才绑定端点，否则关闭。
     pub(super) async fn refresh_endpoint(&self) {
         let _guard = self.lifecycle.lock().await;
+        self.sync_content();
         let (needed, dirty_endpoint, receiving) = self.with(|i| {
             let receiving = i
                 .receive_tasks
                 .values()
                 .any(super::service::ReceiveTask::is_active);
             (
-                self.registry.active_count() > 0 || receiving,
+                self.registry.active_count() > 0 || receiving || !self.content.is_empty(),
                 i.endpoint_dirty.then(|| i.endpoint.clone()).flatten(),
                 receiving,
             )
@@ -494,7 +509,7 @@ impl ShareService {
     }
 
     /// 重启后：把仍有效的分享重新登记进发送方（文件仍在才登记），再与云端对账。
-    pub(super) async fn restore_shares(&self) {
+    pub(super) async fn restore_shares(&self, persisted_active: &[String]) {
         let shares = self.with(|i| i.shares.clone());
         for stored in &shares {
             if let Err(error) = self.register_local(stored) {
@@ -502,14 +517,106 @@ impl ShareService {
             }
         }
         self.sync_shares().await;
+        self.check_active_sources(persisted_active).await;
         self.resume_uploads().await;
         self.refresh_endpoint().await;
+    }
+
+    /// 启动时对上次运行留下、对账后仍在分享中的分享做一次源文件检查（一次性；之后只在接收方取数失败时再发现）。
+    async fn check_active_sources(&self, persisted_active: &[String]) {
+        let candidates: Vec<StoredShare> = self.with(|i| {
+            i.shares
+                .iter()
+                .filter(|s| {
+                    s.dto.status == ShareStatus::Active && persisted_active.contains(&s.dto.id)
+                })
+                .cloned()
+                .collect()
+        });
+        for stored in candidates {
+            if !sources_intact(&stored.manifest.files, &stored.paths).await {
+                self.source_lost(&stored.dto.id).await;
+            }
+        }
+    }
+
+    /// 发送方读源文件时发现文件被删除 / 被改（`SessionEvent::SourceChanged`）：重新核对磁盘后按丢失处理。
+    pub(super) async fn on_source_changed(&self, share_id: &str) {
+        let Some(stored) = self.with(|i| i.shares.iter().find(|s| s.dto.id == share_id).cloned())
+        else {
+            return;
+        };
+        if stored.dto.status != ShareStatus::Active {
+            return;
+        }
+        if sources_intact(&stored.manifest.files, &stored.paths).await {
+            return;
+        }
+        self.source_lost(share_id).await;
+    }
+
+    /// 分享中的源文件已丢失：标记 `sourceMissing`；没有就绪的云端副本（接收方只能走本机）就按停止流程结束分享。
+    /// 云端停止失败只记录警告，分享保持分享中 + `sourceMissing`，下一次云端对账时重试。
+    async fn source_lost(&self, id: &str) {
+        self.flag_source_missing(id);
+        let has_cloud_copy = self.with(|i| {
+            i.shares
+                .iter()
+                .find(|s| s.dto.id == id)
+                .is_some_and(|s| s.dto.cloud_state == ShareCloudState::Ready)
+        });
+        if !has_cloud_copy {
+            match self.stop(id).await {
+                // 停止流程自己已落盘并发布。
+                Ok(_) => return,
+                Err(error) => tracing::warn!(
+                    share = id,
+                    reason = ?error.reason,
+                    "could not stop a share whose source file is gone; retrying on the next sync"
+                ),
+            }
+        }
+        self.persist_shares().await;
+        self.publish().await;
+    }
+
+    /// 把分享标记为源文件缺失；返回是否有变化。
+    pub(super) fn flag_source_missing(&self, id: &str) -> bool {
+        self.with(|i| {
+            let Some(stored) = i.shares.iter_mut().find(|s| s.dto.id == id) else {
+                return false;
+            };
+            !std::mem::replace(&mut stored.dto.source_missing, true)
+        })
+    }
+
+    /// 上次因云端失败没能停掉的「源文件缺失」分享，在对账后再试一次。
+    async fn retry_source_loss_stops(&self) {
+        let ids: Vec<String> = self.with(|i| {
+            i.shares
+                .iter()
+                .filter(|s| {
+                    s.dto.source_missing
+                        && s.dto.status == ShareStatus::Active
+                        && s.dto.cloud_state != ShareCloudState::Ready
+                })
+                .map(|s| s.dto.id.clone())
+                .collect()
+        });
+        for id in ids {
+            self.source_lost(&id).await;
+        }
     }
 
     /// `GET /share/shares` 对账：状态 / 到期 / 领取次数以云端为准；云端已不认识的本机分享视为已停止。
     /// 账号分享与游客分享分属不同归属方，各自用对应身份列出、只对账自己那一类。
     /// 请求期间本机改过分享表（`share_epoch` 变了）就作废这次列表重新请求，最多 [`SYNC_ATTEMPTS`] 次。
     pub(super) async fn sync_shares(&self) {
+        self.reconcile_shares().await;
+        self.retry_source_loss_stops().await;
+    }
+
+    async fn reconcile_shares(&self) {
         for _ in 0..SYNC_ATTEMPTS {
             let epoch = self.with(|i| i.share_epoch);
             let lists = self.fetch_share_lists().await;
@@ -734,4 +841,5 @@ pub(super) fn apply_cloud(dto: &mut ShareDto, cloud: &CloudShare) {
     dto.last_accessed_at.clone_from(&cloud.last_accessed_at);
     dto.cloud_state = cloud.cloud_state();
     dto.cloud_bytes = u64::try_from(cloud.cloud_bytes).unwrap_or(0);
+    dto.swarm = cloud.swarm;
 }

@@ -246,11 +246,11 @@ pub const AGENT_LINK_CONTROL_CREDENTIAL: &str = "agent.link.controlCredential";
 /// `LinkDispatchParams` → `LinkDispatchResult`：下发下载到已配对设备。
 pub const AGENT_LINK_DISPATCH: &str = "agent.link.dispatch";
 
-/// 快传（临时文件分享）。仅当 agent 编入快传服务时可用（否则 `Unsupported`，hello 不带
+/// FluxMesh（临时文件分享）。仅当 agent 编入FluxMesh服务时可用（否则 `Unsupported`，hello 不带
 /// `agent.share` 能力；已编入但被云端关闭时返回 `Unavailable` + `ShareUnavailable`）。
 /// 刷新云端策略并返回 → `ShareConfigDto`（云端策略摘要 + 本机设置）。
 pub const AGENT_SHARE_CONFIG: &str = "agent.share.config";
-/// `ShareLocalConfigDto` → `ShareLocalConfigDto`：整体替换本机快传设置，返回规范化后的值。
+/// `ShareLocalConfigDto` → `ShareLocalConfigDto`：整体替换本机FluxMesh设置，返回规范化后的值。
 pub const AGENT_SHARE_SET_LOCAL_CONFIG: &str = "agent.share.setLocalConfig";
 /// `ShareCreateParams` → `ShareDto`：从已完成的本机任务创建分享（多任务合成一个分享）。
 pub const AGENT_SHARE_CREATE: &str = "agent.share.create";
@@ -260,6 +260,11 @@ pub const AGENT_SHARE_LIST: &str = "agent.share.list";
 pub const AGENT_SHARE_UPDATE: &str = "agent.share.update";
 /// `ShareIdParams` → `ShareDto`：停止分享（取件码释放），返回停止后的状态。
 pub const AGENT_SHARE_STOP: &str = "agent.share.stop";
+/// `ShareIdParams` → `ShareDto`：重新开始已停止 / 已过期的分享（同 id、同链接，重新分配取件码）。
+/// 已在分享中则原样返回；本机源文件缺失或已被修改 → `ShareSourceMissing`（只能删除）。
+pub const AGENT_SHARE_RESUME: &str = "agent.share.resume";
+/// `ShareIdParams` → `{ "ok": true }`：删除分享记录（分享中的先停止，云端记录一并删除）。
+pub const AGENT_SHARE_DELETE: &str = "agent.share.delete";
 /// `ShareResolveParams` → `ShareResolveDto`：解析取件码 / 链接，返回接收确认框预览。
 pub const AGENT_SHARE_RESOLVE: &str = "agent.share.resolve";
 /// `ShareReceiveParams` → `ShareReceiveResultDto`：接收分享，建出普通下载任务。
@@ -282,6 +287,8 @@ pub const AGENT_SHARE_SESSION_KILL: &str = "agent.share.sessionKill";
 pub const AGENT_SHARE_CONVERT_TO_CLOUD: &str = "agent.share.convertToCloud";
 /// `ShareIdParams` → `ShareDto`：删除云端副本（上传中则先取消）；分享回到实时模式。
 pub const AGENT_SHARE_DELETE_CLOUD_COPY: &str = "agent.share.deleteCloudCopy";
+/// `ShareStopProvidingParams` → `ShareReceiveRecordDto`：停止该次接收的共享（共享提供），记录 `provideState = stopped`；记录不存在 → `ShareNotFound`。
+pub const AGENT_SHARE_STOP_PROVIDING: &str = "agent.share.stopProviding";
 
 pub const AGENT_PLAN_LIST: &str = "agent.plan.list";
 pub const AGENT_ORDER_CREATE: &str = "agent.order.create";
@@ -327,6 +334,9 @@ pub const AGENT_CLOUD_NOTIFY_VERIFY_EMAIL: &str = "agent.cloudNotify.verifyEmail
 
 pub const AGENT_PLATFORM_OPEN_TASK: &str = "agent.platform.openTask";
 pub const AGENT_PLATFORM_REVEAL_TASK: &str = "agent.platform.revealTask";
+/// `PlatformCopyTaskFilesParams` → `{ "ok": true }`：把已完成任务的产物以文件形式写入 agent 所在主机的
+/// 系统剪贴板（可直接在文件管理器 / 聊天软件里粘贴）。仅对带 [`CAPABILITY_AGENT_COPY_TASK_FILES`] 的连接可用。
+pub const AGENT_PLATFORM_COPY_TASK_FILES: &str = "agent.platform.copyTaskFiles";
 pub const AGENT_PLATFORM_OPEN_PATH: &str = "agent.platform.openPath";
 pub const AGENT_PLATFORM_INTEGRATION_GET: &str = "agent.platform.integrationGet";
 pub const AGENT_PLATFORM_SET_AUTOSTART: &str = "agent.platform.setAutostart";
@@ -387,7 +397,12 @@ pub const CAPABILITY_AGENT_EXTERNAL_CAPTURE: &str = "agent.externalCapture";
 /// 产物。按连接下发：Windows / macOS / Linux 桌面宿主恒有，嵌入式移动宿主没有；headless
 /// server 只给本机来源（见 agent `server_mode::ServerHandle::local_platform_permitted`）。
 pub const CAPABILITY_AGENT_OPEN_TASK_FILES: &str = "agent.openTaskFiles";
-/// 本 agent 编入了快传服务（`agent.share.*`）。条件能力：未编入快传的构建（如 iOS 商店版）
+/// 本连接可调用 `agent.platform.copyTaskFiles`，把任务产物作为文件写入 agent 所在主机的系统剪贴板。
+/// 按连接下发：本机来源条件同 [`CAPABILITY_AGENT_OPEN_TASK_FILES`]，另要求本构建编入桌面剪贴板
+/// （agent `desktop` 特性）且检测到图形会话；headless / NAS 构建与远程连接都没有（浏览器无法把文件
+/// 写进系统剪贴板，客户端据此隐藏「复制文件」）。
+pub const CAPABILITY_AGENT_COPY_TASK_FILES: &str = "agent.copyTaskFiles";
+/// 本 agent 编入了FluxMesh服务（`agent.share.*`）。条件能力：未编入FluxMesh的构建（如 iOS 商店版）
 /// 不下发；因此不在服务级基线 hello 里无条件出现。
 pub const CAPABILITY_AGENT_SHARE: &str = "agent.share";
 pub const CAPABILITY_CLIENT_SELECTIONS: &str = "client.selections";
@@ -570,6 +585,8 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_SHARE_LIST,
     AGENT_SHARE_UPDATE,
     AGENT_SHARE_STOP,
+    AGENT_SHARE_RESUME,
+    AGENT_SHARE_DELETE,
     AGENT_SHARE_RESOLVE,
     AGENT_SHARE_RECEIVE,
     AGENT_SHARE_DISMISS_PENDING,
@@ -580,6 +597,7 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_SHARE_SESSION_KILL,
     AGENT_SHARE_CONVERT_TO_CLOUD,
     AGENT_SHARE_DELETE_CLOUD_COPY,
+    AGENT_SHARE_STOP_PROVIDING,
     AGENT_PLAN_LIST,
     AGENT_ORDER_CREATE,
     AGENT_ORDER_GET,
@@ -607,6 +625,7 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_CLOUD_NOTIFY_VERIFY_EMAIL,
     AGENT_PLATFORM_OPEN_TASK,
     AGENT_PLATFORM_REVEAL_TASK,
+    AGENT_PLATFORM_COPY_TASK_FILES,
     AGENT_PLATFORM_OPEN_PATH,
     AGENT_PLATFORM_INTEGRATION_GET,
     AGENT_PLATFORM_SET_AUTOSTART,
@@ -685,8 +704,8 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
 /// 规范 `AGENT_CAPABILITIES`。
 ///
 /// 声明 agent 可能下发能力的规范全集（用于字面量断言与能力全景索引）。
-/// 注意：[`CAPABILITY_AGENT_OPEN_TASK_FILES`] 属于连接级条件能力，仅向本机来源或显式授权连接下发，
-/// 服务级基线 hello 并不无条件包含它。
+/// 注意：[`CAPABILITY_AGENT_OPEN_TASK_FILES`] / [`CAPABILITY_AGENT_COPY_TASK_FILES`] 属于连接级条件能力，
+/// 仅向本机来源或显式授权连接下发，服务级基线 hello 并不无条件包含它们。
 pub const AGENT_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_GATEWAY,
     CAPABILITY_AGENT_AUTH,
@@ -697,6 +716,7 @@ pub const AGENT_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_DEVICE_LINK,
     CAPABILITY_AGENT_EXTERNAL_CAPTURE,
     CAPABILITY_AGENT_OPEN_TASK_FILES,
+    CAPABILITY_AGENT_COPY_TASK_FILES,
     CAPABILITY_AGENT_SHARE,
 ];
 

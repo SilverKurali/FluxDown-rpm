@@ -1,4 +1,4 @@
-// 快传对话框的模块级 store：任何位置（下载页菜单、详情面板、新建下载框、快传页）都可 `openXxx()`，
+// FluxMesh对话框的模块级 store：任何位置（下载页菜单、详情面板、新建下载框、FluxMesh页）都可 `openXxx()`，
 // `ShareHost` 订阅并渲染分享面板 / 接收确认框。
 
 import { useSyncExternalStore } from 'react'

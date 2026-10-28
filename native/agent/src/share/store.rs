@@ -1,11 +1,11 @@
-//! 快传的本机持久化：iroh 私钥（独立 0600 文件）、本机设置、分享登记、接收记录。
+//! FluxMesh的本机持久化：iroh 私钥（独立 0600 文件）、本机设置、分享登记、接收记录。
 //!
 //! 全部在 `<agent 数据目录>/share/` 下，与 `agent-state.json` 分离：私钥不随云同步 / 状态快照，
 //! 进度类数据从不落盘（只在状态变化时写入这些小文件）；云端暂存上传另有分片完成时才写的断点文件。
 
 use std::path::{Path, PathBuf};
 
-use fluxdown_protocol::{ShareDto, ShareLocalConfigDto, ShareReceiveRecordDto};
+use fluxdown_protocol::{ShareDto, ShareLocalConfigDto, ShareProvideState, ShareReceiveRecordDto};
 use fluxdown_share::{SecretKey, ShareManifest};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,32 @@ pub(super) struct StoredShare {
 
 /// 接收记录保留上限。
 pub(super) const RECORD_LIMIT: usize = 200;
+
+/// 一次接收的共享状态：持有领取时的票据（登记共享时证明「确实领取过」），文件随下载完成逐个加入。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct StoredProvide {
+    pub record_id: String,
+    pub share_id: String,
+    pub ticket: String,
+    /// 原分享的到期时间（RFC 3339）；到期后共享自动结束。
+    #[serde(default)]
+    pub share_expires_at: Option<String>,
+    #[serde(default)]
+    pub files: Vec<ProvideFile>,
+    pub state: ShareProvideState,
+}
+
+/// 已完整落盘、可提供给他人的一个文件。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProvideFile {
+    pub task_id: String,
+    pub root_hash: String,
+    pub size: u64,
+    pub mtime_ms: i64,
+    pub path: PathBuf,
+}
 
 #[derive(Clone)]
 pub(super) struct ShareStore {
@@ -107,6 +133,14 @@ impl ShareStore {
 
     pub(super) async fn save_records(&self, records: &[ShareReceiveRecordDto]) -> Result<()> {
         self.write_json("receive-records.json", records).await
+    }
+
+    pub(super) async fn load_provides(&self) -> Vec<StoredProvide> {
+        self.read_json("provides.json").await.unwrap_or_default()
+    }
+
+    pub(super) async fn save_provides(&self, provides: &[StoredProvide]) -> Result<()> {
+        self.write_json("provides.json", provides).await
     }
 
     // ───────────── 云端暂存上传断点（`uploads/<shareId>.json`） ─────────────

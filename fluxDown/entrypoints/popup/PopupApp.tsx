@@ -10,7 +10,7 @@ import { browser } from "wxt/browser";
 import type { TabView } from "@/background/protocol";
 import { sendAction } from "@/utils/messaging";
 import { exportConnectionDiagnostics } from "@/utils/connection-diagnostics";
-import { loadSettings, saveSettings } from "@/utils/settings";
+import { loadSettings, saveSettings, type BypassKey } from "@/utils/settings";
 import { Button } from "@/ui/components/Button";
 import { HostAccessNotice } from "@/ui/components/HostAccessNotice";
 import { Icon } from "@/ui/components/Icon";
@@ -108,14 +108,17 @@ function useStats(): { sent: number; failed: number } {
   return stats;
 }
 
-/** 拦截总开关（settings.enabled）。 */
-function useInterceptEnabled(): [boolean, (next: boolean) => void] {
+/** 拦截总开关（settings.enabled）与跳过接管修饰键（页脚提示用）。 */
+function useInterceptEnabled(): [boolean, (next: boolean) => void, BypassKey] {
   const [enabled, setEnabled] = useState(true);
+  const [bypassKey, setBypassKey] = useState<BypassKey>("off");
   useEffect(() => {
     let alive = true;
     loadSettings()
       .then((s) => {
-        if (alive) setEnabled(s.enabled);
+        if (!alive) return;
+        setEnabled(s.enabled);
+        setBypassKey(s.bypassKey);
       })
       .catch(() => {});
     return () => {
@@ -126,7 +129,13 @@ function useInterceptEnabled(): [boolean, (next: boolean) => void] {
     setEnabled(next);
     saveSettings({ enabled: next }).catch(() => setEnabled(!next));
   };
-  return [enabled, update];
+  return [enabled, update, bypassKey];
+}
+
+/** 修饰键在当前平台上的叫法：macOS 的 Alt 是 Option。 */
+function bypassKeyLabel(key: BypassKey): string {
+  if (key === "shift") return "Shift";
+  return /Mac/i.test(navigator.userAgent) ? "Option" : "Alt";
 }
 
 /** 资源摘要用的视图：playing 全留，其余候选与文件合计只取前 N 行；truncated = 有行被省略。 */
@@ -150,7 +159,7 @@ export function PopupApp(): JSX.Element {
   useThemeAttr(document.documentElement);
   const t = useT();
   const connection = useConnection();
-  const [enabled, setEnabled] = useInterceptEnabled();
+  const [enabled, setEnabled, bypassKey] = useInterceptEnabled();
   const tabId = useActiveTabId();
   const view = useTabView(tabId).value;
   const stats = useStats();
@@ -267,6 +276,11 @@ export function PopupApp(): JSX.Element {
           </button>
         </div>
         <div class="pp-footer-right">
+          {enabled && bypassKey !== "off" ? (
+            <span class="pp-bypass-hint" title={t("popup.bypassHintTip", { key: bypassKeyLabel(bypassKey) })}>
+              {t("popup.bypassHint", { key: bypassKeyLabel(bypassKey) })}
+            </span>
+          ) : null}
           <span class="pp-stats" title={t("stats.title")}>
             <Icon name="download" size={11} />
             <span class="pp-stat-ok">{stats.sent}</span>

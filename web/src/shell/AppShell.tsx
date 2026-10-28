@@ -21,6 +21,7 @@ import { setChromeEditing, useChromeEdit } from './chromeStore'
 import { ChromeZoneView } from './ChromeZone'
 import { ConnectionBanner, ConnectionDot } from './ConnectionStatus'
 import { TitleBar, TitleBarSlotProvider } from './TitleBar'
+import { PluginNotices } from './PluginNotices'
 import { UpdateBanner, UpdateRestartOverlay } from './UpdateStatus'
 
 const TITLE_ZONE = 'flex shrink-0 items-center gap-1'
@@ -92,6 +93,7 @@ export function AppShell() {
         </div>
         {mobile ? <BottomTabBar /> : null}
         <AccountGuards />
+        <PluginNotices />
         <ShareHost />
         <UpdateRestartOverlay />
       </div>

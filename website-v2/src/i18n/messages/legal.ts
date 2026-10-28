@@ -53,8 +53,8 @@ export const legal = defineMessages({
         },
         {
           id: "share",
-          title: "File Sharing (Quick Share)",
-          body: "Quick Share is used only when you share a completed download or receive a shared file. Files are transferred directly between devices over an encrypted peer-to-peer connection whenever possible, otherwise through FluxDown relay servers that cannot read the content. When you use it, we process:",
+          title: "File Sharing (FluxMesh)",
+          body: "FluxMesh is used only when you share a completed download or receive a shared file. Files are transferred directly between devices over an encrypted peer-to-peer connection whenever possible, otherwise through FluxDown relay servers that cannot read the content. When you use it, we process:",
           items: [
             "<strong>Share records:</strong> for each share, the file names, sizes, content hashes (BLAKE3), the link, pickup code, expiry and claim count, plus the sharing device and account. Receivers can receive without an account; their device's random network ID, device name, IP address and its approximate location (country, region, city and ISP looked up on our servers) are recorded as access history for the share owner and for abuse handling.",
             "<strong>Network address records:</strong> the random network ID of each device taking part in sharing and the network addresses it publishes (relay server and direct IP addresses) are stored on FluxDown's own address servers so peers can find each other. We do not use third-party discovery services.",
@@ -337,8 +337,8 @@ export const legal = defineMessages({
         },
         {
           id: "share",
-          title: "文件分享（快传）",
-          body: "只有当您分享已完成的下载或接收他人分享的文件时才会使用快传。文件尽量在设备之间通过加密的点对点连接直接传输，无法直连时经由 FluxDown 自建中继服务器转发，中继无法读取内容。使用快传时，我们会处理：",
+          title: "文件共享（FluxMesh）",
+          body: "只有当您共享已完成的下载或接收他人共享的文件时才会使用FluxMesh。文件尽量在设备之间通过加密的点对点连接直接传输，无法直连时经由 FluxDown 自建中继服务器转发，中继无法读取内容。使用FluxMesh时，我们会处理：",
           items: [
             "<strong>分享记录：</strong>每个分享的文件名、大小、内容哈希（BLAKE3）、链接、取件码、有效期与领取次数，以及分享所用的设备和账户。未登录也可以接收；接收方设备的随机网络 ID、设备名、IP 地址及其大致归属（由我们服务器查询的国家、省份、城市与运营商）会作为访问记录保存，供分享者查看和处理滥用。",
             "<strong>网络地址记录：</strong>参与分享的设备的随机网络 ID 及其公布的网络地址（中继服务器与直连 IP 地址）保存在 FluxDown 自建的地址服务器上，用于让双方互相找到。我们不使用第三方发现服务。",

@@ -21,6 +21,8 @@ actions!(
         ResumeAll,
         OpenSelected,
         RevealSelected,
+        /// 把选中的已完成任务产物以文件写入系统剪贴板（右键「复制文件」）。
+        CopySelectedFiles,
         OpenSelectedInWindow,
         /// 在停靠详情面板中查看选中任务（右键「详情」）。
         ShowSelectedDetail,

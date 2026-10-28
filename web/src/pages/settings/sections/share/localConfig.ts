@@ -1,4 +1,4 @@
-// 快传本机设置（`ShareLocalConfigDto`）的纯解析与串行写回。
+// FluxMesh本机设置（`ShareLocalConfigDto`）的纯解析与串行写回。
 // `agent.share.setLocalConfig` 是整体替换：每次提交都以最新快照里的设置为底稿叠加补丁；连续编辑合并后串行发送，
 // 上一次的规范化结果作为下一次的底稿，避免两次写互相覆盖。
 

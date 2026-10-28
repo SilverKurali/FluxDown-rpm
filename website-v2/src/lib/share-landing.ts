@@ -1,5 +1,5 @@
 /**
- * 快传分享落地页（/s/<slug>）的纯函数：输入解析、清单校验、状态选择、格式化。
+ * FluxMesh分享落地页（/s/<slug>）的纯函数：输入解析、清单校验、状态选择、格式化。
  *
  * 不依赖 astro:*，页面、React 岛与 `src/lib/share-proxy.ts` 共用，tests/share-landing.test.ts 直接覆盖。
  * 契约：FluxCloud `GET /api/v1/share/public/{slug}` 与 `POST .../download`（见 share-proxy.ts）。
@@ -66,6 +66,8 @@ export interface ShareManifest {
   totalBytes: number;
   expiresAt: string;
   cloudReady: boolean;
+  /** 当前 6 位取件码（分享有效时上游才给）。 */
+  pickupCode?: string;
   turnstileSiteKey?: string;
 }
 
@@ -166,7 +168,7 @@ function isInstant(value: unknown): value is string {
 /** 校验并裁剪上游清单；任何字段形状不符返回 null（上游异常，不渲染半截页面）。 */
 export function parseManifest(value: unknown): ShareManifest | null {
   if (!isRecord(value)) return null;
-  const { id, slug, title, files, totalBytes, expiresAt, cloudReady, turnstileSiteKey } = value;
+  const { id, slug, title, files, totalBytes, expiresAt, cloudReady, pickupCode, turnstileSiteKey } = value;
   if (typeof id !== "string" || typeof slug !== "string" || typeof title !== "string") return null;
   if (!Array.isArray(files) || !isSize(totalBytes) || !isInstant(expiresAt)) return null;
   if (typeof cloudReady !== "boolean") return null;
@@ -178,6 +180,11 @@ export function parseManifest(value: unknown): ShareManifest | null {
     parsed.push({ index: file.index, name: file.name, size: file.size });
   }
   const manifest: ShareManifest = { id, slug, title, files: parsed, totalBytes, expiresAt, cloudReady };
+  if (typeof pickupCode === "string" && PICKUP_CODE_RE.test(pickupCode)) {
+    manifest.pickupCode = pickupCode;
+  } else if (pickupCode !== undefined && pickupCode !== null) {
+    return null;
+  }
   if (typeof turnstileSiteKey === "string" && turnstileSiteKey !== "") {
     manifest.turnstileSiteKey = turnstileSiteKey;
   } else if (turnstileSiteKey !== undefined && turnstileSiteKey !== null && turnstileSiteKey !== "") {

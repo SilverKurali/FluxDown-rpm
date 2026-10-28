@@ -6,6 +6,7 @@ pub mod new_download;
 pub mod progress_window;
 pub mod queue_manager;
 pub mod selection;
+pub(crate) mod task_copy;
 pub mod task_detail;
 pub(crate) mod task_edit;
 pub(crate) mod task_share;

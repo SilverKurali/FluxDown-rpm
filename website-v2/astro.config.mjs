@@ -20,7 +20,7 @@ const noindexPathnames = new Set([
   // 产品短片录制舞台
   "/film",
   "/zh/film",
-  // 快传说明页(分享落地页 /s/<slug> 是 SSR 动态页,不在静态路径里)
+  // FluxMesh说明页(分享落地页 /s/<slug> 是 SSR 动态页,不在静态路径里)
   "/s",
   "/zh/s",
 ]);

@@ -159,6 +159,8 @@ pub enum SourceTone {
 pub struct SourceLine {
     pub key: &'static str,
     pub tone: SourceTone,
+    /// 文案里的 `{count}`（共享设备数等）；没有占位符的行为 `None`。
+    pub count: Option<u32>,
 }
 
 /// 「当前可用来源」要显示的行：分享方设备状态始终显示，云端副本 / 桥接只在可用时显示。
@@ -168,26 +170,38 @@ pub fn source_lines(sources: &ShareSourcesDto) -> Vec<SourceLine> {
         Some(true) => SourceLine {
             key: "shareSourceSenderOnline",
             tone: SourceTone::Good,
+            count: None,
         },
         Some(false) => SourceLine {
             key: "shareSourceSenderOffline",
             tone: SourceTone::Warn,
+            count: None,
         },
         None => SourceLine {
             key: "shareSourceSenderUnknown",
             tone: SourceTone::Unknown,
+            count: None,
         },
     }];
     if sources.cloud_copy {
         lines.push(SourceLine {
             key: "shareSourceCloud",
             tone: SourceTone::Good,
+            count: None,
         });
     }
     if sources.bridge {
         lines.push(SourceLine {
             key: "shareSourceBridge",
             tone: SourceTone::Good,
+            count: None,
+        });
+    }
+    if sources.swarm_peers > 0 {
+        lines.push(SourceLine {
+            key: "shareSourceSwarm",
+            tone: SourceTone::Good,
+            count: Some(sources.swarm_peers),
         });
     }
     lines
@@ -386,6 +400,21 @@ mod tests {
                 ("shareSourceCloud", SourceTone::Good),
                 ("shareSourceBridge", SourceTone::Good)
             ]
+        );
+    }
+
+    #[test]
+    fn swarm_peers_add_a_counted_last_line() {
+        let sources = ShareSourcesDto {
+            sender_online: Some(true),
+            swarm_peers: 2,
+            ..ShareSourcesDto::default()
+        };
+        let lines = source_lines(&sources);
+        let last = lines.last().copied();
+        assert_eq!(
+            last.map(|line| (line.key, line.tone, line.count)),
+            Some(("shareSourceSwarm", SourceTone::Good, Some(2)))
         );
     }
 

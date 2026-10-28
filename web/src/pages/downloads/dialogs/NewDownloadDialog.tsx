@@ -146,7 +146,7 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
   const shareActive = shareAvailable && target === null
   const shareLinks = useMemo(() => extractShareLinks(text), [text])
   const parsed = useMemo(() => parseInput(text, false), [text])
-  // 快传可用时分享链接（含 `https://…/s/<slug>` 形式）不当作普通下载链接。
+  // FluxMesh可用时分享链接（含 `https://…/s/<slug>` 形式）不当作普通下载链接。
   const entries = useMemo(
     () => (shareActive ? parsed.entries.filter((entry) => parseShareLink(entry.url) === null) : parsed.entries),
     [parsed.entries, shareActive],

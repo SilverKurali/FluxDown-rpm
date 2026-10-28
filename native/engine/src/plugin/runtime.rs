@@ -668,6 +668,15 @@ pub trait HostEvents: Send + Sync {
     fn request_render(&self, session: &str);
     /// `flux.ui.toast`。
     fn toast(&self, identity: &str, level: &str, text: &str);
+    /// `ctx.close()`：以 `requested` 原因结束调用方自己的会话。
+    fn close_view(&self, identity: &str, session: &str) -> Result<(), PluginError>;
+    /// `ctx.navigate(target)`：校验目标后向客户端发出跳转请求。
+    async fn navigate(
+        &self,
+        identity: &str,
+        session: &str,
+        target: serde_json::Value,
+    ) -> Result<(), PluginError>;
     /// 安排一个一次性定时器：`delay` 后向宿主投递 [`HostCall::Timer`]。
     fn timer(&self, identity: &str, id: u32, delay: Duration);
     /// 取消尚未触发的定时器。

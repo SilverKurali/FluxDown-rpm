@@ -1,5 +1,5 @@
-//! 快传宿主装配：状态中枢与 agent 会话的接入、窗口入口（分享面板 / 接收确认 / 管理页）、
-//! 链接触发的待确认接收自动弹窗，以及快传可用性对活动栏入口的联动。
+//! FluxMesh宿主装配：状态中枢与 agent 会话的接入、窗口入口（分享面板 / 接收确认 / 管理页）、
+//! 链接触发的待确认接收自动弹窗，以及FluxMesh可用性对活动栏入口的联动。
 
 use std::{rc::Rc, sync::Arc};
 
@@ -19,8 +19,8 @@ use crate::{
     session::{AgentSession, attach},
 };
 
-/// 创建快传状态中枢并接入会话：快照 / 事件进 hub，窗口入口注入，待确认接收自动弹接收窗口，
-/// 快传可用性变化时刷新活动栏入口。
+/// 创建FluxMesh状态中枢并接入会话：快照 / 事件进 hub，窗口入口注入，待确认接收自动弹接收窗口，
+/// FluxMesh可用性变化时刷新活动栏入口。
 pub(crate) fn install(
     translator: &Entity<Translator>,
     session: &Entity<AgentSession>,
@@ -68,7 +68,7 @@ pub(crate) fn open_panel(cx: &mut App, target: PanelTarget) {
     crate::windows::share::open(cx, target);
 }
 
-/// 主窗口到前台并切到快传管理页的指定页签（可聚焦某个会话）。
+/// 主窗口到前台并切到FluxMesh管理页的指定页签（可聚焦某个会话）。
 pub(crate) fn open_manage(cx: &mut App, tab: ManageTab, session_id: Option<String>) {
     cx.defer(move |cx| {
         crate::command_palette::navigate_now(cx, SHARE_ROUTE);
@@ -84,7 +84,7 @@ pub(crate) fn open_share_receive_opener() -> IdOpener {
     })
 }
 
-/// 把快传入口注入下载页的宿主动作（主窗口与独立任务窗口共用）：分享面板、任务行「切换桥接」、
+/// 把FluxMesh入口注入下载页的宿主动作（主窗口与独立任务窗口共用）：分享面板、任务行「切换桥接」、
 /// 任务详情「传输诊断」页。
 pub(crate) fn extend_download_actions(host: &mut DownloadHostActions, hub: &Entity<ShareHub>) {
     host.share_tasks = Some(Rc::new(|task_ids, _, cx| {
@@ -103,7 +103,7 @@ pub(crate) fn extend_download_actions(host: &mut DownloadHostActions, hub: &Enti
     host.open_share_receive = Some(open_share_receive_opener());
 }
 
-/// 快传可用性变化：按偏好 + 可用性重算活动栏入口。
+/// FluxMesh可用性变化：按偏好 + 可用性重算活动栏入口。
 fn refresh_entry_visibility(cx: &mut App) {
     let Some(shell) = Desktop::global(cx)
         .main_shell

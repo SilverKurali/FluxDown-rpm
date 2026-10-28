@@ -1,7 +1,7 @@
 //! 分享链接（`fluxdown://share/<slug>`、`https://fluxdown.com/s/<slug>`）的路由出口。
 //!
-//! 捕获入口（系统打开链接、剪贴板、浏览器扩展接管）不认识快传；它们只把分享链接交给这里的
-//! [`ShareLinkSink`]。服务编入时由快传服务实现（解析后在 `ShareStateDto.pendingReceive` 里等 UI 确认），
+//! 捕获入口（系统打开链接、剪贴板、浏览器扩展接管）不认识FluxMesh；它们只把分享链接交给这里的
+//! [`ShareLinkSink`]。服务编入时由FluxMesh服务实现（解析后在 `ShareStateDto.pendingReceive` 里等 UI 确认），
 //! 未编入时没有 sink，捕获按「不支持」拒绝——分享链接绝不会落成一条损坏的下载任务。
 
 use async_trait::async_trait;

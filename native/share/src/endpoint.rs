@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::observe::Observers;
 use crate::sender::{ShareRegistry, ShareSender};
+use crate::swarm::{ContentRegistry, SWARM_ALPN};
 use crate::ticket::KeyRing;
 use crate::timefmt::now_rfc3339;
 use crate::types::{
@@ -56,6 +57,8 @@ pub struct ShareEndpointParams {
     pub registry: ShareRegistry,
     /// 事件与上报出口。
     pub observers: Observers,
+    /// 共享内容表（宿主维护）：本机能向别人提供的完整文件与下载中的部分块。
+    pub content: ContentRegistry,
 }
 
 struct Bound {
@@ -80,7 +83,7 @@ struct Shared {
     snapshots: watch::Sender<Option<Arc<NetSnapshot>>>,
 }
 
-/// 快传端点：同时承担分享方（接入请求）与接收方（出站连接）。可克隆，克隆体共享同一个端点。
+/// FluxMesh端点：同时承担分享方（接入请求）与接收方（出站连接）。可克隆，克隆体共享同一个端点。
 #[derive(Clone)]
 pub struct ShareEndpoint {
     shared: Arc<Shared>,
@@ -109,6 +112,7 @@ impl ShareEndpoint {
             report_interval,
             params.local.send_rate_limit_bytes_per_sec.unwrap_or(0),
             id,
+            params.content,
         );
         Ok(Self {
             shared: Arc::new(Shared {
@@ -186,6 +190,7 @@ impl ShareEndpoint {
         let endpoint = build_endpoint(&self.shared).await?;
         let router = Router::builder(endpoint.clone())
             .accept(ALPN, self.shared.sender.handler())
+            .accept(SWARM_ALPN, self.shared.sender.swarm_handler())
             .spawn();
         let cancel = CancellationToken::new();
         tokio::spawn(watch_net(
@@ -386,7 +391,7 @@ async fn build_endpoint(shared: &Shared) -> Result<Endpoint> {
     let local = &shared.local;
     let mut builder = Endpoint::builder(presets::Minimal)
         .secret_key(shared.secret_key.clone())
-        .alpns(vec![ALPN.to_vec()]);
+        .alpns(vec![ALPN.to_vec(), SWARM_ALPN.to_vec()]);
 
     // 端点级解析器（中继 / QAD 主机名、pkarr 服务器主机名）：只用系统配置，禁用公共回落。
     builder = builder.dns_resolver(

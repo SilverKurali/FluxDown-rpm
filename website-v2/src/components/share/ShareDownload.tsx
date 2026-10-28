@@ -1,5 +1,5 @@
 /**
- * 快传分享落地页的文件列表与浏览器下载（云端副本就绪时）。
+ * FluxMesh分享落地页的文件列表与浏览器下载（云端副本就绪时）。
  *
  * 点「下载」→ POST 同源代理 `/api/cloud/share/public/<slug>/download`（见 src/lib/share-proxy.ts）拿签名 CDN 链接，
  * 再用隐藏 <a> 导航触发浏览器下载。清单带 `turnstileSiteKey` 时先渲染 Cloudflare Turnstile 小部件，
@@ -92,12 +92,12 @@ export default function ShareDownload({
 
   return (
     <div className="flex flex-col gap-5">
-      <ul className="cells">
+      <ul className="cells border border-line">
         {files.map((file) => (
-          <li key={file.index} className="cell flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+          <li key={file.index} className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 px-5 py-4">
             <div className="min-w-0 flex-1">
-              <p className="break-all font-medium text-fg">{file.name}</p>
-              <p className="mono num mt-1 text-sm text-fg-muted">{formatBytes(file.size)}</p>
+              <p className="font-medium text-fg [overflow-wrap:anywhere]">{file.name}</p>
+              <p className="mono num mt-1 text-sm text-muted">{formatBytes(file.size)}</p>
             </div>
             <div className="flex items-center gap-3">
               {started === file.index && (
@@ -124,7 +124,7 @@ export default function ShareDownload({
       </ul>
       {siteKey && (
         <div className="flex flex-col gap-2">
-          {!token && <p className="text-sm text-fg-muted">{labels.verify}</p>}
+          {!token && <p className="text-sm text-muted">{labels.verify}</p>}
           <TurnstileWidget
             ref={widget}
             siteKey={siteKey}

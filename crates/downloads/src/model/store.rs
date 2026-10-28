@@ -73,9 +73,9 @@ pub(crate) struct TaskStore {
     pausable: Cell<usize>,
     resumable_seeds: Cell<usize>,
     paused_by_queue: RefCell<HashMap<String, usize>>,
-    /// 快传在下载页的投影（可用性 + 任务事实），由 controller 随快照 / 事件写入。
+    /// FluxMesh在下载页的投影（可用性 + 任务事实），由 controller 随快照 / 事件写入。
     share: RefCell<ShareFacts>,
-    /// 宿主注入了哪些快传入口。
+    /// 宿主注入了哪些FluxMesh入口。
     share_host: Cell<ShareHostCaps>,
 }
 
@@ -90,7 +90,7 @@ impl TaskStore {
         }
     }
 
-    /// 快传在本构建可用且宿主提供了「分享」入口：为 `false` 时一切分享控件隐藏。
+    /// FluxMesh在本构建可用且宿主提供了「分享」入口：为 `false` 时一切分享控件隐藏。
     pub(crate) fn share_entry_visible(&self) -> bool {
         self.share_host.get().send && self.share.borrow().available()
     }
@@ -112,12 +112,12 @@ impl TaskStore {
         share_control(self.share_entry_visible(), share.can_send(), &rows)
     }
 
-    /// 快传投影（只读）。
+    /// FluxMesh投影（只读）。
     pub(crate) fn share(&self) -> Ref<'_, ShareFacts> {
         self.share.borrow()
     }
 
-    /// 整体替换快传投影；内容变了才使读者失效并返回 `true`。
+    /// 整体替换FluxMesh投影；内容变了才使读者失效并返回 `true`。
     pub(crate) fn replace_share(&self, facts: ShareFacts) -> bool {
         if *self.share.borrow() == facts {
             return false;

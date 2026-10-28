@@ -6,10 +6,11 @@ use std::sync::{Arc, Mutex};
 
 use fluxdown_share::ticket::{encode_public_key, sign_ticket};
 use fluxdown_share::{
-    EndpointAddr, KeyEntry, KeyRing, LocalAdapter, LocalEndpointConfig, NetSnapshot, NetworkPolicy,
-    Observers, ReceiveParams, ReceiveSession, SecretKey, SessionEvent, SessionReport,
-    ShareEndpoint, ShareEndpointParams, ShareEntry, ShareManifest, ShareRegistry, ShareState,
-    ShareTelemetrySink, TicketPayload, hash_file,
+    ChunkSet, ContentEntry, ContentRegistry, ContentSource, EndpointAddr, KeyEntry, KeyRing,
+    LocalAdapter, LocalEndpointConfig, NetSnapshot, NetworkPolicy, Observers, ReceiveParams,
+    ReceiveSession, SecretKey, SessionEvent, SessionReport, ShareEndpoint, ShareEndpointParams,
+    ShareEntry, ShareManifest, ShareRegistry, ShareState, ShareTelemetrySink, TicketPayload,
+    hash_file,
 };
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -69,6 +70,8 @@ pub struct Peer {
     pub registry: ShareRegistry,
     pub events: mpsc::UnboundedReceiver<SessionEvent>,
     pub sink: Arc<CollectSink>,
+    pub content: ContentRegistry,
+    pub keep: Option<TempDir>,
 }
 
 /// 签发密钥：kid 固定 `k1`。
@@ -97,6 +100,7 @@ pub fn payload(sid: &str, rep: &str, exp: u64) -> TicketPayload {
         rep: rep.into(),
         exp,
         scope: "recv".into(),
+        root: None,
     }
 }
 
@@ -110,6 +114,7 @@ pub fn far_future() -> u64 {
 
 pub fn peer_with(keys: KeyRing, report_secs: u64, local: LocalEndpointConfig) -> Peer {
     let registry = ShareRegistry::new();
+    let content = ContentRegistry::new();
     let (tx, rx) = mpsc::unbounded_channel();
     let sink = Arc::new(CollectSink::default());
     let ep = ShareEndpoint::new(ShareEndpointParams {
@@ -123,6 +128,7 @@ pub fn peer_with(keys: KeyRing, report_secs: u64, local: LocalEndpointConfig) ->
             events: Some(tx),
             telemetry: Some(sink.clone()),
         },
+        content: content.clone(),
     })
     .unwrap();
     Peer {
@@ -130,6 +136,8 @@ pub fn peer_with(keys: KeyRing, report_secs: u64, local: LocalEndpointConfig) ->
         registry,
         events: rx,
         sink,
+        content,
+        keep: None,
     }
 }
 
@@ -186,6 +194,93 @@ pub fn register(peer: &Peer, file: &SharedFile) {
             rate_limit_bytes_per_sec: None,
         })
         .unwrap();
+}
+
+/// 把 `file` 复制到新的临时目录（内容可再被改动）；清单沿用原文件的。
+pub fn clone_file(file: &SharedFile, data: Vec<u8>) -> SharedFile {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("payload.bin");
+    std::fs::write(&path, &data).unwrap();
+    SharedFile {
+        _dir: dir,
+        path,
+        data,
+        manifest: file.manifest.clone(),
+    }
+}
+
+/// 文件当前真实的修改时间（Unix 毫秒）。
+pub fn real_mtime_ms(path: &std::path::Path) -> i64 {
+    fluxdown_share::hashing::file_mtime_ms(&std::fs::metadata(path).unwrap()).unwrap()
+}
+
+/// 文件首个条目的根哈希（原始 32 字节）。
+pub fn root_of(file: &SharedFile) -> [u8; 32] {
+    fluxdown_share::hashing::parse_hash(&file.manifest.files[0].root_hash).unwrap()
+}
+
+/// 签发 swarm 票据：`rep` 是接收方，`root` 是文件根哈希（hex）。
+pub fn swarm_ticket_for(
+    signer: &Signer,
+    sid: &str,
+    receiver: &ShareEndpoint,
+    root_hex: &str,
+    exp: u64,
+) -> String {
+    let mut p = payload(sid, &receiver.id_z32(), exp);
+    p.scope = "swarm".into();
+    p.root = Some(root_hex.to_owned());
+    sign_ticket(&signer.secret, &p).unwrap()
+}
+
+/// 持有完整文件、并在内容表里登记的共享提供者。
+pub fn provide_peer(keys: KeyRing, file: &SharedFile) -> Peer {
+    let peer = peer(keys);
+    peer.content.replace_all(vec![(
+        root_of(file),
+        ContentEntry {
+            size: file.manifest.files[0].size,
+            source: ContentSource::Complete {
+                path: file.path.clone(),
+                mtime_ms: real_mtime_ms(&file.path),
+            },
+        },
+    )]);
+    peer
+}
+
+/// 只持有部分块的提供者：磁盘上只写入 `have` 里的块（其余为零），位图额外标出 `corrupt` 块
+/// （这些块的磁盘内容是零，提供时校验必然失败）。
+pub fn partial_peer(keys: KeyRing, file: &SharedFile, have: &[u64], corrupt: &[u64]) -> Peer {
+    let mut peer = peer(keys);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("payload.bin.fdownloading");
+    let manifest_file = file.manifest.files[0].clone();
+    let mut data = vec![0u8; file.data.len()];
+    let set = ChunkSet::new(manifest_file.chunk_count());
+    for &i in have {
+        let (s, e) = manifest_file.chunk_range(i).unwrap();
+        let (s, e) = (usize::try_from(s).unwrap(), usize::try_from(e).unwrap());
+        data[s..e].copy_from_slice(&file.data[s..e]);
+        set.insert(i);
+    }
+    for &i in corrupt {
+        set.insert(i);
+    }
+    std::fs::write(&path, &data).unwrap();
+    peer.content.replace_all(vec![(
+        root_of(file),
+        ContentEntry {
+            size: manifest_file.size,
+            source: ContentSource::Partial {
+                path,
+                file: manifest_file,
+                have: Arc::new(set),
+            },
+        },
+    )]);
+    peer.keep = Some(dir);
+    peer
 }
 
 /// 完整的“分享方 + 接收方 + 适配器”装置。

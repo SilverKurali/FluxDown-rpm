@@ -24,7 +24,7 @@ import { normalizeHlsPlaylist } from "@/utils/hls-playlist";
 import { buildMediaCandidates } from "@/utils/media-candidates";
 import { buildResourceDebugLog } from "@/utils/resource-debug-log";
 import { profileFor } from "@/utils/site-profiles";
-import { markAppUp } from "./breaker";
+import { armBypassClick, markAppUp, setBypassKeyHeld } from "./breaker";
 import {
   downloadCandidate,
   downloadResources,
@@ -219,6 +219,7 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
       pageDot: settings.showPageDot && profile.pageDot,
       frameIsTop: frameId === 0,
       interceptMagnet: settings.enabled && settings.interceptMagnet && profile.intercept !== "never",
+      bypassKey: settings.enabled ? settings.bypassKey : "off",
       sniffImages: settings.sniffImages,
       classify: engine.classifyRules(),
     };
@@ -341,6 +342,16 @@ const handlers: { [A in MessageAction]: Handler<A> } = {
     if (tabId === undefined || typeof req.sid !== "string" || !req.sid) return { ok: false };
     await whenRestored();
     setSessionHooks(tabId, sender.frameId ?? 0, req.sid, req.hooks ?? null);
+    return { ok: true };
+  },
+
+  async bypassKey(req) {
+    setBypassKeyHeld(req.held === true);
+    return { ok: true };
+  },
+
+  async bypassClick(req, sender) {
+    armBypassClick(senderTabId(sender), typeof req.href === "string" && req.href ? req.href : undefined);
     return { ok: true };
   },
 

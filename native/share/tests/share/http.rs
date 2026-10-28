@@ -2,7 +2,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use fluxdown_share::{ShareState, ticket::sign_ticket};
+use fluxdown_share::{SessionEvent, ShareState, ticket::sign_ticket};
 use reqwest::StatusCode;
 
 use crate::common::{http, payload, rig, rig_with};
@@ -19,7 +19,7 @@ fn status_tag(resp: &reqwest::Response) -> String {
 
 #[tokio::test]
 async fn changed_source_file_yields_409() {
-    let rig = rig("share-changed", MIB + 17).await;
+    let mut rig = rig("share-changed", MIB + 17).await;
     let url = rig.url();
     // 先确认正常。
     assert_eq!(
@@ -60,6 +60,16 @@ async fn changed_source_file_yields_409() {
         http().get(&url).send().await.unwrap().status(),
         StatusCode::CONFLICT
     );
+
+    // 每次 changed 都经事件通道通知宿主（正常请求不产生该事件）。
+    let mut changed = 0;
+    while let Ok(event) = rig.sender.events.try_recv() {
+        if let SessionEvent::SourceChanged { share_id } = event {
+            assert_eq!(share_id, "share-changed");
+            changed += 1;
+        }
+    }
+    assert!(changed >= 1, "宿主应收到 SourceChanged，实际 {changed}");
 }
 
 #[tokio::test]

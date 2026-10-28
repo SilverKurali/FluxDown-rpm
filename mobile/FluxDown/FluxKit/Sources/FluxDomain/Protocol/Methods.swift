@@ -213,13 +213,15 @@ public enum HostMethod {
     public static let agentLinkDispatch = "agent.link.dispatch"
     /// `LinkDeviceParams` → `LinkControlCredentialDto`：向本机 agent 申请对某已配对主机的设备控制凭据（仅 `controllable && !revoked`）。
     public static let agentLinkControlCredential = "agent.link.controlCredential"
-    /// 快传（`agent.share.*`）：仅当主机 hello 带 `agent.share` 能力时可用；移动端暂不使用，常量只为与 `method.rs` 一一对应。
+    /// FluxMesh（`agent.share.*`）：仅当主机 hello 带 `agent.share` 能力时可用；移动端暂不使用，常量只为与 `method.rs` 一一对应。
     public static let agentShareConfig = "agent.share.config"
     public static let agentShareSetLocalConfig = "agent.share.setLocalConfig"
     public static let agentShareCreate = "agent.share.create"
     public static let agentShareList = "agent.share.list"
     public static let agentShareUpdate = "agent.share.update"
     public static let agentShareStop = "agent.share.stop"
+    public static let agentShareResume = "agent.share.resume"
+    public static let agentShareDelete = "agent.share.delete"
     public static let agentShareResolve = "agent.share.resolve"
     public static let agentShareReceive = "agent.share.receive"
     public static let agentShareReceiveRecords = "agent.share.receiveRecords"
@@ -230,6 +232,7 @@ public enum HostMethod {
     public static let agentShareSessionKill = "agent.share.sessionKill"
     public static let agentShareConvertToCloud = "agent.share.convertToCloud"
     public static let agentShareDeleteCloudCopy = "agent.share.deleteCloudCopy"
+    public static let agentShareStopProviding = "agent.share.stopProviding"
     public static let agentPlanList = "agent.plan.list"
     public static let agentOrderCreate = "agent.order.create"
     public static let agentOrderGet = "agent.order.get"
@@ -242,6 +245,8 @@ public enum HostMethod {
     public static let agentReferralValidate = "agent.referral.validate"
     public static let agentPlatformOpenTask = "agent.platform.openTask"
     public static let agentPlatformRevealTask = "agent.platform.revealTask"
+    /// 把任务产物以文件写入主机系统剪贴板；仅桌面主机本机来源，移动端不使用。
+    public static let agentPlatformCopyTaskFiles = "agent.platform.copyTaskFiles"
     public static let agentPlatformOpenPath = "agent.platform.openPath"
     public static let agentPlatformIntegrationGet = "agent.platform.integrationGet"
     public static let agentPlatformSetAutostart = "agent.platform.setAutostart"
@@ -311,7 +316,9 @@ public enum HostCapability {
     public static let agentExternalCapture = "agent.externalCapture"
     /// 按连接下发：本连接可在 agent 所在主机上打开 / 定位任务产物（`agent.platform.openTask` / `revealTask`）。
     public static let agentOpenTaskFiles = "agent.openTaskFiles"
-    /// 本主机编入了快传服务（`agent.share.*`）；移动端暂不使用。
+    /// 按连接下发：本连接可把任务产物写入 agent 所在主机的系统剪贴板（`agent.platform.copyTaskFiles`）。
+    public static let agentCopyTaskFiles = "agent.copyTaskFiles"
+    /// 本主机编入了FluxMesh服务（`agent.share.*`）；移动端暂不使用。
     public static let agentShare = "agent.share"
     public static let clientSelections = "client.selections"
 }

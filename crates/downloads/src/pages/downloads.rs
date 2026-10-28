@@ -103,11 +103,13 @@ pub type CategoryEditorOpener = Rc<dyn Fn(Option<String>, &mut Window, &mut App)
 pub type UserStartHook = Rc<dyn Fn(UserStartIntent, &mut App)>;
 /// 执行插件命令：`(identity, command, task_ids)`。
 pub type PluginCommandRunner = Rc<dyn Fn(String, String, Vec<String>, &mut Window, &mut App)>;
-/// 构造插件详情 tab 视图：`(tab 下标, task_id)`。
-pub type PluginTabViewFactory = Rc<dyn Fn(u16, String, &mut Window, &mut App) -> AnyView>;
+/// 构造插件详情 tab 视图：`(tab, task_id)`；宿主按 tab 的 `(identity, view)` 定位贡献，
+/// 不依赖下标。
+pub type PluginTabViewFactory =
+    Rc<dyn Fn(&PluginTaskTab, String, &mut Window, &mut App) -> AnyView>;
 /// 分享任务：参数为任务 id 列表，由宿主打开分享面板。
 pub type ShareTasksOpener = Rc<dyn Fn(Vec<String>, &mut Window, &mut App)>;
-/// 构造某任务的快传「传输诊断」页签内容（宿主按任务缓存视图由详情面板负责）。
+/// 构造某任务的FluxMesh「传输诊断」页签内容（宿主按任务缓存视图由详情面板负责）。
 pub type ShareDiagnosticsViewFactory = Rc<dyn Fn(String, &mut Window, &mut App) -> AnyView>;
 
 /// 插件贡献的任务右键命令。
@@ -118,9 +120,13 @@ pub struct PluginTaskCommand {
     pub title: SharedString,
 }
 
-/// 插件贡献的任务详情 tab。
+/// 插件贡献的任务详情 tab。相等性包含插件 identity 与视图 id：换了插件的同标题 tab 也必须
+/// 判为不同，详情面板才会作废旧视图缓存。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginTaskTab {
+    pub identity: String,
+    /// 贡献该 tab 的视图 id（插件内唯一）。
+    pub view: String,
     pub title: SharedString,
     /// 内容修订号：变化即旧视图作废、须按工厂重建（插件包代码被替换时由 app 递增）。
     pub revision: u64,
@@ -151,14 +157,15 @@ pub struct DownloadHostActions {
     pub on_user_started: Option<UserStartHook>,
     /// 点击插件任务右键命令：`(插件 identity, 命令 id, 任务 id 列表)`。
     pub run_plugin_command: Option<PluginCommandRunner>,
-    /// 取插件详情 tab 内容：`(tab 下标, 任务 id)`；同一 `(下标, 任务)` 的视图由详情面板缓存。
+    /// 取插件详情 tab 内容：`(tab, 任务 id)`；同一 `(tab 下标, 任务)` 的视图由详情面板缓存，
+    /// tab 列表变化（含插件 identity / 视图 id 变化）时缓存整体作废。
     pub plugin_tab_view: Option<PluginTabViewFactory>,
     /// 分享入口（右键菜单 / 选择条 / 详情面板 / `PageCommand::ShareSelected`）：参数为任务
     /// id 列表。`None` 时全部分享入口隐藏。
     pub share_tasks: Option<ShareTasksOpener>,
-    /// 快传接收任务角标上的「切换桥接」：参数为任务 id。`None` 时不显示该动作。
+    /// FluxMesh接收任务角标上的「切换桥接」：参数为任务 id。`None` 时不显示该动作。
     pub share_switch_to_bridge: Option<IdOpener>,
-    /// 快传接收任务详情「传输诊断」页签内容；`None` 时不显示该页签。
+    /// FluxMesh接收任务详情「传输诊断」页签内容；`None` 时不显示该页签。
     pub share_diagnostics_view: Option<ShareDiagnosticsViewFactory>,
     /// 新建下载对话框识别出分享链接后打开接收确认：参数为链接原文。
     /// 对话框是独立窗口，由 app 经 [`crate::NewDownloadView::set_open_share_receive`] 注入。
@@ -444,23 +451,29 @@ impl DownloadView {
             .collect()
     }
 
-    /// 右键菜单点击插件命令：把选中任务 id 交给宿主回调。
+    /// 右键菜单点击插件命令：按菜单构建时捕获的 `(identity, 命令 id)` 定位，把选中任务 id
+    /// 交给宿主回调。命令已不在当前贡献里（插件被禁用 / 卸载 / 熔断）时不执行。
     pub(crate) fn run_plugin_command(
         &self,
-        index: u16,
+        identity: &str,
+        command: &str,
         task_ids: Vec<String>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (Some(run), Some(command)) = (
-            self.host.run_plugin_command.clone(),
-            self.plugin_commands.get(usize::from(index)),
-        ) else {
+        let Some(run) = self.host.run_plugin_command.clone() else {
             return;
         };
+        if !self
+            .plugin_commands
+            .iter()
+            .any(|entry| entry.identity == identity && entry.command == command)
+        {
+            return;
+        }
         run(
-            command.identity.clone(),
-            command.command.clone(),
+            identity.to_owned(),
+            command.to_owned(),
             task_ids,
             window,
             cx,
@@ -2578,6 +2591,7 @@ impl Render for DownloadView {
             .on_action(cx.listener(Self::on_resume_all))
             .on_action(cx.listener(Self::on_open_selected))
             .on_action(cx.listener(Self::on_reveal_selected))
+            .on_action(cx.listener(Self::on_copy_selected_files))
             .on_action(cx.listener(Self::on_open_selected_in_window))
             .on_action(cx.listener(Self::on_show_selected_detail))
             .on_action(cx.listener(Self::on_copy_selected_url))

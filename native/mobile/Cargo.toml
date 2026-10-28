@@ -34,7 +34,7 @@ webpki-roots = "0.26"
 # UniFFI 导出面与此 feature 无关，两种构建一致。
 default = ["p2p", "share-p2p"]
 p2p = ["fluxdown_daemon/bt", "fluxdown_daemon/ed2k"]
-# 快传（iroh P2P）：与 `p2p` 同属 App Store 5.6 门控，iOS 商店 flavor 的 `--no-default-features` 一并剔除。
+# FluxMesh（iroh P2P）：与 `p2p` 同属 App Store 5.6 门控，iOS 商店 flavor 的 `--no-default-features` 一并剔除。
 share-p2p = ["fluxdown_agent/share-p2p"]
 # `uniffi-bindgen` 二进制（生成 Kotlin / Swift 绑定）；产物库本身不需要 CLI 依赖。
 bindgen = ["uniffi/cli"]

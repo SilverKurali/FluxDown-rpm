@@ -29,6 +29,7 @@ mod plugin_purge_auth_flow;
 mod plugin_reload_dev;
 mod plugin_resolve_memory;
 mod plugin_resolver_choice;
+mod plugin_state_freshness;
 mod plugin_variant_cancel;
 mod plugin_ytdlp;
 mod plugin_ytdlp_ffmpeg;

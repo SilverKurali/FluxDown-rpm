@@ -73,6 +73,8 @@ pub(crate) struct DownloadStrings {
     pub(crate) main_queue: SharedString,
     pub(crate) open_file: SharedString,
     pub(crate) open_folder: SharedString,
+    /// 右键「复制文件」：把产物以文件写入系统剪贴板。
+    pub(crate) copy_file: SharedString,
     pub(crate) remote_tasks: SharedString,
     pub(crate) sidebar_queues: SharedString,
     pub(crate) status_all: SharedString,
@@ -179,6 +181,8 @@ pub(crate) struct DownloadStrings {
     share_path_relay: SharedString,
     share_path_cdn: SharedString,
     share_path_bridge: SharedString,
+    share_path_swarm: SharedString,
+    share_peers: SharedString,
     share_path_unknown: SharedString,
     share_disabled_incomplete: SharedString,
     share_disabled_missing: SharedString,
@@ -265,6 +269,7 @@ impl DownloadStrings {
             resume_all_queue_stopped: shared(translator.text("resumeAllQueueStopped")),
             open_file: shared(translator.text("openFile")),
             open_folder: shared(translator.text("openFolder")),
+            copy_file: shared(translator.text("copyFileAction")),
             remote_tasks: shared(translator.text("remoteTasksGroup")),
             sidebar_queues: shared(translator.text(keys::SIDEBAR_QUEUES)),
             status_all: shared(translator.text(keys::TAB_ALL)),
@@ -360,6 +365,8 @@ impl DownloadStrings {
             share_path_relay: shared(translator.text("sharePathRelay")),
             share_path_cdn: shared(translator.text("shareBadgeCloud")),
             share_path_bridge: shared(translator.text("shareBadgeBridge")),
+            share_path_swarm: shared(translator.text("sharePathSwarm")),
+            share_peers: shared(translator.text("shareBadgePeers")),
             share_path_unknown: shared(translator.text("sharePathUnknown")),
             share_disabled_incomplete: shared(translator.text("shareDisabledIncomplete")),
             share_disabled_missing: shared(translator.text("shareDisabledMissing")),
@@ -511,7 +518,7 @@ impl DownloadStrings {
         }
     }
 
-    /// 快传接收任务的路径徽标文案。
+    /// FluxMesh接收任务的路径徽标文案。
     pub(crate) fn share_path(&self, kind: fluxdown_protocol::SharePathKind) -> SharedString {
         use fluxdown_protocol::SharePathKind;
         match kind {
@@ -520,8 +527,14 @@ impl DownloadStrings {
             SharePathKind::Relay => self.share_path_relay.clone(),
             SharePathKind::Cdn => self.share_path_cdn.clone(),
             SharePathKind::Bridge => self.share_path_bridge.clone(),
+            SharePathKind::Swarm => self.share_path_swarm.clone(),
             SharePathKind::Unknown => self.share_path_unknown.clone(),
         }
+    }
+
+    /// `+{count} 台设备`。
+    pub(crate) fn format_share_peers(&self, count: u32) -> SharedString {
+        SharedString::from(self.share_peers.replace("{count}", &count.to_string()))
     }
 
     pub(crate) fn state_label(&self, state: crate::model::TaskState) -> SharedString {

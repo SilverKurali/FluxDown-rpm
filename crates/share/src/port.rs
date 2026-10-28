@@ -1,4 +1,4 @@
-//! 快传能力的 agent 端口：宿主只需实现一个 `call`，类型化的 `agent.share.*` 封装在 [`ShareApi`]。
+//! FluxMesh能力的 agent 端口：宿主只需实现一个 `call`，类型化的 `agent.share.*` 封装在 [`ShareApi`]。
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
@@ -6,9 +6,10 @@ use fluxdown_protocol::{
     ApplicationErrorCode, RpcErrorData, ShareConfigDto, ShareConvertToCloudParams,
     ShareCreateParams, ShareDiagnosticsDto, ShareDiagnosticsParams, ShareDismissPendingParams,
     ShareDto, ShareIdParams, ShareLocalConfigDto, ShareLogsDto, ShareLogsParams,
-    ShareReceiveParams, ShareReceiveRecordsPage, ShareReceiveRecordsParams, ShareReceiveResultDto,
-    ShareResolveDto, ShareResolveParams, ShareSessionKillParams, ShareSwitchToBridgeParams,
-    ShareTaskFactsDto, ShareUpdateParams, method,
+    ShareReceiveParams, ShareReceiveRecordDto, ShareReceiveRecordsPage, ShareReceiveRecordsParams,
+    ShareReceiveResultDto, ShareResolveDto, ShareResolveParams, ShareSessionKillParams,
+    ShareStopProvidingParams, ShareSwitchToBridgeParams, ShareTaskFactsDto, ShareUpdateParams,
+    method,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -66,7 +67,7 @@ impl ShareApi {
         self.invoke_empty(method::AGENT_SHARE_CONFIG)
     }
 
-    /// 整体替换本机快传设置。
+    /// 整体替换本机FluxMesh设置。
     pub fn set_local_config(
         &self,
         config: &ShareLocalConfigDto,
@@ -89,6 +90,22 @@ impl ShareApi {
     pub fn stop(&self, id: &str) -> PortFuture<ShareDto> {
         self.invoke(
             method::AGENT_SHARE_STOP,
+            &ShareIdParams { id: id.to_owned() },
+        )
+    }
+
+    /// 恢复已停止 / 已过期的分享（同一分享，重新分配取件码）。
+    pub fn resume(&self, id: &str) -> PortFuture<ShareDto> {
+        self.invoke(
+            method::AGENT_SHARE_RESUME,
+            &ShareIdParams { id: id.to_owned() },
+        )
+    }
+
+    /// 删除分享记录；分享中的先停止。
+    pub fn delete(&self, id: &str) -> PortFuture<serde_json::Value> {
+        self.invoke(
+            method::AGENT_SHARE_DELETE,
             &ShareIdParams { id: id.to_owned() },
         )
     }
@@ -123,6 +140,16 @@ impl ShareApi {
             method::AGENT_SHARE_SWITCH_TO_BRIDGE,
             &ShareSwitchToBridgeParams {
                 task_id: task_id.to_owned(),
+            },
+        )
+    }
+
+    /// 停止该次接收的共享（共享提供）；幂等，返回带最新 `provideState` 的记录。
+    pub fn stop_providing(&self, record_id: &str) -> PortFuture<ShareReceiveRecordDto> {
+        self.invoke(
+            method::AGENT_SHARE_STOP_PROVIDING,
+            &ShareStopProvidingParams {
+                record_id: record_id.to_owned(),
             },
         )
     }

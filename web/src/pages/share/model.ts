@@ -1,4 +1,4 @@
-// 快传页面的纯展示逻辑：取件码 / 分享链接识别、状态与来源派生、网络状态摘要。
+// FluxMesh页面的纯展示逻辑：取件码 / 分享链接识别、状态与来源派生、网络状态摘要。
 // 与 `crates/share`（GPUI）的同名规则对齐；DTO 见 `lib/rpc/protocol/share.ts`。
 
 import type { TFunction } from '../../i18n'
@@ -12,6 +12,7 @@ import type {
   SharePathKind,
   SharePolicySummaryDto,
   ShareReceiveRecordDto,
+  ShareProvideState,
   ShareSessionBytesDto,
   ShareStatus,
   ShareTaskFactsDto,
@@ -96,7 +97,7 @@ export function removeShareLink(text: string, link: string): string {
 }
 
 /**
- * 新建下载框的分享链接提示（文案键）：没有分享链接返回 `null`；快传不可用时说明无法接收；
+ * 新建下载框的分享链接提示（文案键）：没有分享链接返回 `null`；FluxMesh不可用时说明无法接收；
  * 多条按顺序逐条接收；与普通链接混合时只有分享链接走接收确认。
  */
 export function shareNoticeKey(shareLinkCount: number, otherEntryCount: number, available: boolean): string | null {
@@ -142,6 +143,53 @@ export const SHARE_STATUS_KEYS: Readonly<Record<ShareDisplayStatus, string>> = {
   unknown: 'shareStatusUnknown',
 }
 
+/** 可以「开始分享」：已停止 / 已过期（以服务端状态为准，不含仅显示过期的有效分享）且源文件未缺失（恢复会清掉云端副本，回到实时分享）。 */
+export function canStartShare(share: Pick<ShareDto, 'status' | 'sourceMissing'>): boolean {
+  return (share.status === 'stopped' || share.status === 'expired') && share.sourceMissing !== true
+}
+
+/** 可以「停止分享」：正在分享（含显示已过期但服务端尚未标记的有效分享）。 */
+export function canStopShare(share: Pick<ShareDto, 'status'>): boolean {
+  return share.status === 'active'
+}
+
+/**
+ * 「文件缺失」徽标：已停止 / 已过期的分享只要 `sourceMissing` 就显示；
+ * 有效分享还在云端副本就绪时仍能提供下载，不显示。
+ */
+export function isSourceMissing(share: Pick<ShareDto, 'status' | 'sourceMissing' | 'cloudState'>): boolean {
+  if (share.sourceMissing !== true) return false
+  return share.status !== 'active' || share.cloudState !== 'ready'
+}
+
+/** 批量操作条的按钮可用性与各操作的适用子集（只对适用的项逐个调用单项 RPC）。 */
+export interface ShareBatchPlan {
+  start: ShareDto[]
+  stop: ShareDto[]
+  /** 删除对所有选中项适用。 */
+  remove: ShareDto[]
+}
+
+export function planShareBatch(selected: readonly ShareDto[]): ShareBatchPlan {
+  return {
+    start: selected.filter(canStartShare),
+    stop: selected.filter(canStopShare),
+    remove: [...selected],
+  }
+}
+
+/** 全选框状态：全部选中为 `true`，部分为 `'indeterminate'`，其余 `false`。 */
+export function selectAllState(selectedCount: number, total: number): boolean | 'indeterminate' {
+  if (total > 0 && selectedCount >= total) return true
+  return selectedCount > 0 ? 'indeterminate' : false
+}
+
+/** 选中集合只保留仍在列表里的分享（列表经 `shareChanged` 刷新后，已删除的不再占着选中状态）。 */
+export function pruneSelection(selected: ReadonlySet<string>, shares: readonly Pick<ShareDto, 'id'>[]): Set<string> {
+  const alive = new Set(shares.map((share) => share.id))
+  return new Set([...selected].filter((id) => alive.has(id)))
+}
+
 /** 接收记录状态 → 文案键。 */
 export const RECEIVE_STATUS_KEYS: Readonly<Record<ShareReceiveRecordDto['status'], string>> = {
   active: 'shareReceiveStatusActive',
@@ -175,7 +223,16 @@ export const PATH_KIND_KEYS: Readonly<Record<SharePathKind, string>> = {
   relay: 'sharePathRelay',
   cdn: 'shareBadgeCloud',
   bridge: 'shareBadgeBridge',
+  swarm: 'sharePathSwarm',
   unknown: 'sharePathUnknown',
+}
+
+/** 接收记录共享状态 → 文案键；`off` 不显示。 */
+export const PROVIDE_STATE_KEYS: Readonly<Record<ShareProvideState, string | null>> = {
+  off: null,
+  providing: 'shareProvideActive',
+  ended: 'shareProvideEnded',
+  stopped: 'shareProvideStopped',
 }
 
 /** 路径事件 `kind`（wire 为 `opened` / `selected` / `closed` / `lagged`）→ 文案键；未知种类显示原文。 */
@@ -197,30 +254,33 @@ export function currentPathId(events: readonly Pick<SharePathEventDto, 'kind' | 
 }
 
 /** 一次会话各来源的字节（直连 / 中继 / 云端暂存 CDN / 桥接）。 */
-export type SourceBytes = Pick<ShareSessionBytesDto, 'direct' | 'relay' | 'cdn' | 'bridge'>
+export type SourceBytes = Pick<ShareSessionBytesDto, 'direct' | 'relay' | 'cdn' | 'bridge' | 'peer'>
 
 /** 直连字节占总传输（四种来源之和）的整数百分比；尚无传输为 `null`。 */
 export function bytesSplit(bytes: SourceBytes): { percent: number | null } {
-  const total = bytes.direct + bytes.relay + bytes.cdn + bytes.bridge
+  const total = bytes.direct + bytes.relay + bytes.cdn + bytes.bridge + (bytes.peer ?? 0)
   return { percent: total > 0 ? Math.round((bytes.direct / total) * 100) : null }
 }
 
 /** 来源字节明细：直连 / 中继恒有；云端 / 桥接仅在有字节时出现。 */
-export function sourceBytesRows(bytes: SourceBytes): { kind: 'direct' | 'relay' | 'cdn' | 'bridge'; labelKey: string; bytes: number }[] {
-  const rows: { kind: 'direct' | 'relay' | 'cdn' | 'bridge'; labelKey: string; bytes: number }[] = [
+export function sourceBytesRows(bytes: SourceBytes): { kind: 'direct' | 'relay' | 'cdn' | 'bridge' | 'peer'; labelKey: string; bytes: number }[] {
+  const rows: { kind: 'direct' | 'relay' | 'cdn' | 'bridge' | 'peer'; labelKey: string; bytes: number }[] = [
     { kind: 'direct', labelKey: 'shareDiagBytesDirect', bytes: bytes.direct },
     { kind: 'relay', labelKey: 'shareDiagBytesRelay', bytes: bytes.relay },
   ]
   if (bytes.cdn > 0) rows.push({ kind: 'cdn', labelKey: 'shareBadgeCloud', bytes: bytes.cdn })
   if (bytes.bridge > 0) rows.push({ kind: 'bridge', labelKey: 'shareBadgeBridge', bytes: bytes.bridge })
+  if ((bytes.peer ?? 0) > 0) rows.push({ kind: 'peer', labelKey: 'sharePathSwarm', bytes: bytes.peer ?? 0 })
   return rows
 }
 
-/** 任务行来源徽标：仅快传接收任务有；`pathKind` 决定徽标文案与色调。 */
+/** 任务行来源徽标：仅FluxMesh接收任务有；`pathKind` 决定徽标文案与色调。 */
 export interface ShareSourceBadge {
   pathKind: SharePathKind
   labelKey: string
   tone: 'success' | 'warning' | 'neutral'
+  /** 共享对端数；0 不显示。 */
+  peers: number
 }
 
 const PATH_TONES: Readonly<Record<SharePathKind, ShareSourceBadge['tone']>> = {
@@ -229,15 +289,16 @@ const PATH_TONES: Readonly<Record<SharePathKind, ShareSourceBadge['tone']>> = {
   relay: 'warning',
   cdn: 'success',
   bridge: 'neutral',
+  swarm: 'success',
   unknown: 'neutral',
 }
 
 export function shareSourceBadge(facts: ShareTaskFactsDto | undefined): ShareSourceBadge | null {
   if (!facts || !facts.isShareReceive) return null
-  return { pathKind: facts.pathKind, labelKey: PATH_KIND_KEYS[facts.pathKind], tone: PATH_TONES[facts.pathKind] }
+  return { pathKind: facts.pathKind, labelKey: PATH_KIND_KEYS[facts.pathKind], tone: PATH_TONES[facts.pathKind], peers: facts.swarmPeers ?? 0 }
 }
 
-/** 「切换桥接」：进行中（等待 / 下载中）的快传接收任务、路径尚不是桥接时提供；`relayStuck` 时强调。 */
+/** 「切换桥接」：进行中（等待 / 下载中）的FluxMesh接收任务、路径尚不是桥接时提供；`relayStuck` 时强调。 */
 export function canSwitchBridge(facts: ShareTaskFactsDto | undefined, taskState: string): boolean {
   return facts !== undefined && facts.isShareReceive && facts.pathKind !== 'bridge' && (taskState === 'downloading' || taskState === 'pending')
 }

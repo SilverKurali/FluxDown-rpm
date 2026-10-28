@@ -383,6 +383,8 @@ export default defineContentScript({
 
     function applyConfig(next: PageConfig): void {
       config = next;
+      // 设置改为关闭时本帧可能还报着「按住」：立即撤销，别让后台继续放行
+      if (bypassModifier() === null) reportBypassKey(false);
       if (Array.isArray(next.classify)) {
         try {
           classify = createClassifier(next.classify);
@@ -576,11 +578,71 @@ export default defineContentScript({
     };
     browser.runtime.onMessage.addListener(onMessage);
 
+    // ===== 跳过接管修饰键（IDM 式 Alt+点击）=====
+    // 只上报状态变化；后台全局记一份并在请求发起时快照成放行令牌（background/breaker.ts）。
+    // 失焦 / 隐藏视为松开（keyup 会丢在别的窗口里）；pointerdown 按事件自带的修饰键位校正，
+    // 覆盖「在别的帧按下、焦点移进本帧后点击」这类本帧收不到 keydown 的情况。
+    let bypassKeyHeld = false;
+
+    function bypassModifier(): "Alt" | "Shift" | null {
+      if (config?.bypassKey === "alt") return "Alt";
+      if (config?.bypassKey === "shift") return "Shift";
+      return null;
+    }
+
+    function reportBypassKey(held: boolean): void {
+      if (held === bypassKeyHeld) return;
+      bypassKeyHeld = held;
+      swallow(sendAction({ action: "bypassKey", held }));
+    }
+
+    function onBypassKey(e: KeyboardEvent): void {
+      if (e.repeat || e.key !== bypassModifier()) return;
+      reportBypassKey(e.type === "keydown");
+    }
+
+    function onBypassPointer(e: PointerEvent): void {
+      const key = bypassModifier();
+      if (key === null) return;
+      const held = key === "Alt" ? e.altKey : e.shiftKey;
+      if (!held) {
+        reportBypassKey(false);
+        return;
+      }
+      // 本帧以为已按住时也重发：别的帧失焦已让后台撤销，本地去重会吞掉这次点击
+      bypassKeyHeld = true;
+      swallow(sendAction({ action: "bypassKey", held: true }));
+      // 左 / 中键的真实按下：把放行意图绑定到这次点击（链接 href 立即领令牌，本 tab 随后一小段时间的
+      // 请求也领），不依赖请求发起时键是否还按着——页面 JS 常先 await 再程序化跳转。
+      // 在 pointerdown 而非 click 上报：最早的信号，且有些站点在 mousedown 上就发起下载。
+      if (!e.isTrusted || e.button > 1) return;
+      const origin = e.composedPath()[0];
+      const link = origin instanceof Element ? origin.closest("a[href]") : null;
+      const href = link instanceof HTMLAnchorElement ? link.href : undefined;
+      swallow(sendAction({ action: "bypassClick", href }));
+    }
+
+    function onBypassRelease(): void {
+      reportBypassKey(false);
+    }
+
+    function onVisibility(): void {
+      if (document.visibilityState === "hidden") reportBypassKey(false);
+    }
+
+    window.addEventListener("keydown", onBypassKey, true);
+    window.addEventListener("keyup", onBypassKey, true);
+    window.addEventListener("pointerdown", onBypassPointer, true);
+    window.addEventListener("blur", onBypassRelease);
+    document.addEventListener("visibilitychange", onVisibility);
+
     // ===== 磁力链接点击接管 =====
     // 阻止浏览器弹出 OS 应用选择框，改由 FluxDown 接管；捕获阶段早于页面自身处理器。
-    // interceptMagnet 关闭时放行，交还系统默认磁力处理程序。
+    // interceptMagnet 关闭或按住跳过接管修饰键时放行，交还系统默认磁力处理程序。
     function onClick(e: MouseEvent): void {
       if (config?.interceptMagnet !== true) return;
+      const key = bypassModifier();
+      if ((key === "Alt" && e.altKey) || (key === "Shift" && e.shiftKey)) return;
       const target = e.target;
       if (!(target instanceof Element)) return;
       const link = target.closest<HTMLAnchorElement>("a[href]");
@@ -613,6 +675,11 @@ export default defineContentScript({
       document.removeEventListener(EV_SHADOW, onShadow, true);
       document.removeEventListener("contextmenu", onContextMenu, true);
       document.removeEventListener("click", onClick, true);
+      window.removeEventListener("keydown", onBypassKey, true);
+      window.removeEventListener("keyup", onBypassKey, true);
+      window.removeEventListener("pointerdown", onBypassPointer, true);
+      window.removeEventListener("blur", onBypassRelease);
+      document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("pageshow", onPageShow);
       browser.runtime.onMessage.removeListener(onMessage);
       domSniff.stop();

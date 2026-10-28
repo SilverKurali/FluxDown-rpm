@@ -277,11 +277,11 @@ pub struct NewDownloadView {
     on_submit: NewDownloadSubmit,
     urls: Entity<TextareaState>,
     entries: Vec<UrlEntry>,
-    /// 输入里的快传分享链接（不是下载链接：交给接收确认流程）。
+    /// 输入里的FluxMesh分享链接（不是下载链接：交给接收确认流程）。
     share_links: Vec<String>,
     /// 本表单已交给接收流程的分享链接：不重复交出。
     share_handed: HashSet<String>,
-    /// 宿主提供的接收入口；`None` = 本构建 / 本窗口不能接收快传。
+    /// 宿主提供的接收入口；`None` = 本构建 / 本窗口不能接收FluxMesh。
     open_share_receive: Option<IdOpener>,
     /// 尚未确认 / 忽略的外部捕获；按 URL 与链接行对应。
     captures: Vec<PendingCaptureDto>,

@@ -14,8 +14,8 @@
 //! 直连刚判定离线时进入一段冷却期：冷却期内、且有可用来源时不再为每个块白等连接超时，
 //! 直接走来源；冷却结束（或来源全部失败）后再试一次直连，恢复后自动切回。
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -31,6 +31,9 @@ use crate::session::{MonitorConfig, SessionMonitor, SourceAccount, close_error};
 use crate::source::{
     ChunkSource, SourceBytes, SourceCounters, SourceError, SourceKind, SourcePreference,
     SourceRequest,
+};
+use crate::swarm::{
+    ChunkSet, InFlight, PeerSlot, READY_WAIT, ROUTE_SATURATION, SwarmFile, SwarmState,
 };
 use crate::timefmt::{now_unix_ms, rfc3339_ms};
 use crate::types::{
@@ -196,11 +199,18 @@ struct Inner {
     /// 最近一个交付块的来源：`None` = iroh（直连 / 中继）。
     active: watch::Sender<Option<SourceKind>>,
     started_unix_ms: u64,
+    /// 共享对端状态与调度。
+    swarm: Arc<SwarmState>,
+    /// 正在走直连的块请求数（与对端的负载一起决定路线顺序）。
+    direct_inflight: AtomicUsize,
+    /// 原分享方已不再提供的文件（改动 / 删除）：之后不再走直连。
+    origin_lacks: Mutex<HashSet<u32>>,
 }
 
 impl Drop for Inner {
     /// 最后一个句柄被丢弃而宿主没有调用 `close()` 时，仍然收尾并发出终态报告。
     fn drop(&mut self) {
+        self.swarm.shutdown();
         if let Some(live) = self.live.get_mut().take() {
             let summary = live.monitor.finish(None);
             self.mark_reported(&summary);
@@ -215,6 +225,7 @@ impl Inner {
         let mut reported = self.reported.lock().unwrap_or_else(PoisonError::into_inner);
         reported.cdn += summary.bytes.cdn;
         reported.bridge += summary.bytes.bridge;
+        reported.peer += summary.bytes.peer;
     }
 
     /// 没有（或不再有）连接监测器承载的来源字节：补发一条终态会话报告，保证计量不丢。
@@ -225,6 +236,7 @@ impl Inner {
             let pending = SourceBytes {
                 cdn: total.cdn.saturating_sub(reported.cdn),
                 bridge: total.bridge.saturating_sub(reported.bridge),
+                peer: total.peer.saturating_sub(reported.peer),
             };
             if pending == SourceBytes::default() {
                 return;
@@ -253,6 +265,7 @@ impl Inner {
                     relay: 0,
                     cdn: pending.cdn,
                     bridge: pending.bridge,
+                    peer: pending.peer,
                 },
                 paths: Vec::new(),
                 events: Vec::new(),
@@ -276,6 +289,7 @@ pub struct ReceiveSession {
 enum Route {
     Direct,
     Source(SourceSlot),
+    Peer(Arc<PeerSlot>),
 }
 
 impl ReceiveSession {
@@ -283,6 +297,9 @@ impl ReceiveSession {
     pub fn new(endpoint: ShareEndpoint, params: ReceiveParams) -> Self {
         Self {
             inner: Arc::new(Inner {
+                swarm: Arc::new(SwarmState::new(endpoint.clone(), &params.manifest)),
+                direct_inflight: AtomicUsize::new(0),
+                origin_lacks: Mutex::new(HashSet::new()),
                 endpoint,
                 params,
                 live: tokio::sync::Mutex::new(None),
@@ -378,6 +395,51 @@ impl ReceiveSession {
         self.inner.source_bytes.snapshot()
     }
 
+    // ───────────── 共享 ─────────────
+
+    /// 设置 / 更新共享对端与票据（FluxCloud `swarm/peers` 的结果），并确保后台维护任务在运行。
+    /// 重复调用会合并：已知对端更新状态，新对端追加，云端列表里已不在线且未连接的对端被忘掉。
+    pub fn set_swarm(&self, files: Vec<SwarmFile>) {
+        self.inner.swarm.update(files);
+        self.inner.swarm.start();
+    }
+
+    /// 当前就绪的共享对端数（已连接且至少一个文件已授权）。
+    pub fn swarm_peers(&self) -> u32 {
+        self.inner.swarm.connected_count()
+    }
+
+    /// 订阅就绪共享对端数的变化。
+    pub fn watch_swarm_peers(&self) -> watch::Receiver<u32> {
+        self.inner.swarm.subscribe_connected()
+    }
+
+    /// 第 `file_index` 个文件本会话已取回并校验的块位图（宿主据此向别人提供下载中的内容）；下标越界为 `None`。
+    pub fn have(&self, file_index: u32) -> Option<Arc<ChunkSet>> {
+        self.inner.swarm.local_have(file_index)
+    }
+
+    fn origin_lacks(&self, file_index: u32) -> bool {
+        self.inner
+            .origin_lacks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&file_index)
+    }
+
+    fn mark_origin_lacks(&self, file_index: u32) {
+        self.inner
+            .origin_lacks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(file_index);
+    }
+
+    /// 有回落路线可用：HTTP 来源，或共享对端。
+    fn has_fallback(&self) -> bool {
+        self.has_usable_source() || self.inner.swarm.has_peers()
+    }
+
     fn lock_sources(&self) -> std::sync::MutexGuard<'_, SourceState> {
         self.inner
             .sources
@@ -386,25 +448,51 @@ impl ReceiveSession {
     }
 
     /// 本块的路线顺序。
-    fn routes(&self) -> Vec<Route> {
-        let state = self.lock_sources();
-        let usable: Vec<SourceSlot> = state
-            .slots
-            .iter()
-            .filter(|slot| !slot.banned.load(Ordering::Relaxed))
-            .cloned()
-            .collect();
-        let cooling = state
-            .direct_down_until
-            .is_some_and(|until| Instant::now() < until);
-        let direct_first =
-            state.preference == SourcePreference::Direct && !(cooling && !usable.is_empty());
-        let mut routes = Vec::with_capacity(usable.len() + 1);
-        if direct_first {
-            routes.push(Route::Direct);
+    ///
+    /// 来源优先（且有可用 HTTP 来源）：来源、对端、直连。否则直连与对端按负载混排
+    /// （`(是否饱和, 负载, 序号)`，直连序号 0），再接 HTTP 来源；直连被排除（冷却 / 原分享方已缺失）时，
+    /// 冷却中的直连仍作为最后兜底。
+    fn routes(&self, file_index: u32, chunk_index: u64) -> Vec<Route> {
+        let (usable, cooling, preference) = {
+            let state = self.lock_sources();
+            let usable: Vec<SourceSlot> = state
+                .slots
+                .iter()
+                .filter(|slot| !slot.banned.load(Ordering::Relaxed))
+                .cloned()
+                .collect();
+            let cooling = state
+                .direct_down_until
+                .is_some_and(|until| Instant::now() < until);
+            (usable, cooling, state.preference)
+        };
+        let candidates = self.inner.swarm.candidates(file_index, chunk_index);
+        let origin_lacks = self.origin_lacks(file_index);
+        if preference == SourcePreference::Sources && !usable.is_empty() {
+            let mut routes: Vec<Route> = usable.into_iter().map(Route::Source).collect();
+            routes.extend(candidates.into_iter().map(Route::Peer));
+            if !origin_lacks {
+                routes.push(Route::Direct);
+            }
+            return routes;
         }
+        let has_fallback = !usable.is_empty() || !candidates.is_empty();
+        let direct_ok = !origin_lacks && !(cooling && has_fallback);
+        let mut p2p: Vec<(usize, usize, Route)> = Vec::with_capacity(candidates.len() + 1);
+        if direct_ok {
+            p2p.push((
+                self.inner.direct_inflight.load(Ordering::Relaxed),
+                0,
+                Route::Direct,
+            ));
+        }
+        for (i, peer) in candidates.into_iter().enumerate() {
+            p2p.push((peer.load(), i + 1, Route::Peer(peer)));
+        }
+        p2p.sort_by_key(|(load, ordinal, _)| (*load >= ROUTE_SATURATION, *load, *ordinal));
+        let mut routes: Vec<Route> = p2p.into_iter().map(|(_, _, route)| route).collect();
         routes.extend(usable.into_iter().map(Route::Source));
-        if !direct_first {
+        if !direct_ok && !origin_lacks {
             routes.push(Route::Direct);
         }
         routes
@@ -421,16 +509,13 @@ impl ReceiveSession {
         self.lock_sources().direct_down_until = down.then(|| Instant::now() + DIRECT_COOLDOWN);
     }
 
-    /// 直连刚判定离线、仍在冷却，且有来源可回落：此时不值得再等一次连接。
+    /// 直连刚判定离线、仍在冷却，且有回落路线（来源 / 对端）：此时不值得再等一次连接。
     fn direct_cooling_with_fallback(&self) -> bool {
-        let state = self.lock_sources();
-        state
+        let cooling = self
+            .lock_sources()
             .direct_down_until
-            .is_some_and(|until| Instant::now() < until)
-            && state
-                .slots
-                .iter()
-                .any(|slot| !slot.banned.load(Ordering::Relaxed))
+            .is_some_and(|until| Instant::now() < until);
+        cooling && self.has_fallback()
     }
 
     fn set_active(&self, source: Option<SourceKind>) {
@@ -468,6 +553,7 @@ impl ReceiveSession {
             Some(mut summary) => {
                 summary.bytes.cdn = total.cdn;
                 summary.bytes.bridge = total.bridge;
+                summary.bytes.peer = total.peer;
                 summary.verify_failures += verify_failures;
                 Some(summary)
             }
@@ -481,6 +567,7 @@ impl ReceiveSession {
                     relay: 0,
                     cdn: total.cdn,
                     bridge: total.bridge,
+                    peer: total.peer,
                 },
                 paths: Vec::new(),
                 events: Vec::new(),
@@ -494,6 +581,7 @@ impl ReceiveSession {
     /// 关闭会话：结束监测、关闭连接。之后的取数返回 [`FetchError::Closed`]。
     pub async fn close(&self) {
         self.inner.closed.store(true, Ordering::SeqCst);
+        self.inner.swarm.shutdown();
         let live = self.inner.live.lock().await.take();
         if let Some(live) = live {
             self.retire(live, None);
@@ -523,6 +611,9 @@ impl ReceiveSession {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(FetchError::Closed);
         }
+        if self.origin_lacks(file_index) && self.inner.swarm.has_peers_for(file_index) {
+            return Ok(());
+        }
         let sources_first = {
             let state = self.lock_sources();
             state.preference == SourcePreference::Sources
@@ -532,8 +623,14 @@ impl ReceiveSession {
         }
         let result = self.probe_inner(file_index).await;
         match &result {
+            Err(FetchError::Changed | FetchError::NotFound)
+                if self.inner.swarm.has_peers_for(file_index) =>
+            {
+                self.mark_origin_lacks(file_index);
+                return Ok(());
+            }
             Err(e) if e.terminal() => self.forget_on_terminal(e),
-            Err(FetchError::Offline(_)) if self.has_usable_source() => {
+            Err(FetchError::Offline(_)) if self.has_fallback() => {
                 self.set_direct_down(true);
                 return Ok(());
             }
@@ -595,12 +692,15 @@ impl ReceiveSession {
 
     // ───────────── 取块 ─────────────
 
-    /// 取并校验第 `chunk_index` 块：按路线依次尝试（直连失败时换来源，反之亦然）。
+    /// 取并校验第 `chunk_index` 块：直连、共享对端、HTTP 来源互为回落，按负载与偏好排序依次尝试。
     pub async fn fetch_chunk(
         &self,
         file_index: u32,
         chunk_index: u64,
     ) -> Result<Bytes, FetchError> {
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err(FetchError::Closed);
+        }
         let file = self.file(file_index)?;
         let (start, end) = file
             .chunk_range(chunk_index)
@@ -609,36 +709,102 @@ impl ReceiveSession {
             return Ok(hit);
         }
         let mut worst: Option<FetchError> = None;
-        for route in self.routes() {
-            let result = match &route {
-                Route::Direct => {
-                    self.fetch_direct(file, file_index, chunk_index, start, end)
-                        .await
-                }
-                Route::Source(slot) => {
-                    self.fetch_from_source(slot, file, file_index, chunk_index, start, end)
-                        .await
-                }
-            };
-            match result {
-                Ok((data, source)) => {
-                    self.remember(file_index, chunk_index, &data);
-                    self.set_active(source);
-                    return Ok(data);
-                }
-                Err(e) if e.terminal() => {
-                    self.forget_on_terminal(&e);
-                    return Err(e);
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "chunk route failed; trying the next one");
-                    if worst.as_ref().is_none_or(|w| e.rank() >= w.rank()) {
-                        worst = Some(e);
+        let mut waited = false;
+        loop {
+            for route in self.routes(file_index, chunk_index) {
+                let result = match &route {
+                    Route::Direct => {
+                        let _flight = InFlight::new(&self.inner.direct_inflight);
+                        self.fetch_direct(file, file_index, chunk_index, start, end)
+                            .await
+                    }
+                    Route::Source(slot) => {
+                        self.fetch_from_source(slot, file, file_index, chunk_index, start, end)
+                            .await
+                    }
+                    Route::Peer(peer) => {
+                        self.fetch_from_peer(peer, file, file_index, chunk_index, start, end)
+                            .await
+                    }
+                };
+                match result {
+                    Ok((data, source)) => {
+                        self.remember(file_index, chunk_index, &data);
+                        // 对端交付不改变「最近交付块的来源」，避免任务行徽标抖动。
+                        if !matches!(route, Route::Peer(_)) {
+                            self.set_active(source);
+                        }
+                        if let Some(have) = self.inner.swarm.local_have(file_index) {
+                            have.insert(chunk_index);
+                        }
+                        return Ok(data);
+                    }
+                    Err(e)
+                        if matches!(route, Route::Direct)
+                            && matches!(e, FetchError::Changed | FetchError::NotFound)
+                            && self.inner.swarm.has_peers_for(file_index) =>
+                    {
+                        tracing::info!(file_index, error = %e, "origin no longer serves this file; using swarm peers");
+                        self.mark_origin_lacks(file_index);
+                        if worst.is_none() {
+                            worst = Some(e);
+                        }
+                    }
+                    Err(e) if e.terminal() => {
+                        self.forget_on_terminal(&e);
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "chunk route failed; trying the next one");
+                        if worst.as_ref().is_none_or(|w| e.rank() >= w.rank()) {
+                            worst = Some(e);
+                        }
                     }
                 }
             }
+            if !waited && self.inner.swarm.pending_for(file_index) {
+                waited = true;
+                self.inner.swarm.wait_ready(READY_WAIT).await;
+                if self.inner.closed.load(Ordering::SeqCst) {
+                    return Err(FetchError::Closed);
+                }
+                continue;
+            }
+            break;
         }
-        Err(worst.unwrap_or(FetchError::Closed))
+        Err(worst
+            .unwrap_or_else(|| FetchError::Offline("no route can serve this chunk yet".to_owned())))
+    }
+
+    /// 共享对端取块：成功后按对端字节计量；坏块计入校验失败。
+    async fn fetch_from_peer(
+        &self,
+        peer: &Arc<PeerSlot>,
+        file: &ShareFile,
+        file_index: u32,
+        chunk_index: u64,
+        start: u64,
+        end: u64,
+    ) -> Result<(Bytes, Option<SourceKind>), FetchError> {
+        match self
+            .inner
+            .swarm
+            .fetch(peer, file, file_index, chunk_index, start, end)
+            .await
+        {
+            Ok(data) => {
+                self.inner.source_bytes.add_peer(data.len() as u64);
+                Ok((data, None))
+            }
+            Err(e) => {
+                if matches!(e, FetchError::Corrupt(_)) {
+                    self.inner
+                        .source_verify_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e)
+            }
+        }
     }
 
     /// 直连取块：失败时换一条流重试，最多 3 次。
@@ -852,7 +1018,7 @@ impl ReceiveSession {
             let connect_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             Ok::<_, FetchError>((conn, connect_ms))
         };
-        let budget = if self.has_usable_source() {
+        let budget = if self.has_fallback() {
             params.connect_timeout.min(SOURCE_CONNECT_BUDGET)
         } else {
             params.connect_timeout

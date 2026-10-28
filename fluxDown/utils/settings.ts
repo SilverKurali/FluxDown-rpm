@@ -30,6 +30,9 @@ export type InterceptMode = "smart" | "all";
  */
 export type RemoteMode = "off" | "fallback" | "always";
 
+/** 按住后点击链接跳过本次接管（交给浏览器下载）的修饰键；"off" = 关闭。 */
+export type BypassKey = "alt" | "shift" | "off";
+
 export interface FluxDownSettings {
   /** 是否启用下载拦截 */
   enabled: boolean;
@@ -54,6 +57,11 @@ export interface FluxDownSettings {
    * 供手动选择用 FluxDown 下载。默认开启。
    */
   interceptMagnet: boolean;
+  /**
+   * IDM 式「按住修饰键点击跳过接管」：按住期间发起的请求（及其重定向）
+   * 产生的下载一律交给浏览器，magnet 点击也交还系统处理程序。默认 Alt（macOS 为 Option）。
+   */
+  bypassKey: BypassKey;
 
   // === 任务发送通知 ===
 
@@ -242,6 +250,7 @@ const DEFAULT_SETTINGS: FluxDownSettings = {
   customExtensions: [],
   excludeExtensions: [],
   interceptMagnet: true,
+  bypassKey: "alt",
 
   // 任务发送通知（本地默认关闭，按需开启；远程默认开启）
   notifyLocalTask: false,

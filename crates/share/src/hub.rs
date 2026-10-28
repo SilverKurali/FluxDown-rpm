@@ -1,4 +1,4 @@
-//! 快传状态中枢：整个应用唯一一份 `AgentSnapshot.share` 的投影。
+//! FluxMesh状态中枢：整个应用唯一一份 `AgentSnapshot.share` 的投影。
 //!
 //! 管理页、分享面板、接收窗口、设置页与诊断视图都观察同一个 `ShareHub`（跨窗口共享实体），
 //! 由 app 把 agent 会话的快照 / 事件喂进来；视图只读状态、经 [`ShareApi`] 发命令。
@@ -87,7 +87,7 @@ impl ShareHub {
         self.stale
     }
 
-    /// 本构建编入快传且服务可用：为 `false` 时全部快传入口隐藏。
+    /// 本构建编入FluxMesh且服务可用：为 `false` 时全部FluxMesh入口隐藏。
     #[must_use]
     pub fn available(&self) -> bool {
         self.state.available

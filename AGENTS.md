@@ -132,7 +132,7 @@ cd mobile/FluxDown && xcodebuild build -project FluxDown.xcodeproj -scheme FluxD
 - **空闲静默（NAS 硬盘休眠）**：无活动任务 / 做种 / 到期 RSS / 客户端请求时，daemon / agent 不得周期性读写 save_dir 或 data_dir；新周期任务须事件驱动、受空闲门控，或长周期且仅内容变化时写。
 - **宿主自身下载只走统一出口**（更新、受管组件、插件包、规则包、tracker / server.met 订阅等）：daemon / engine 用 `fluxdown_engine::egress`，agent 经 `daemon.egress.plan` + `native/agent/src/egress.rs`，禁止裸 `reqwest::Client::builder()`；仅有独立来源哈希 / 签名的载荷可交插件改写，失败回退原地址。
 - 引擎学习 / 遥测类 config 键（`cdn_node_health`、`auto_route_health`、`cdn_pending_reports`、`domain_conn_caps`）UI 不读写。
-- **遥测只有两条匿名部署事件**（`app_installed` 一次 + `app_active` 每日，`analytics_enabled` 门控），绝不采集下载 / 任务信息，不新增其他遥测点。**例外：快传网络与传输诊断**（用户 2026-10-27 决定「展示即上报」）——仅在发生快传分享 / 接收时，把客户端「网络诊断」与「传输诊断」展示的同一份结构化快照上报 FluxCloud，`native/agent/src/share/` 是唯一出口，不含分享以外的下载 / 任务信息，状态变化或传输进行中才报（口径见 `ops.md`「设计文档实现状态」快传条与官网隐私政策）。**云端推送不是遥测**：本设备上报默认关、须 UI 显式同意、与 `analytics_enabled` 无关；默认只发文件名 / 大小 / 状态 / 错误 / 队列名，下载地址与保存目录各自单独开关（默认关）；`TaskNotice` 只由 agent 消费。
+- **遥测只有两条匿名部署事件**（`app_installed` 一次 + `app_active` 每日，`analytics_enabled` 门控），绝不采集下载 / 任务信息，不新增其他遥测点。**例外：FluxMesh网络与传输诊断**（用户 2026-10-27 决定「展示即上报」）——仅在发生FluxMesh分享 / 接收时，把客户端「网络诊断」与「传输诊断」展示的同一份结构化快照上报 FluxCloud，`native/agent/src/share/` 是唯一出口，不含分享以外的下载 / 任务信息，状态变化或传输进行中才报（口径见 `ops.md`「设计文档实现状态」FluxMesh条与官网隐私政策）。**云端推送不是遥测**：本设备上报默认关、须 UI 显式同意、与 `analytics_enabled` 无关；默认只发文件名 / 大小 / 状态 / 错误 / 队列名，下载地址与保存目录各自单独开关（默认关）；`TaskNotice` 只由 agent 消费。
 - **插件页面脚本只经浏览器 `userScripts` API 执行**：扩展任何位置禁止 `eval` / `new Function` / 远程或拼接的 `<script>`；每个插件首次启用须用户在选项页显式确认；扩展不保存脚本源码副本；`fluxdown` 桥能力窄且固定。
 - 以上各条的落点、阻碍项与背景见 `hosts-and-api.md`（端口 / 凭据 / 空闲静默）、`ops.md`（云端推送）、`engine.md`（egress / naming / 做种）、`clients.md`（userScripts / iOS flavor）、`pitfalls.md`。
 - 命名歧义：`tracker_subscription.rs` / `ed2k/server_subscription.rs` 是 tracker / `server.met` 订阅，与 `rss/` 无关；官网 `api/webhooks/github` 是 GitHub 接收器，与 `engine/src/webhook.rs` 无关。
@@ -149,7 +149,7 @@ cd mobile/FluxDown && xcodebuild build -project FluxDown.xcodeproj -scheme FluxD
 |`rule://mirror-mobile-bridge`|UniFFI DTO / 通用分区 / 方法名 / 设置目录、reducer、内置分类基线 ↔ Android / iOS|
 |`rule://mirror-downloads`|下载页纯模型（新建解析 / aria2c / 菜单事实 / 远程命令 / 做种 / 排序 / 任务组 / 来源构成 / 设备 / 重扫节流 / 历史与限速记忆）↔ Web / 移动端|
 |`rule://mirror-category-route`|分类目录路由、新建下载分类选择器、一键分类目录名推导（四端）|
-|`rule://mirror-engine-logic`|RSS 过滤、Content-Disposition / 字符集、Webhook 事件与端点、线程数风险档|
+|`rule://mirror-engine-logic`|RSS 过滤、Content-Disposition / 字符集、Webhook 事件与端点、线程数风险档、代理直连名单归一化（engine ↔ agent）|
 |`rule://mirror-theme-shell`|主题 token 注册表、文件图标包、chrome 布局|
 |`rule://mirror-settings-account`|访问密钥策略（含 LuCI）、开机自启、应用更新 / 更新说明、云端推送、套餐购买|
 |`rule://mirror-plugins`|插件 manifest、视图协议、贡献点授权、市场排序、嗅探规则层、页面脚本、扩展规则（含外部仓）|

@@ -1,5 +1,5 @@
 /**
- * GET /api/cloud/share/public/<slug> — 快传分享清单（同源代理）。
+ * GET /api/cloud/share/public/<slug> — FluxMesh分享清单（同源代理）。
  *
  * 转发 FluxCloud `GET /api/v1/share/public/{slug}`（公开端点，按访客 IP 限频），校验并裁剪后返回；
  * 失败透传状态码与 `{ code, message }`。响应 no-store + `X-Robots-Tag: noindex`。

@@ -23,7 +23,11 @@ use crate::hashing::file_mtime_ms;
 use crate::limiter::RateLimiter;
 use crate::observe::{Observers, SessionEvent};
 use crate::session::{MonitorConfig, SessionMonitor, close_error};
-use crate::ticket::{KeyRing, TicketError, TicketExpectation, parse_ticket, verify_ticket};
+use crate::swarm::content::ContentRegistry;
+use crate::swarm::serve::{SwarmHandler, SwarmServer};
+use crate::ticket::{
+    KeyRing, SCOPE_BRIDGE, SCOPE_RECV, TicketError, TicketExpectation, parse_ticket, verify_ticket,
+};
 use crate::timefmt::{now_unix_ms, now_unix_secs};
 use crate::types::{PathKind, SessionRole, ShareManifest};
 use crate::wire::{
@@ -232,6 +236,7 @@ struct SenderInner {
     local_id: EndpointId,
     counter: AtomicU64,
     sessions: Mutex<HashMap<String, LiveSession>>,
+    swarm: SwarmServer,
 }
 
 /// 发送方：协议处理器的宿主侧句柄。可克隆。
@@ -248,12 +253,20 @@ impl ShareSender {
         report_interval: Duration,
         global_rate_bytes_per_sec: u64,
         local_id: EndpointId,
+        content: ContentRegistry,
     ) -> Self {
+        let global_limiter = RateLimiter::new(global_rate_bytes_per_sec);
         Self {
             inner: Arc::new(SenderInner {
                 registry,
+                swarm: SwarmServer::new(
+                    content,
+                    keys.clone(),
+                    global_limiter.clone(),
+                    observers.clone(),
+                ),
                 keys,
-                global_limiter: RateLimiter::new(global_rate_bytes_per_sec),
+                global_limiter,
                 observers,
                 report_interval,
                 local_id,
@@ -261,6 +274,10 @@ impl ShareSender {
                 sessions: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    pub(crate) fn swarm_handler(&self) -> SwarmHandler {
+        self.inner.swarm.handler()
     }
 
     pub(crate) fn handler(&self) -> ShareHandler {
@@ -555,6 +572,7 @@ impl ShareSender {
                 now_unix: now,
                 share_id: None,
                 peer,
+                scopes: &[SCOPE_RECV, SCOPE_BRIDGE],
             },
         )
         .map_err(|e| {
@@ -618,6 +636,14 @@ impl ShareSender {
         }
     }
 
+    /// 源文件已变化：通知宿主（事件通道无界，只入队），并以 `changed` 拒绝本次请求。
+    fn source_changed(&self, auth: &Authorized) -> Prepared {
+        self.inner.observers.emit(SessionEvent::SourceChanged {
+            share_id: auth.share_id.clone(),
+        });
+        Prepared::Reject(reject(Status::Changed))
+    }
+
     async fn prepare(&self, auth: &Authorized, request: Request) -> Prepared {
         if request.len > MAX_REQUEST_LEN {
             return Prepared::Reject(reject(Status::BadRequest));
@@ -654,10 +680,10 @@ impl ShareSender {
         .await;
         let file = match opened {
             Ok(Ok(Some(file))) => file,
-            // 大小或修改时间与登记不符，或文件已被删除：统一报 changed。
-            Ok(Ok(None)) => return Prepared::Reject(reject(Status::Changed)),
+            // 大小或修改时间与登记不符，或文件已被删除：统一报 changed，并通知宿主（只入队，不阻塞）。
+            Ok(Ok(None)) => return self.source_changed(auth),
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Prepared::Reject(reject(Status::Changed));
+                return self.source_changed(auth);
             }
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "cannot open a shared file");
@@ -691,47 +717,69 @@ impl ShareSender {
         auth: &Authorized,
         monitor: &SessionMonitor,
         send: &mut SendStream,
-        mut file: File,
+        file: File,
         offset: u64,
         len: u64,
     ) -> Result<()> {
-        let (tx, mut rx) = mpsc::channel::<std::io::Result<Bytes>>(PUMP_DEPTH);
-        let reader = tokio::task::spawn_blocking(move || {
-            if let Err(e) = file.seek(SeekFrom::Start(offset)) {
-                // 接收端已走则忽略发送失败。
-                if tx.blocking_send(Err(e)).is_err() {
-                    tracing::debug!("pump receiver is gone");
-                }
+        pump_file(
+            send,
+            file,
+            offset,
+            len,
+            &[&auth.share.limiter, &self.inner.global_limiter],
+            |n| monitor.add_bytes(n),
+        )
+        .await
+    }
+}
+
+/// 专用阻塞线程顺序读 `file` 的 `[offset, offset + len)` 并预读，协程侧依次过 `limiters` 限速后写入 QUIC 流。
+/// 每写出一片调用一次 `on_bytes`（字节数）。
+pub(crate) async fn pump_file(
+    send: &mut SendStream,
+    mut file: File,
+    offset: u64,
+    len: u64,
+    limiters: &[&RateLimiter],
+    mut on_bytes: impl FnMut(u64),
+) -> Result<()> {
+    let (tx, mut rx) = mpsc::channel::<std::io::Result<Bytes>>(PUMP_DEPTH);
+    let reader = tokio::task::spawn_blocking(move || {
+        if let Err(e) = file.seek(SeekFrom::Start(offset)) {
+            // 接收端已走则忽略发送失败。
+            if tx.blocking_send(Err(e)).is_err() {
+                tracing::debug!("pump receiver is gone");
+            }
+            return;
+        }
+        let mut remaining = len;
+        while remaining > 0 {
+            let want = usize::try_from(remaining)
+                .unwrap_or(PUMP_CHUNK)
+                .min(PUMP_CHUNK);
+            let mut buf = vec![0u8; want];
+            let item = file.read_exact(&mut buf).map(|()| Bytes::from(buf));
+            let failed = item.is_err();
+            if tx.blocking_send(item).is_err() || failed {
                 return;
             }
-            let mut remaining = len;
-            while remaining > 0 {
-                let want = usize::try_from(remaining)
-                    .unwrap_or(PUMP_CHUNK)
-                    .min(PUMP_CHUNK);
-                let mut buf = vec![0u8; want];
-                let item = file.read_exact(&mut buf).map(|()| Bytes::from(buf));
-                let failed = item.is_err();
-                if tx.blocking_send(item).is_err() || failed {
-                    return;
-                }
-                remaining -= want as u64;
-            }
-        });
-
-        let mut sent: u64 = 0;
-        while let Some(item) = rx.recv().await {
-            let chunk = item.context("read shared file")?;
-            auth.share.limiter.acquire(chunk.len()).await;
-            self.inner.global_limiter.acquire(chunk.len()).await;
-            send.write_all(&chunk)
-                .await
-                .context("write data to stream")?;
-            sent += chunk.len() as u64;
-            monitor.add_bytes(chunk.len() as u64);
+            remaining -= want as u64;
         }
-        reader.await.context("file reader task failed")?;
-        ensure!(sent == len, "file ended after {sent} of {len} bytes");
-        Ok(())
+    });
+
+    let mut sent: u64 = 0;
+    while let Some(item) = rx.recv().await {
+        let chunk = item.context("read shared file")?;
+        for limiter in limiters {
+            limiter.acquire(chunk.len()).await;
+        }
+        send.write_all(&chunk)
+            .await
+            .context("write data to stream")?;
+        sent += chunk.len() as u64;
+        on_bytes(chunk.len() as u64);
     }
+    reader.await.context("file reader task failed")?;
+    ensure!(sent == len, "file ended after {sent} of {len} bytes");
+    Ok(())
 }

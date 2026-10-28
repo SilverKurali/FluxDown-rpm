@@ -629,6 +629,8 @@ public enum AccountRules {
         case "shareCloudNotReady": "errReasonShareCloudNotReady"
         case "shareTrafficExhausted": "errReasonShareTrafficExhausted"
         case "shareCloudUnavailable": "errReasonShareCloudUnavailable"
+        case "shareOwnShare": "errReasonShareOwnShare"
+        case "shareSourceMissing": "errReasonShareSourceMissing"
         default: nil
         }
     }

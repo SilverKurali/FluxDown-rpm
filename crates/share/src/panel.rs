@@ -943,6 +943,44 @@ impl SharePanelView {
                 .into_any_element()
         };
 
+        // 共享：其他持有同一文件的设备能否从本机取块。
+        let swarm = {
+            let view = view.clone();
+            let id = share.id.clone();
+            h_flex()
+                .items_center()
+                .gap(tokens.spacing.xs + tokens.spacing.xxs)
+                .child(
+                    Switch::new("share-chip-swarm")
+                        .checked(share.swarm)
+                        .disabled(!can_edit)
+                        .accessibility_label(text(translator, "shareChipSwarm"))
+                        .on_click(move |checked: &bool, _, cx| {
+                            let params = ShareUpdateParams {
+                                id: id.clone(),
+                                swarm: Some(*checked),
+                                ..ShareUpdateParams::default()
+                            };
+                            view.update(cx, |this, cx| this.update_share(params, cx));
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(tokens.typography.sm.size)
+                        .line_height(tokens.typography.sm.line_height)
+                        .text_color(tokens.colors.foreground)
+                        .child(text(
+                            translator,
+                            if share.swarm {
+                                "shareSwarmOn"
+                            } else {
+                                "shareSwarmOff"
+                            },
+                        )),
+                )
+                .into_any_element()
+        };
+
         h_flex()
             .w_full()
             .flex_wrap()
@@ -954,6 +992,7 @@ impl SharePanelView {
             .child(labelled(text(translator, "shareChipExpiry"), expiry))
             .child(labelled(text(translator, "shareChipClaims"), claims))
             .child(labelled(text(translator, "shareChipNotify"), notify))
+            .child(labelled(text(translator, "shareChipSwarm"), swarm))
             .when(self.updating, |this| {
                 this.child(Spinner::new().with_size(gpui_component::Size::Size(extended.icon.sm)))
             })
