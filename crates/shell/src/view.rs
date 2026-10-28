@@ -439,6 +439,11 @@ impl ShellView {
         cx.notify();
     }
 
+    /// 当前激活的路由。
+    pub fn active_route(&self) -> Option<&RouteId> {
+        self.active_route.as_ref()
+    }
+
     /// 路由被激活：经 `cx.defer` 调用其 `on_activate`（避免重入 shell）；窗口句柄在首帧渲染时补记。
     fn activate(&self, route: &RouteId, cx: &mut Context<Self>) {
         let Some(handler) = self

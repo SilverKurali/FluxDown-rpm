@@ -2543,6 +2543,13 @@ impl DownloadView {
     }
 }
 
+/// 下载页根焦点：宿主据此把动作派发进下载页（如标题栏菜单在下载页外发起的动作）。
+impl gpui::Focusable for DownloadView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for DownloadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 语言切换后同步搜索框 placeholder（InputState 只在构造时取一次）。

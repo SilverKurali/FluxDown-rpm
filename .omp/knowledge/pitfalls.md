@@ -35,8 +35,10 @@
 - **完成后的整目录 rename 在 Windows 上会因做种句柄存活而 ACCESS_DENIED，必须保留逐文件降级**：librqbit 对种子内全部文件持句柄直到任务删除，`pause()` 只转移不关闭（BUG-BT-DIR-RENAME-2X）；文件级 rename 对 FULL-share 句柄免疫且仍是同卷零拷贝 → `native/engine/src/bt_downloader.rs::move_path_with_file_replace` / `move_dir_recursive`（回归 `move_dir_recursive_continues_after_child_error` 等）。
 - **完成布局的批内重名判定用小写折叠名**：种子内仅大小写不同的 basename 在 Windows 上是同一 dst，精确比较会漏判并互相覆盖 → `native/engine/src/bt_downloader.rs::compute_completion_layout`（`taken`）。
 - **Windows 上 BT 新增选项必须经 `build_add_torrent_options` 注入 sparse 工厂**：新建任务不应物理预留全部空间 → `native/engine/src/bt_downloader.rs::build_add_torrent_options`、回归 `native/engine/tests/engine/bt_sparse_add.rs::fresh_add_creates_sparse_files_without_physical_reservation`（`cfg(all(windows, feature = "bt"))`）。
+- **文件选择对话框期间的「先暂停」只能落在已转 Live 的种子上**：librqbit 在初检中接受 `pause` 的方式是中止初检，种子停在 Initializing 且无检查在跑；Path B 随后的 `apply_only_files_after_init` 等初检结束永远等不到——部分选择或带 BEP-47 padding 文件的种子（选择框隐藏 padding，「全选」也少于 `file_count`）卡在「准备中」，手动暂停再继续（删句柄重新 add）才恢复 → `native/engine/src/bt_downloader.rs`（对话框后台暂停任务的 `handle.live()` 门槛）、回归 `selection_save_lifecycle::bt_dialog_partial_selection_reaches_downloading`。
 - **eD2K 根哈希的输入序列只能经 `build_root_input` 构造**：块数恰为 part_size 整数倍时的 off-by-one（尾部空块）集中在这一个转换点处理 → `native/engine/src/ed2k/hash.rs::build_root_input`、回归 `build_root_input_phantom_tail_appends_empty`。
 - **Kad 收包循环遇 Windows `WSAECONNRESET(10054)` 必须忽略并继续等到 deadline**：向已死节点发包触发的 ICMP 端口不可达，会被 Windows 报在**下一次** `recv_from` 上；据此返回 `None` 会让一个死节点终止整个接收窗口、漏掉其后存活节点的回包 → `native/engine/src/ed2k/kad/node.rs::recv_within`。
+- **磁力交给 librqbit 前必须经 `normalize_magnet`**：librqbit `Magnet::parse` 对**每个** `xt` 要求精确前缀 `urn:btih:` / `urn:btmh:1220`（区分大小写），多协议磁力（并列 `urn:ed2k:` / `urn:sha1:` / `urn:aich:`）、`urn:BTIH:`、小写 base32 都整条拒绝（`expected xt to start with btih or btmh`），而建任务只校验 `magnet:?` 前缀、剪贴板按小写匹配放行，任务建出来后每次启动都失败。规范化只作用于 librqbit 输入（`info_hash_hex` / `add_input` 两处），DB 原始链接不改；无 BT `xt` 或已规范时原样借出 → `native/engine/src/bt_downloader.rs::normalize_magnet`、回归 `normalize_magnet_*`。
 
 ## 插件运行时
 
@@ -75,6 +77,7 @@
 - **不可缩放窗口不能用 gpui-component 的 `TitleBar` 自带窗口控件**：其 `WindowControls` 私有且在 Windows / Linux 总绘制最大化按钮，`is_resizable = false` 时最大化区域退化为拖动区、点了无效，因此自绘只含最小化 + 关闭的标题栏（Windows 靠 `WindowControlArea` 交原生非客户区命中测试）→ `crates/shell/src/window_controls.rs`。
 - **Windows 上最小化的窗口边界报告为 `Windowed`，最大化状态要与平台标志取或**：只看 bounds 会把「最小化的最大化窗口」存成普通窗口 → `crates/app/src/windows/bounds.rs::resolve_maximized`、回归 `minimized_maximized_window_keeps_maximized`。
 - **进度 / 完成窗口里「打开文件 / 文件夹」不等打开命令返回**：Windows 上它要等系统打开调用返回，可能比对方出现在前台还晚，窗口该关而不关；会关窗时点击即请宿主等对方接管前台 → `crates/downloads/src/pages/progress_window.rs::hand_off`。
+- **Windows / Linux 标题栏菜单（gpui-component `AppMenuBar`）以「打开菜单时的焦点」为派发目标**：焦点为空（启动后未点列表）、在标题栏搜索框或不在下载页时，挂在下载页元素上的动作只沿标题栏冒泡、点了无效，且菜单项从不置灰；下载页动作须有应用级兜底（切到下载页、聚焦后派发；焦点已在下载页内视为下载页主动让出，不接管）。兜底里 `update` 窗口必须用 `AnyWindowHandle`，`WindowHandle<V>` 会租借根视图，冒泡到根视图监听器即 panic → `crates/app/src/menus.rs::dispatch_in_downloads`。
 
 ## Web SPA
 
@@ -101,6 +104,7 @@
 - **叠层返回键的优先级：菜单 / 对话框在 Sheet 之上**：后注册的 Sheet 返回处理器会抢先，菜单打开时返回键应交给 `FluxOverlayHost` → `mobile/Android/fluxui/src/main/java/com/fluxdown/fluxui/overlay/FluxSheet.kt`（`canGoBack` 条件）。
 - **应用自更新不用 `PackageInstaller` 会话，交给「打开 APK」的默认安装程序，且只在界面可见时拉起**：会话的确认界面固定由系统安装器处理，无视用户设定的默认安装程序（小米机上总是小米安装器）；部分国行 MIUI 安装器对第三方会话直接回 `INSTALL_FAILED_ABORTED`（用户什么都没点，旧映射显示「已取消安装」）；从 `BroadcastReceiver` 拉确认界面在后台被系统静默拦截，状态永远停在「正在安装」。未持有 `UPDATE_PACKAGES_WITHOUT_USER_ACTION` 时会话本来也要确认。安装包经 FileProvider `app_update` 根（`../no_backup/updates/`，不可信应用不能硬链接）只读授权 → `mobile/Android/app/src/main/java/com/fluxdown/app/update/ApkInstaller.kt`、`UpdateEffects.kt`（交接 `LaunchedEffect`）、`res/xml/file_paths.xml`。
 - **「打开文件」要区分「当前查看的主机」与「任务所属的引擎」**：远端主机的 `saveDir` 是主机磁盘路径，`fileMissing` 也由主机 daemon 按主机磁盘算，只看 `Completed && !fileMissing` 会给远端任务显示「打开」并按本机路径报「文件不存在」；反过来，完成提示 / 通知里的本机任务（含 PC 下发到本机的）在用户正查看远端主机时仍须能打开，不能套当前主机门控 → `mobile/Android/app/src/main/java/com/fluxdown/app/actions/TaskActions.kt`（`hasLocalFile` / `open` 走当前主机门控，`openLocalFile` 供本机任务来源调用）、`feature/downloads/DownloadsView.kt::localHost`（行环钮文案），iOS 同规则见 `TaskActions.swift::hasLocalFile`、`DownloadsRowText.swift::ringAction`。
+- **会话信号流结束必须落到失败态，不能静默停在最后一帧**：Rust `next_signal` 返回 `None`（驱动意外退出等）时 `RustHostSession` 的流正常完成，`HostStore` 若什么都不做就冻结在上一帧——上一帧是加载态快照时首页永久骨架、无横幅无日志，只有重启能恢复。`HostStore.attach` 在流结束且未见 Fatal、未被 detach 取消时补发 Fatal；UniFFI `InternalException` 继承 `kotlin.Exception` 而非 `RuntimeException`，须按 `Exception` 捕获；连接 / 载入态切换记入 `app-events.log`，`fluxdown_mobile` 在 agent 默认日志名单内（重连原因）→ `mobile/Android/core/.../store/HostStore.kt::attach`（回归 `HostStoreTest.signalStreamEnding…`）、`app/.../FluxApplication.kt::connectionSummary`、iOS `FluxDomain/Store/HostStore.swift::attach`、`native/agent/src/logging.rs::FIRST_PARTY_TARGETS`。
 
 ## iOS
 

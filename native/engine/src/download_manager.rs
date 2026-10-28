@@ -308,7 +308,7 @@ struct BtSessionHolds {
     queued: bool,
     /// 仍有 detached `add_torrent` 在途。
     inflight_add: bool,
-    /// 存在暂停中（或初检中带延迟暂停）的未完成 torrent，持有恢复态。
+    /// 存在暂停中（或初检中已请求暂停）的未完成 torrent，持有恢复态。
     paused_incomplete: bool,
 }
 

@@ -84,12 +84,15 @@
 - **uTP（`bt_enable_utp`，默认开）**：开启时监听模式为 `TcpAndUtp`，出站并发拨 TCP + uTP；
   #825 实测在上限 512 基础上稳态再翻倍，代价是 UDP 收发的系统态 CPU 明显更高（上游仍标为
   experimental）。改动经 daemon 重建共享会话生效。librqbit 来自 `zerx-lab/rqbit` 的 `main`
-  （上游 main + MSE + Android HTTPS + 握手超时下发修复），升级上游时先在该 fork 的 main
-  合并上游，再改根 `Cargo.toml` 的 rev。
+  （上游 main + MSE + Android HTTPS + 握手超时下发 + 初检末尾暂停不丢失），升级上游时先在该
+  fork 的 main 合并上游，再改根 `Cargo.toml` 的 rev。`librqbit-utp` 临时 patch 到上游 git main：
+  crates.io 0.7.0 的分发循环遇 Windows `WSAECONNRESET(10054)` 即退出，整个会话 uTP 失效；
+  上游发版后删 patch。
 - **BT 会话保活与完成校验**：`maybe_release_bt_session` 在存在「已暂停的未完成
   torrent（句柄在册）」时**不拆**共享会话——resume 走 `unpause`（Paused→Live
-  零校验秒恢复）；全部 BT 任务终态化（完成/删除且无做种）才释放。暂停撞上
-  librqbit 初检（只能从 Live 暂停）时经世代号「延迟暂停」兜底，防幽灵下载。
+  零校验秒恢复）；全部 BT 任务终态化（完成/删除且无做种）才释放。初检中暂停由
+  librqbit 记为暂停请求（中止初检，或初检越过最后一个 piece 时校验完落 Paused），
+  恢复经 `unpause` 重起检查。
   Windows 上 staging 文件经 `bt_sparse` 打 FSCTL_SET_SPARSE（免整体簇预留 +
   免 VDL 零填充写放大）。完成期全量重哈希只在 fastresume 污点时执行（add 时
   存在既有 `.bitv` / 经缓存句柄跨暂停恢复 / 完成重试）；无污点任务的 have-bits
