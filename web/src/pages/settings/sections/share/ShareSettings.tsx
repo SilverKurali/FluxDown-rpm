@@ -2,14 +2,18 @@
 // 全部字段来自 `ShareLocalConfigDto`，经 `agent.share.setLocalConfig` 整体替换写回（见 `localConfig.ts`）。
 // UDP 端口 / 连接模式 / portmapper / 额外公布地址变化会让 agent 重建端点。
 
+import { useState } from 'react'
 import { useT } from '../../../../i18n'
 import type { ShareConnectionMode, ShareExitBehavior, ShareLogLevel } from '../../../../lib/rpc'
 import { Switch } from '../../../../ui'
 import type { SelectOption } from '../../../../ui'
 import { claimOptions, tierLabel } from '../../../share/model'
+import { takeDiagnosticsRequest } from '../../../share/diagnosticsRequest'
+import { NetworkDiagnostics } from '../../../share/NetworkDiagnostics'
 import { useShareState } from '../../../share/state'
 import { DropdownField, NumberField, SettingsPage, SettingsRow, SettingsSection, TextField } from '../../kit'
-import { formatAddrList, parseAddrList, parsePort, portmapperChoice, portmapperWire, rateFromWire, rateToWire, saveLocalConfig } from './localConfig'
+import { formatBytes } from '../../../downloads/dialogs/utils'
+import { formatDailyCap, formatAddrList, parseAddrList, parseDailyCap, parsePort, portmapperChoice, portmapperWire, rateFromWire, rateToWire, saveLocalConfig } from './localConfig'
 import type { PortmapperChoice } from './localConfig'
 
 const MODES: readonly ShareConnectionMode[] = ['auto', 'relayOnly', 'directOnly']
@@ -37,6 +41,8 @@ const AUTO_RELAY = ''
 export function ShareSettings() {
   const t = useT()
   const { localConfig: config, policySummary, available } = useShareState()
+  // 分享面板「诊断此会话」带来的请求：直接落在网络诊断页签并聚焦该会话。
+  const [focus] = useState(() => takeDiagnosticsRequest())
 
   const tiers = policySummary.liveTiers
   const tierOptions: SelectOption<string>[] = tiers.map((tier) => ({ value: tier.id, label: tierLabel(t, tier) }))
@@ -61,9 +67,10 @@ export function ShareSettings() {
     { value: 'off', label: t('shareNotifyOff') },
   ]
   const logOptions: SelectOption<ShareLogLevel>[] = LOG_LEVELS.map((level) => ({ value: level, label: t(LOG_KEYS[level]) }))
+  const defaultCap = policySummary.provideDailyCapDefaultBytes ?? 0
 
-  return (
-    <SettingsPage title={t('settingsCatShare')} description={t('settingsCatShareDesc')}>
+  const general = (
+    <>
       {available ? null : (
         <div role="status" className="rounded-md border border-hairline bg-nav-hover px-3 py-2 text-xs text-muted-foreground">
           {t('errReasonShareUnavailable')}
@@ -170,6 +177,19 @@ export function ShareSettings() {
             onCheckedChange={(on) => void saveLocalConfig({ autoProvide: on ? null : false })}
           />
         </SettingsRow>
+        <SettingsRow title={t('shareSetProvideDailyCap')} description={t('shareSetProvideDailyCapDesc')}>
+          <TextField
+            value={formatDailyCap(config.provideDailyCapBytes)}
+            placeholder={t('shareSetProvideDailyCapDefault', { value: defaultCap > 0 ? formatBytes(defaultCap) : t('shareUsageUnlimited') })}
+            aria-label={t('shareSetProvideDailyCap')}
+            className="w-40"
+            trailing={<span className="text-muted-foreground">GB</span>}
+            onCommit={(text) => {
+              const cap = parseDailyCap(text)
+              if (cap !== undefined) void saveLocalConfig({ provideDailyCapBytes: cap })
+            }}
+          />
+        </SettingsRow>
         <SettingsRow title={t('shareSetRateLimit')} description={t('shareSetRateLimitDesc')}>
           <NumberField
             value={rateFromWire(config.sendRateLimitBytesPerSec)}
@@ -198,6 +218,18 @@ export function ShareSettings() {
           />
         </SettingsRow>
       </SettingsSection>
-    </SettingsPage>
+    </>
+  )
+
+  return (
+    <SettingsPage
+      title={t('settingsCatShare')}
+      description={t('settingsCatShareDesc')}
+      initialTabId={focus ? 'network' : 'general'}
+      tabs={[
+        { id: 'general', label: t('settingsTabGeneral'), content: general },
+        { id: 'network', label: t('shareTabNetwork'), content: <NetworkDiagnostics focusSessionId={focus?.sessionId ?? null} /> },
+      ]}
+    />
   )
 }

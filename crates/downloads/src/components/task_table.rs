@@ -13,7 +13,7 @@ use fluxdown_ui_theme::active_theme;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Edges, Entity, FocusHandle, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ParentElement, Pixels, Render, ScrollWheelEvent, SharedString, Stateful,
+    ParentElement, Pixels, Render, ScrollEvent, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled, Task, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px,
 };
@@ -434,6 +434,8 @@ pub(crate) struct TaskMenuFacts {
     /// 任务可被控制（暂停 / 继续 / 删除）。远程任务云端状态未知时为 `false`。
     pub(crate) controllable: bool,
     pub(crate) state: TaskState,
+    /// 引擎原始 status 为 5（准备中，展示态归入 `Pending`）：引擎视同下载中。
+    pub(crate) preparing: bool,
     pub(crate) boosted: bool,
     /// `url` 是否为 BT 哨兵值 `torrent-file://…`（不可重新下载）。
     pub(crate) is_torrent_sentinel: bool,
@@ -453,6 +455,8 @@ pub(crate) struct TaskMenuFacts {
     pub(crate) share_visible: bool,
     /// 本机当前可发起分享（已登录，或云端允许游客发起）。
     pub(crate) share_can_send: bool,
+    /// 「停止共享」可用：宿主提供了入口，且该任务所属接收记录仍在共享（有记录 ID）。
+    pub(crate) stop_providing: bool,
 }
 
 /// 可「忽略插件重试」的插件失败错误消息前缀（引擎 `handle_resolve_ready`；二段解析任务
@@ -489,6 +493,13 @@ impl TaskMenuFacts {
             )
     }
 
+    /// 「重命名」可用：本地非 BT、不在下载 / 准备中的任务（对齐引擎 `rename_task`：
+    /// 活跃任务返回 `task-active`；BT 落盘名由完成布局决定且做种期间持有句柄，返回
+    /// `bt-unsupported`）。eD2K 与 HTTP 同样以 `<名>.fdownloading` 续传，可改名。
+    pub(crate) fn can_rename(&self) -> bool {
+        self.is_local && !self.is_bt && self.state != TaskState::Downloading && !self.preparing
+    }
+
     /// 「修改线程数」可用：本地非 BT、未完成的任务（下载中也可，引擎静默暂停后恢复）。
     pub(crate) fn can_change_segments(&self) -> bool {
         self.is_local && !self.is_bt && self.state != TaskState::Completed
@@ -521,6 +532,7 @@ pub(crate) fn task_menu_facts_for(store: &TaskStore, key: &RowKey) -> Option<Tas
         is_local: key.is_local(),
         controllable: row.remote_status != Some(RemoteTaskStatus::Unknown),
         state: row.state,
+        preparing: row.preparing,
         boosted: row.boosted,
         is_torrent_sentinel: row.url.starts_with("torrent-file://"),
         is_bt: is_bt_url(&row.url),
@@ -533,6 +545,9 @@ pub(crate) fn task_menu_facts_for(store: &TaskStore, key: &RowKey) -> Option<Tas
         can_resume_seeding: row.can_resume_seeding(),
         share_visible: store.share_entry_visible(),
         share_can_send: store.share().can_send(),
+        stop_providing: key.is_local()
+            && store.share_host().stop_providing
+            && store.share().providing_record(key.task_id()).is_some(),
     })
 }
 
@@ -557,6 +572,8 @@ pub(crate) enum MenuEntry {
     VerifyIntegrity,
     /// 分享选中的已完成任务（`None` = 可点击；`Some(原因)` = 禁用并提示原因）。
     Share(Option<ShareBlock>),
+    /// 停止共享已接收的文件（单选；条件见 [`TaskMenuFacts::stop_providing`]）。
+    StopProviding,
     Redownload,
     CopyUrl,
     MoveToQueue,
@@ -623,7 +640,7 @@ pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> 
         items.push(MenuEntry::CopyFile);
     }
     if let [only] = selection
-        && only.is_local
+        && only.can_rename()
     {
         items.push(MenuEntry::Rename);
     }
@@ -651,6 +668,11 @@ pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> 
         if control.is_visible() {
             items.push(MenuEntry::Share(control.block()));
         }
+    }
+    if let [only] = selection
+        && only.stop_providing
+    {
+        items.push(MenuEntry::StopProviding);
     }
     items.push(MenuEntry::CopyUrl);
     if selection.iter().all(|task| task.is_local) {
@@ -1848,7 +1870,7 @@ impl DownloadTableDelegate {
         self.selection_anchor = Some(key);
     }
 
-    pub(crate) fn select_task(&mut self, key: RowKey, modifiers: Modifiers) {
+    pub(crate) fn select_task(&mut self, key: RowKey, modifiers: SelectModifiers) {
         // 正在删除的任务不参与选择。
         if self.is_pending_delete(&key) {
             return;
@@ -1878,7 +1900,7 @@ impl DownloadTableDelegate {
             }
         }
 
-        if modifiers.secondary() {
+        if modifiers.toggle {
             if !self.selected_tasks.remove(&key) {
                 self.selected_tasks.insert(key.clone());
             }
@@ -2371,6 +2393,7 @@ impl DownloadTableDelegate {
                     badge,
                     &self.strings,
                     self.store.share_host().switch_bridge,
+                    self.store.share_host().open_usage,
                     self.host.as_ref(),
                     cx,
                 )
@@ -2848,6 +2871,27 @@ impl DownloadTableDelegate {
                     })
                     .icon(FluxIcon::Share2)
                     .disabled(true),
+                )
+            }
+            MenuEntry::StopProviding => {
+                let (Some(host), Some(task_id)) = (
+                    self.host.clone(),
+                    selected.first().map(|key| key.task_id().to_owned()),
+                ) else {
+                    return menu;
+                };
+                menu.item(
+                    PopupMenuItem::new(self.strings.share_stop_providing.clone())
+                        .icon(FluxIcon::Share2)
+                        .on_click(move |_, window, cx| {
+                            let task_id = task_id.clone();
+                            let Ok(()) = host.update(cx, |view, cx| {
+                                view.share_stop_providing(&task_id, window, cx);
+                            }) else {
+                                // 视图已释放，结束这次回调而不再更新状态。
+                                return;
+                            };
+                        }),
                 )
             }
             MenuEntry::CopyUrl => menu.menu_with_icon(
@@ -3356,7 +3400,7 @@ impl TableDelegate for DownloadTableDelegate {
             let key = key.clone();
             move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
                 let modifiers = event.modifiers();
-                if event.click_count() != 2 || modifiers.secondary() || modifiers.shift {
+                if event.click_count() != 2 || modifiers.secondary(cx) || modifiers.shift {
                     return;
                 }
                 let key = key.clone();
@@ -3393,9 +3437,10 @@ impl TableDelegate for DownloadTableDelegate {
                     }),
             )
             .on_click(cx.listener(move |table, event: &ClickEvent, _, cx| {
-                table
-                    .delegate_mut()
-                    .select_task(key.clone(), event.modifiers());
+                table.delegate_mut().select_task(
+                    key.clone(),
+                    SelectModifiers::from_event(event.modifiers(), cx),
+                );
                 cx.notify();
             }))
             .when_some(activate, |this, activate| this.on_click(activate))
@@ -3546,6 +3591,23 @@ impl TableDelegate for DownloadTableDelegate {
                 self.task_context_menu(menu, active_theme(cx).tokens().colors.destructive)
             }
             Some(VisibleRow::GroupDir { .. } | VisibleRow::GroupHeader { .. }) | None => menu,
+        }
+    }
+}
+
+/// 单击选择时的修饰键语义：`toggle` = 平台次要键（macOS Cmd / 其他 Ctrl，运行期按 `App` 判定），
+/// 把单行 / 整组并入或移出选区；`shift` = 从锚点连选。
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SelectModifiers {
+    pub(crate) shift: bool,
+    pub(crate) toggle: bool,
+}
+
+impl SelectModifiers {
+    pub(crate) fn from_event(modifiers: Modifiers, cx: &App) -> Self {
+        Self {
+            shift: modifiers.shift,
+            toggle: modifiers.secondary(cx),
         }
     }
 }
@@ -3816,7 +3878,7 @@ pub(crate) fn render_download_table(
         .overflow_hidden()
         .bg(active_theme(cx).tokens().colors.surface)
         .on_mouse_move(note_pointer::<MouseMoveEvent>(table_state, cx))
-        .on_scroll_wheel(note_pointer::<ScrollWheelEvent>(table_state, cx))
+        .on_scroll(note_pointer::<ScrollEvent>(table_state, cx))
         .capture_any_mouse_down(note_pointer::<MouseDownEvent>(table_state, cx))
         .capture_any_mouse_down(clear_context_row_on_left_press(table_state))
         .child(
@@ -4194,12 +4256,11 @@ mod tests {
     };
 
     use fluxdown_ui_i18n::{I18nCatalog, I18nError};
-    use gpui::Modifiers;
 
     use super::{
-        DownloadColumnKind, DownloadTableDelegate, DownloadsCommand, RowAction, SelectionSummary,
-        TableFilter, ToolbarCommand, VisibleRow, group_by_key, is_seeding_row, percent_label,
-        row_actions, seeding_upload_speed, task_command,
+        DownloadColumnKind, DownloadTableDelegate, DownloadsCommand, RowAction, SelectModifiers,
+        SelectionSummary, TableFilter, ToolbarCommand, VisibleRow, group_by_key, is_seeding_row,
+        percent_label, row_actions, seeding_upload_speed, task_command,
     };
     use crate::{
         model::{
@@ -4280,7 +4341,7 @@ mod tests {
         let mut delegate = delegate(&[2, 2, 2])?;
         delegate.refresh_view();
         // 普通单击选中 t0 后点 t1 的复选框：以 t1 开启多选，不并入单击选中的行。
-        delegate.select_task(RowKey::Local("t0".into()), Modifiers::default());
+        delegate.select_task(RowKey::Local("t0".into()), SelectModifiers::default());
         delegate.toggle_multi_select(RowKey::Local("t1".into()));
         assert!(delegate.in_multi_select());
         assert_eq!(
@@ -4353,8 +4414,8 @@ mod tests {
             delegate.selected_tasks,
             HashSet::from([RowKey::Local("t2".into()), RowKey::Local("t3".into())])
         );
-        delegate.select_task(RowKey::Local("t2".into()), Modifiers::default());
-        delegate.select_task(RowKey::Local("t1".into()), Modifiers::default());
+        delegate.select_task(RowKey::Local("t2".into()), SelectModifiers::default());
+        delegate.select_task(RowKey::Local("t1".into()), SelectModifiers::default());
         assert_eq!(
             delegate.selected_tasks,
             HashSet::from([RowKey::Local("t2".into())])
@@ -4364,7 +4425,7 @@ mod tests {
 
         // 结束后恢复可选。
         delegate.finish_delete(&["t0".to_owned(), "t1".to_owned()]);
-        delegate.select_task(RowKey::Local("t0".into()), Modifiers::default());
+        delegate.select_task(RowKey::Local("t0".into()), SelectModifiers::default());
         assert_eq!(
             delegate.selected_tasks,
             HashSet::from([RowKey::Local("t0".into())])
@@ -4665,14 +4726,14 @@ mod tests {
     fn group_click_selects_members_and_select_all_covers_collapsed_groups() -> Result<(), I18nError>
     {
         let mut delegate = grouped_delegate()?;
-        delegate.select_group("g", Modifiers::default());
+        delegate.select_group("g", SelectModifiers::default());
         assert_eq!(
             delegate.selected_tasks,
             HashSet::from([local("t0"), local("t1"), local("t2")])
         );
         assert_eq!(delegate.focused_group(), Some("g"));
         // 选区不再恰好是该组时，停靠面板不再显示组概览。
-        delegate.select_task(local("t3"), Modifiers::default());
+        delegate.select_task(local("t3"), SelectModifiers::default());
         assert_eq!(delegate.focused_group(), None);
 
         // 折叠的组也在「全选」范围内。
@@ -4680,7 +4741,13 @@ mod tests {
         assert_eq!(delegate.selection_summary().count, 4);
 
         // Cmd/Ctrl 单击整组移出 / 并入选区。
-        delegate.select_group("g", Modifiers::secondary_key());
+        delegate.select_group(
+            "g",
+            SelectModifiers {
+                toggle: true,
+                ..SelectModifiers::default()
+            },
+        );
         assert_eq!(delegate.selected_tasks, HashSet::from([local("t3")]));
         Ok(())
     }
@@ -4717,12 +4784,12 @@ mod tests {
         delegate.refresh_view();
         let first = delegate.row_key_at(1).expect("first task");
         let last = delegate.row_key_at(5).expect("last task");
-        delegate.select_task(first, Modifiers::default());
+        delegate.select_task(first, SelectModifiers::default());
         delegate.select_task(
             last,
-            Modifiers {
+            SelectModifiers {
                 shift: true,
-                ..Modifiers::default()
+                ..SelectModifiers::default()
             },
         );
         assert_eq!(delegate.selected_tasks.len(), 4);
@@ -5029,8 +5096,8 @@ mod tests {
                         if step % 19 == 0
                             && let Some(key) = fast.visible_task_keys().first().cloned()
                         {
-                            fast.select_task(key.clone(), Modifiers::default());
-                            full.select_task(key, Modifiers::default());
+                            fast.select_task(key.clone(), SelectModifiers::default());
+                            full.select_task(key, SelectModifiers::default());
                         }
                     }
                     assert!(fast.full_sort_count < full.full_sort_count);
@@ -5643,6 +5710,7 @@ mod context_menu_tests {
             is_local,
             controllable: true,
             state,
+            preparing: false,
             boosted: false,
             is_torrent_sentinel: false,
             is_bt: false,
@@ -5653,6 +5721,7 @@ mod context_menu_tests {
             can_resume_seeding: false,
             share_visible: false,
             share_can_send: true,
+            stop_providing: false,
         }
     }
 
@@ -5666,6 +5735,30 @@ mod context_menu_tests {
             share_visible: true,
             ..task(is_local, state)
         }
+    }
+
+    #[test]
+    fn stop_providing_entry_needs_a_single_providing_task() {
+        let providing = TaskMenuFacts {
+            stop_providing: true,
+            ..task(true, TaskState::Completed)
+        };
+        let has_entry = |selection: &[TaskMenuFacts]| {
+            task_menu_entries(selection, false, 0).contains(&MenuEntry::StopProviding)
+        };
+        assert!(has_entry(&[providing]));
+        // 宿主未注入入口 / 记录已不在共享：事实为 false，不出现。
+        assert!(!has_entry(&[task(true, TaskState::Completed)]));
+        // 多选不出现（即使每个任务都在共享）。
+        assert!(!has_entry(&[providing, providing]));
+        assert!(!has_entry(&[providing, task(true, TaskState::Completed)]));
+        // 与「分享」入口互不依赖：FluxMesh分享入口隐藏时仍可停止共享。
+        assert!(!providing.share_visible);
+        assert!(
+            !task_menu_entries(&[providing], false, 0)
+                .iter()
+                .any(|entry| matches!(entry, MenuEntry::Share(_)))
+        );
     }
 
     #[test]
@@ -6026,6 +6119,47 @@ mod context_menu_tests {
                 MenuEntry::ShowDetail,
             ]
         );
+    }
+
+    #[test]
+    fn rename_is_offered_only_where_the_engine_accepts_it() {
+        // 引擎 `rename_task`：BT 任务一律 `bt-unsupported`，下载 / 准备中 `task-active`。
+        for state in [
+            TaskState::Pending,
+            TaskState::Paused,
+            TaskState::Failed,
+            TaskState::Completed,
+        ] {
+            assert!(
+                context_menu_items(&[task(true, state)]).contains(&MenuEntry::Rename),
+                "{state:?}"
+            );
+            let bt = TaskMenuFacts {
+                is_bt: true,
+                url_replaceable: false,
+                ..task(true, state)
+            };
+            assert!(
+                !context_menu_items(&[bt]).contains(&MenuEntry::Rename),
+                "BT {state:?}"
+            );
+        }
+        let preparing = TaskMenuFacts {
+            preparing: true,
+            ..task(true, TaskState::Pending)
+        };
+        for facts in [
+            task(true, TaskState::Downloading),
+            preparing,
+            task(false, TaskState::Paused),
+        ] {
+            assert!(
+                !context_menu_items(&[facts]).contains(&MenuEntry::Rename),
+                "{facts:?}"
+            );
+        }
+        let paused = task(true, TaskState::Paused);
+        assert!(!context_menu_items(&[paused, paused]).contains(&MenuEntry::Rename));
     }
 
     #[test]

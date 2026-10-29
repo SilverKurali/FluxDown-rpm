@@ -115,7 +115,7 @@ cd mobile/FluxDown && xcodebuild build -project FluxDown.xcodeproj -scheme FluxD
 - **feature 门控**：`plugins` / `components` 默认关（desktop / server 开，mobile / CLI 关），关闭时下载主链路零行为变化（no-op `PluginManager`）。`bt` / `ed2k` 默认开；iOS 商店 flavor 以 `--no-default-features` 剔除 librqbit 与 eD2K，建此类任务返回明确拒绝。**商店包对本机与远端主机一律不含 P2P 与插件 / 组件功能**（入口、页面、选择处理、scheme / 文档类型编译期剔除；曾因「远端主机才出现的功能」被以 App Review 5.6 拒审），新增相关 iOS 界面同样门控（Swift `FULL_FLAVOR`）。
 
 **编译期陷阱**
-- 根 `[patch.crates-io]` 的 rquickjs 分叉 / gpui-fast / gpui-kit 同 rev / librqbit-dualstack-sockets 与 `profile.release` 不设 `panic="abort"`：改 `Cargo.toml` / `Cargo.lock` / `third_party/` 前读 `rule://workspace-patches`。
+- GPUI = crates.io gpui-fast + gpui-kit 同一发布版（各包开 `gpui-fast` feature）、engine 的 `quickjs-jit` 与 gpui-shell 同版本、根 `[patch.crates-io]` 的 librqbit 系补丁 / `third_party/librqbit-dualstack-sockets` 与 `profile.release` 不设 `panic="abort"`：改 `Cargo.toml` / `Cargo.lock` / `third_party/` 前读 `rule://workspace-patches`。
 - **gpui-fast 保留模式**：render 读的状态必须在 entity / global / `ListState` / `ScrollHandle` 内，否则改了要 notify 读者 view；父 view notify 不再重建子 view；渲染期不得无条件写 entity / global。
 - **headless Web UI 编译期内嵌**（`web-ui` feature，`FLUXDOWN_EMBED_WEBROOT` 缺省 `web/dist`）：改前端必须先 `cd web && bun run build` 再重编 agent；Vite 别名引用 `assets/i18n` 与 `website-v2/src/lib/gpui-theme`，打包上下文须包含两处。
 
@@ -132,7 +132,7 @@ cd mobile/FluxDown && xcodebuild build -project FluxDown.xcodeproj -scheme FluxD
 - **空闲静默（NAS 硬盘休眠）**：无活动任务 / 做种 / 到期 RSS / 客户端请求时，daemon / agent 不得周期性读写 save_dir 或 data_dir；新周期任务须事件驱动、受空闲门控，或长周期且仅内容变化时写。
 - **宿主自身下载只走统一出口**（更新、受管组件、插件包、规则包、tracker / server.met 订阅等）：daemon / engine 用 `fluxdown_engine::egress`，agent 经 `daemon.egress.plan` + `native/agent/src/egress.rs`，禁止裸 `reqwest::Client::builder()`；仅有独立来源哈希 / 签名的载荷可交插件改写，失败回退原地址。
 - 引擎学习 / 遥测类 config 键（`cdn_node_health`、`auto_route_health`、`cdn_pending_reports`、`domain_conn_caps`）UI 不读写。
-- **遥测只有两条匿名部署事件**（`app_installed` 一次 + `app_active` 每日，`analytics_enabled` 门控），绝不采集下载 / 任务信息，不新增其他遥测点。**例外：FluxMesh网络与传输诊断**（用户 2026-10-27 决定「展示即上报」）——仅在发生FluxMesh分享 / 接收时，把客户端「网络诊断」与「传输诊断」展示的同一份结构化快照上报 FluxCloud，`native/agent/src/share/` 是唯一出口，不含分享以外的下载 / 任务信息，状态变化或传输进行中才报（口径见 `ops.md`「设计文档实现状态」FluxMesh条与官网隐私政策）。**云端推送不是遥测**：本设备上报默认关、须 UI 显式同意、与 `analytics_enabled` 无关；默认只发文件名 / 大小 / 状态 / 错误 / 队列名，下载地址与保存目录各自单独开关（默认关）；`TaskNotice` 只由 agent 消费。
+- **遥测只有两条匿名部署事件**（`app_installed` 一次 + `app_active` 每日，`analytics_enabled` 门控），绝不采集下载 / 任务信息，不新增其他遥测点。**例外：FluxMesh网络与传输诊断**（用户 2026-10-27 决定「展示即上报」）——仅在发生FluxMesh分享 / 接收时，把客户端「网络诊断」与「传输诊断」展示的同一份结构化快照上报 FluxCloud，`native/agent/src/share/` 是唯一出口，不含分享以外的下载 / 任务信息；并用于共享加速额度结算（2026-10-29 扩展：收发双方各自上报逐对端字节数，云端交叉核实后计消耗与贡献，仍只含分享字节、不含文件名 / 路径 / 其他任务），状态变化或传输进行中才报（口径见 `ops.md`「设计文档实现状态」FluxMesh条与官网隐私政策）。**云端推送不是遥测**：本设备上报默认关、须 UI 显式同意、与 `analytics_enabled` 无关；默认只发文件名 / 大小 / 状态 / 错误 / 队列名，下载地址与保存目录各自单独开关（默认关）；`TaskNotice` 只由 agent 消费。
 - **插件页面脚本只经浏览器 `userScripts` API 执行**：扩展任何位置禁止 `eval` / `new Function` / 远程或拼接的 `<script>`；每个插件首次启用须用户在选项页显式确认；扩展不保存脚本源码副本；`fluxdown` 桥能力窄且固定。
 - 以上各条的落点、阻碍项与背景见 `hosts-and-api.md`（端口 / 凭据 / 空闲静默）、`ops.md`（云端推送）、`engine.md`（egress / naming / 做种）、`clients.md`（userScripts / iOS flavor）、`pitfalls.md`。
 - 命名歧义：`tracker_subscription.rs` / `ed2k/server_subscription.rs` 是 tracker / `server.met` 订阅，与 `rss/` 无关；官网 `api/webhooks/github` 是 GitHub 接收器，与 `engine/src/webhook.rs` 无关。

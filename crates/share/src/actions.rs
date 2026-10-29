@@ -15,6 +15,15 @@ pub(crate) fn notify_error(window: AnyWindowHandle, cx: &mut AsyncApp, text: Str
     };
 }
 
+/// 在触发窗口弹出一条成功通知；窗口已关闭则放弃。
+pub(crate) fn notify_success(window: AnyWindowHandle, cx: &mut AsyncApp, text: String) {
+    let Ok(()) = window.update(cx, move |_, window: &mut Window, cx| {
+        window.push_notification(Notification::success(text), cx);
+    }) else {
+        return;
+    };
+}
+
 /// 任务行「切换桥接」：调用 `agent.share.switchToBridge`（任务继续运行，来源改走桥接 / 云端副本，
 /// 之后任务的 `pathKind` 随 `ShareChanged` 变为 `bridge` / `cdn`）。失败（如当前没有可用桥接）时在
 /// 触发窗口弹出带类型的错误文案。
@@ -33,7 +42,7 @@ pub fn switch_to_bridge(hub: &Entity<ShareHub>, task_id: &str, window: &Window, 
     .detach();
 }
 
-/// 接收记录「停止共享」：调用 `agent.share.stopProviding`。行状态由随后的 `ShareChanged` 刷新；
+/// 任务「停止共享」（任务详情「传输诊断」页 / 任务右键菜单）：调用 `agent.share.stopProviding`。行状态由随后的 `ShareChanged` 刷新；
 /// 失败时在触发窗口弹出带类型的错误文案。
 pub fn stop_providing(hub: &Entity<ShareHub>, record_id: &str, window: &Window, cx: &mut App) {
     let handle = window.window_handle();

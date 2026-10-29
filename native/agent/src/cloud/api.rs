@@ -579,6 +579,12 @@ impl CloudApi {
             .await
     }
 
+    /// `GET /share/usage`（账号鉴权）：额度与贡献。
+    pub async fn share_usage<R: serde::de::DeserializeOwned>(&self) -> Result<R, CloudError> {
+        self.authed_as(Method::GET, "/api/v1/share/usage", None::<&Value>)
+            .await
+    }
+
     /// `GET /share/keys`（公开）：离线验票公钥。
     pub async fn share_keys<R: serde::de::DeserializeOwned>(&self) -> Result<R, CloudError> {
         self.client
@@ -597,12 +603,6 @@ impl CloudApi {
             Some(&serde_json::json!({ "endpointId": endpoint_id })),
         )
         .await
-    }
-
-    /// `DELETE /share/endpoint`：注销本设备 endpoint。
-    pub async fn share_unregister_endpoint(&self) -> Result<Value, CloudError> {
-        self.authed(Method::DELETE, "/api/v1/share/endpoint", None::<&Value>)
-            .await
     }
 
     /// `POST /share/guest-session`（公开）：未登录发送方凭 endpoint 私钥签名换游客令牌。
@@ -685,6 +685,29 @@ impl CloudApi {
             Method::POST,
             &format!("/api/v1/share/shares/{}/resume", encode(id)),
             None::<&Value>,
+            guest_token,
+        )
+        .await
+    }
+
+    /// `POST /share/report`（公开）：接收方以 endpoint 签名举报已领取的分享。
+    pub async fn share_report<P: Serialize>(&self, body: &P) -> Result<Value, CloudError> {
+        self.client
+            .public(Method::POST, "/api/v1/share/report", Some(body))
+            .await
+    }
+
+    /// `POST /share/shares/{id}/appeal`：所有者对已下架的分享申诉。
+    pub async fn share_appeal<P: Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        id: &str,
+        body: &P,
+        guest_token: Option<&str>,
+    ) -> Result<R, CloudError> {
+        self.share_owner_call(
+            Method::POST,
+            &format!("/api/v1/share/shares/{}/appeal", encode(id)),
+            Some(body),
             guest_token,
         )
         .await

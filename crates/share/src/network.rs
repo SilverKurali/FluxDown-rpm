@@ -1,7 +1,7 @@
-//! 管理页「网络诊断」页签：端点与 NAT / 中继 / 公网地址、各中继延迟、传输会话（可展开路径与事件时间线）、
+//! 设置 › FluxMesh › 「网络诊断」页签：端点与 NAT / 中继 / 公网地址、各中继延迟、传输会话（可展开路径与事件时间线）、
 //! 完整 iroh 指标表、iroh 日志查看器与原始快照 JSON。
 //!
-//! 空闲静默：只在页签实际渲染（可见）时取数。hub 变化与定时器只会把 `dirty` 置位并通知，真正的取数由
+//! 空闲静默：只在视图实际渲染（可见）时取数。hub 变化与定时器只会把 `dirty` 置位并通知，真正的取数由
 //! 渲染发起，页面被隐藏（不渲染）期间不会有任何请求；隐藏后再显示若数据已陈旧也会补取一次。
 
 use std::{ops::Range, time::Instant};
@@ -53,6 +53,7 @@ use crate::{
         refresh::{Debounce, GateAction, VisibleRefresh},
         status::NetHealth,
     },
+    nested_scroll::NestedScroll,
     session_view::{path_tone, session_detail},
 };
 
@@ -64,8 +65,8 @@ const LOG_DEBOUNCE_MS: u64 = 400;
 const METRIC_ROWS_VISIBLE: usize = 12;
 const LOG_ROWS_VISIBLE: usize = 14;
 const JSON_ROWS_VISIBLE: usize = 16;
-/// 日志行各列宽（默认字号下的 px）。
-const LOG_TIME_WIDTH: f32 = 84.;
+/// 日志行各列宽（默认字号下的 px）。时间列放得下 `HH:MM:SS.mmm` 12 个等宽字符且留余量。
+const LOG_TIME_WIDTH: f32 = 100.;
 const LOG_LEVEL_WIDTH: f32 = 44.;
 const LOG_TARGET_WIDTH: f32 = 180.;
 /// 过滤输入框宽度（默认字号下的 px）。
@@ -99,7 +100,8 @@ struct LogsState {
     request: u64,
 }
 
-pub(crate) struct NetworkTab {
+/// 网络诊断视图：自管纵向滚动，放进设置页 fill_height 的 Tab。
+pub struct ShareNetworkView {
     hub: Entity<ShareHub>,
     translator: Entity<Translator>,
     epoch: Instant,
@@ -115,13 +117,19 @@ pub(crate) struct NetworkTab {
     metrics_placeholder: SharedString,
     sessions: SessionExpansion,
     logs: LogsState,
+    /// 页内三个定高列表各自的滚动位置与滚轮手势归属（与页面滚动链式衔接）。
+    metrics_scroll: NestedScroll,
+    logs_scroll: NestedScroll,
+    snapshot_scroll: NestedScroll,
 }
 
-impl NetworkTab {
-    pub(crate) fn new(hub: Entity<ShareHub>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+impl ShareNetworkView {
+    /// 创建网络诊断视图；观察 hub 并吸收 [`ShareHub::request_diagnostics`] 的定位请求（含创建前已挂起的）。
+    pub fn new(hub: Entity<ShareHub>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let translator = hub.read(cx).translator().clone();
         let level = hub.read(cx).state().local_config.iroh_log_level;
         cx.observe(&hub, |this, _, cx| {
+            this.absorb_request(cx);
             this.refresh.mark_dirty();
             cx.notify();
         })
@@ -148,7 +156,7 @@ impl NetworkTab {
         })
         .detach();
 
-        Self {
+        let mut view = Self {
             hub,
             translator,
             epoch: Instant::now(),
@@ -172,15 +180,28 @@ impl NetworkTab {
                 debounce: Debounce::default(),
                 request: 0,
             },
-        }
+            metrics_scroll: NestedScroll::new(),
+            logs_scroll: NestedScroll::new(),
+            snapshot_scroll: NestedScroll::new(),
+        };
+        // 视图创建前就已挂起的诊断请求（app 先请求再创建设置页）。
+        view.absorb_request(cx);
+        view
     }
 
     fn now_ms(&self) -> u64 {
         u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// 管理页收到「定位到某会话」请求：聚焦并展开该会话，并刷新数据。
-    pub(crate) fn focus_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    /// 吸收 hub 上挂起的诊断请求：带会话 ID 则聚焦并展开该会话，并刷新数据。
+    fn absorb_request(&mut self, cx: &mut Context<Self>) {
+        let request = self.hub.update(cx, |hub, _| hub.take_diagnostics_request());
+        if let Some(Some(session_id)) = request {
+            self.focus_session(&session_id, cx);
+        }
+    }
+
+    fn focus_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
         self.sessions.focus(session_id);
         self.refresh.mark_dirty();
         cx.notify();
@@ -398,7 +419,7 @@ fn level_color(level: ShareLogLevel, cx: &App) -> Hsla {
     }
 }
 
-impl Render for NetworkTab {
+impl Render for ShareNetworkView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_placeholders(window, cx);
         self.refresh_if_needed(cx);
@@ -459,7 +480,7 @@ impl Render for NetworkTab {
     }
 }
 
-impl NetworkTab {
+impl ShareNetworkView {
     fn refresh_button(&self, stale: bool, cx: &mut Context<Self>) -> AnyElement {
         let label = text(self.translator.read(cx), "shareNetRefresh");
         let icon = Icon::new(FluxIcon::RotateCw).size(active_theme(cx).extended().icon.md);
@@ -1023,7 +1044,8 @@ impl NetworkTab {
                                 .child(text(translator, "shareNetMetricValue")),
                         ),
                 )
-                .child(
+                .child(self.metrics_scroll.area(
+                    "share-net-metrics-area",
                     uniform_list(
                         "share-net-metrics",
                         shown,
@@ -1055,10 +1077,9 @@ impl NetworkTab {
                                 })
                                 .collect::<Vec<_>>()
                         }),
-                    )
-                    .w_full()
-                    .h(list_height(shown, METRIC_ROWS_VISIBLE, cx)),
-                )
+                    ),
+                    list_height(shown, METRIC_ROWS_VISIBLE, cx),
+                ))
         };
         self.section(header, body, cx)
     }
@@ -1173,7 +1194,8 @@ impl NetworkTab {
             .child(if count == 0 {
                 v_flex().child(meta_text(cx).child(text(translator, "shareLogsEmpty")))
             } else {
-                v_flex().w_full().child(
+                v_flex().w_full().child(self.logs_scroll.area(
+                    "share-net-logs-area",
                     uniform_list(
                         "share-net-logs",
                         count,
@@ -1202,6 +1224,8 @@ impl NetworkTab {
                                             mono_text(cx)
                                                 .w(theme.text_extent(LOG_TIME_WIDTH))
                                                 .flex_none()
+                                                .whitespace_nowrap()
+                                                .font_features(tabular_numbers())
                                                 .text_color(theme.extended().colors.text_tertiary)
                                                 .child(row.time.clone()),
                                         )
@@ -1209,6 +1233,7 @@ impl NetworkTab {
                                             mono_text(cx)
                                                 .w(theme.text_extent(LOG_LEVEL_WIDTH))
                                                 .flex_none()
+                                                .whitespace_nowrap()
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(level_color(row.level, cx))
                                                 .child(log_level_tag(row.level)),
@@ -1231,10 +1256,9 @@ impl NetworkTab {
                                 })
                                 .collect::<Vec<_>>()
                         }),
-                    )
-                    .w_full()
-                    .h(list_height(count, LOG_ROWS_VISIBLE, cx)),
-                )
+                    ),
+                    list_height(count, LOG_ROWS_VISIBLE, cx),
+                ))
             });
         self.section(header, body, cx)
     }
@@ -1263,7 +1287,8 @@ impl NetworkTab {
             .rounded(theme.tokens().radius.md)
             .bg(theme.tokens().colors.muted)
             .px(theme.tokens().spacing.sm)
-            .child(
+            .child(self.snapshot_scroll.area(
+                "share-net-snapshot-area",
                 uniform_list(
                     "share-net-snapshot",
                     lines,
@@ -1281,10 +1306,9 @@ impl NetworkTab {
                             })
                             .collect::<Vec<_>>()
                     }),
-                )
-                .w_full()
-                .h(list_height(lines, JSON_ROWS_VISIBLE, cx)),
-            );
+                ),
+                list_height(lines, JSON_ROWS_VISIBLE, cx),
+            ));
         self.section(header, body, cx)
     }
 }

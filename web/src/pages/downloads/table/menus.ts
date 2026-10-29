@@ -20,6 +20,7 @@ import {
   RotateCw,
   Rows3,
   Share2,
+  Square,
   ShieldCheck,
   Trash2,
   Zap,
@@ -59,13 +60,13 @@ import {
   verifyTaskIntegrity,
 } from '../model/actions'
 import { remoteCan } from '../model/batchPlan'
-import { canChangeSegments, canChangeUrl, canVerifyIntegrity } from '../model/taskEdit'
+import { canChangeSegments, canChangeUrl, canRename, canVerifyIntegrity } from '../model/taskEdit'
 import { canPause, canResumeSeeding } from '../model/task'
 import type { DownloadTaskView } from '../model/task'
 import { anyActive, anyResumable } from '../model/groupTree'
 import type { GroupCounts } from '../model/groupTree'
 import { openChangeSegments, openChangeUrl, openGroupDetail, openRename } from '../dialogs'
-import { openSharePanel, peekSendState } from '../../share'
+import { openSharePanel, peekSendState, peekShareTaskFacts, providingRecordId, stopProviding } from '../../share'
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
@@ -190,7 +191,12 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail, selecti
       onSelect: () => openSharePanel(views.map((view) => view.taskId)),
     })
   }
-  if (only && only.source === 'local') {
+  // 停止共享：单选且该接收任务的记录仍在共享（含已完成回传中的任务）。
+  const providingId = only ? providingRecordId(peekShareTaskFacts(only.taskId)) : null
+  if (providingId) {
+    entries.push({ type: 'item', key: 'stop-providing', label: t('shareStopProviding'), icon: Square, onSelect: () => void stopProviding(providingId, t) })
+  }
+  if (only && canRename(only)) {
     entries.push({ type: 'item', key: 'rename', label: t('renameTask'), icon: Pen, onSelect: () => openRename(only.taskId) })
   }
   if (only && canChangeUrl(only)) {

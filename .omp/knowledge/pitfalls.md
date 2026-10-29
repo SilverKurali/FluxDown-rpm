@@ -21,6 +21,7 @@
 - **rename 前的 `sync_all` 必须在可写句柄上做，且重做只在多段路径**：Windows 的 `FlushFileBuffers` 要求写权限，只读句柄返回 `ERROR_ACCESS_DENIED`，下载会在 100% 后、rename 前失败；单流路径已 flush + `sync_data` 同一写句柄，再 reopen 只是重复整盘刷写 → `native/engine/src/downloader.rs::run_download_inner`（「F034」注释段）。
 - **凭据刷新上限只计「连续无效换发」，不计累计次数**：多连接共用每请求一次性令牌时，「每次运行最多 5 次」很快耗尽，任务以 403 失败。各请求点成功后 `DownloadSpec::confirm` 记录身份可用；插件看到的 `refreshCount` 仍是累计值 → `native/engine/src/intercept/refresh.rs::MAX_UNCONFIRMED_REFRESHES`、`native/engine/src/downloader.rs`（`ledger.unconfirmed`）。
 - **带子目录的文件名必须在落库前并入 `save_dir`**：下载器只把 `file_name` 当单个组件清洗（防穿越），否则子目录被压平成 `子目录_文件名`（#716）；BT 名字另有语义不拆 → `native/engine/src/download_manager.rs`（`is_bt` / `has_subdir` 分支）。
+- **用户重命名的新名必须是 `naming::sanitize_filename` 的不动点**：HTTP / FTP / HLS / DASH / eD2K 续传都按清洗后的名字重建 `<名>.fdownloading`，`a:b.iso`、`CON.txt`、以点结尾、超 200 字节这类名字改名后续传找不到临时文件，进度归零并遗留孤儿临时文件；BT 一律拒绝改名（落盘名由完成布局 + `bt_custom_name` 决定，四端菜单按 `can_rename` 隐藏） → `native/engine/src/download_manager.rs::rename_task`、回归 `rename_task_rejects_conflict_active_bt_and_invalid`；客户端门控 `crates/downloads/src/components/task_table.rs::TaskMenuFacts::can_rename` ↔ `web/src/pages/downloads/model/taskEdit.ts::canRename`。
 - **HLS 小响应拉取不得在共享 client 上设全局 timeout，播放列表首行带 BOM 要先剥**：全局 timeout 会误伤普通 HTTP 长下载；`m3u8_rs` 要求首行就是 `#EXTM3U` → `native/engine/src/hls_downloader.rs::fetch_small` / `trim_playlist_prefix`。
 - **下载结束到完成帧之间有长收尾（remux / mux / 插件后处理）的协议，必须在收尾前发一帧「总量 = 已落盘」且能越过 manager 节流的帧**：manager 对状态 1 帧按 `MIN_DART_INTERVAL_MS`（500ms）节流，被吞的帧不会补发；HLS 写完最后一段的帧常落在节流窗口内，ffmpeg 转封装期间界面一直停在 9x%。携带非空 `file_name` 的帧必定转发；进度估值另须保证「有未落盘段 < 100%、全部落盘 = 100%」→ `native/engine/src/hls_downloader.rs::run_hls_download_inner`（「全部分段已落盘」注释段）、`hls_downloader/size_estimate.rs`、回归 `vod_progress_estimates_total_and_converges_to_actual_bytes`。
 - **订阅源正文无有效 tracker 必须算该源失败**：HTML 错误页或空页若当「成功 + 空列表」，会覆盖宿主缓存并在刷新间隔内丢光订阅 tracker → `native/engine/src/tracker_subscription.rs::parse_source_body`。
@@ -43,7 +44,7 @@
 
 ## 插件运行时
 
-另见 AGENTS.md §4：rquickjs 分叉补丁与 gpui-kit 同 rev、持有引擎的 actor 必须 drain `resolve_rx` / `plugin_retry_rx`、插件页面脚本只经 `userScripts`。
+另见 AGENTS.md §4：quickjs-jit 与 gpui-shell 同版本、持有引擎的 actor 必须 drain `resolve_rx` / `plugin_retry_rx`、插件页面脚本只经 `userScripts`。
 
 - **QuickJS 抛 `null` 要按异常值识别为 OOM**：内存紧贴上限时 QuickJS 连 `"out of memory"` 错误对象都分配不出，改抛 `null`，字符串匹配的 `reclassify_oom` 认不出，该次 OOM 不计入熔断；必须在仍持有异常值时判定（代价：插件主动 `throw null` 也计 OOM） → `native/engine/src/plugin/quickjs.rs::caught_error`、回归 `null_exception_sentinel_counts_as_memory_limit_exceeded`。
 - **外部工具子进程要补全登录 shell 的 PATH**：macOS 从 Dock / 访达启动只继承 `/usr/bin:/bin:/usr/sbin:/sbin`，yt-dlp 找不到 node / bun，带 Cookie 解析 YouTube 报 "The page needs to be reloaded"；取 PATH 的等待不计入插件脚本墙钟 → `native/engine/src/plugin/tool_path.rs::apply_full_path_env`（`read_login_shell_path` / `merge_path_lists`）。
@@ -56,6 +57,7 @@
 - **插件状态变化必须经 `PluginManager::publish_state` 广播，不能只发 `PluginAutoDisabled`**：熔断曾只发 `PluginAutoDisabled`，GPUI 贡献点（任务右键命令 / 详情页签 / 活动页）只认 `PluginsChanged` 而一直残留；插件 `flux.settings.update`、站点默认写入也曾无事件，两端显示旧值。新写入点一律在结束时调 `publish_state`，daemon handler 不再自己发 → `native/engine/src/plugin/manager.rs::publish_state`、回归 `circuit_breaker_trip_publishes_disabled_state_before_notice` / `host_settings_update_publishes_new_values`。
 - **二段解析任务绝不能以原始链接起跑**：组成员 / 插件订阅条目的 `url` 是分享页，绑定被清空（卸载、旧版 fail-closed 行、忽略插件重试）后起跑会把 HTML 存成文件。起跑 / 恢复 / 解析回流都要先重绑、无插件即 fail-closed，`ignoreRetry` 对其拒绝 → `native/engine/src/download_manager.rs::{rebind_second_stage,fail_second_stage_unavailable}`、回归 `native/engine/tests/engine/plugin_state_freshness.rs`。
 - **预解析与建组必须用同一个插件**：成员任务曾在建组时按 `route_resolver` 重选（含非 multi 插件、字母序取首个），与预解析用的 `match_multi_resolver` 不一致就把 `resolverItem` 交给别的插件。客户端回传 `ResolvePreviewResponse.pluginId` → `CreateGroupRequest.resolverPluginId`（GPUI / Web / iOS） → `download_manager.rs::plugin_bind_resolver`。
+- **插件解析出的媒体直链常绑定解析时的出口 IP（googlevideo `ip=`、网盘签名链接），下载必须走同一出口**：Auto 下解析曾恒直连、下载却按先验 / 多路径 / 换路走代理，换路重试时还先重新解析（仍直连）再强制走代理，结果 403 且 403 不触发换路；站点规则又只按媒体链接匹配，`youtube.com` 规则管不到 googlevideo。现在解析按源链接制定出口计划并在 Auto 断网时换路重跑，下载以源链接定出口、Auto 下单路径钉在解析所用路径、禁用多网卡；Auto 换路判据来自 bridge 的类型化观测（被墙时多为墙钟超时而非插件抛错文案）→ `native/engine/src/plugin/call_egress.rs`、`native/engine/src/plugin/manager.rs::run_planned`、`native/engine/src/download_manager.rs::{resolve_egress_plan,absorb_resolve_egress,take_start_route}`，回归 `native/engine/tests/engine/plugin_resolve_egress.rs`。
 
 ## daemon / agent 本机服务
 
@@ -86,6 +88,7 @@
 - **进度 / 完成窗口里「打开文件 / 文件夹」不等打开命令返回**：Windows 上它要等系统打开调用返回，可能比对方出现在前台还晚，窗口该关而不关；会关窗时点击即请宿主等对方接管前台 → `crates/downloads/src/pages/progress_window.rs::hand_off`。
 - **Windows / Linux 标题栏菜单（gpui-component `AppMenuBar`）以「打开菜单时的焦点」为派发目标**：焦点为空（启动后未点列表）、在标题栏搜索框或不在下载页时，挂在下载页元素上的动作只沿标题栏冒泡、点了无效，且菜单项从不置灰；下载页动作须有应用级兜底（切到下载页、聚焦后派发；焦点已在下载页内视为下载页主动让出，不接管）。兜底里 `update` 窗口必须用 `AnyWindowHandle`，`WindowHandle<V>` 会租借根视图，冒泡到根视图监听器即 panic → `crates/app/src/menus.rs::dispatch_in_downloads`。
 - **GPUI 剪贴板写不了文件**：`ClipboardEntry::ExternalPaths` 在 gpui-fast 三个平台的写入路径都是空操作（macOS `pasteboard.rs::write`、Windows `clipboard.rs::write_to_clipboard`、Linux 只 `set_text`），`cx.write_to_clipboard` 不报错但剪贴板没有文件；「复制文件」改由常驻 agent 经 arboard `Set::file_list` 写入（Linux X11 内容归写入进程，实例须常驻）→ `native/agent/src/platform/clipboard_files.rs`、入口 `crates/downloads/src/pages/task_copy.rs`。
+- **`overflow_y_scrollbar` 页面里的定高 `uniform_list`：收不到滚轮，或滚到边后把页面「卡住」**：gpui-kit `Scrollable` 内的 `ScrollBounce` 在子树之前的捕获监听里认领指针下的滚轮、在子树之后的捕获监听里滚动并 `stop_propagation`，裸 `uniform_list` 只在冒泡阶段滚动，于是列表纹丝不动；而给列表再包一层 `gpui_base::ScrollBounce` 又走另一个极端——它按平台惯例让最内层独占整个手势、到边也不交还，列表滚到顶后指针停在列表上就再也滚不动页面。内嵌列表改用 `NestedScroll::area`：自己在两次页面监听之间注册捕获监听，按手势锁定归属（手势开始时列表还能朝该方向滚 → 整次手势归列表并截停；已在边上 / 不溢出 → 不动作交给页面；停顿 ≥250ms 或触控板 `Started` 重新判定）→ `crates/share/src/nested_scroll.rs`（使用方 `network.rs` 指标表 / 日志 / 原始快照）。
 
 ## Web SPA
 
