@@ -333,8 +333,10 @@ export interface BtTrackerDto {
   status: BtTrackerStatus;
   /** 最近一次成功 announce 返回的 peer 数；未知缺省。 */
   peers?: number;
-  /** 失败原因等；正常为空。 */
+  /** 失败原因的简短归类（如 `Timed out`）；正常为空。 */
   message?: string;
+  /** 失败的原始错误文本（供复制）；正常为空。 */
+  detail?: string;
   /** 最近一次成功的 unix 秒；0 / 缺省 = 从未。 */
   lastOkAt?: number;
   /** 下次 announce 的 unix 秒；0 / 缺省 = 未知。 */
