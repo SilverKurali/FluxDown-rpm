@@ -95,6 +95,8 @@ export interface TrackerRow {
   status: BtTrackerStatus
   peers: number | null
   message: string
+  /** 原始错误文本；服务端未给时回退到 message。 */
+  detail: string
   lastOkAt: number
   nextAnnounceAt: number
 }
@@ -111,10 +113,76 @@ export function mapTrackerRows(trackers: readonly BtTrackerDto[]): TrackerRow[] 
       status: tr.status,
       peers: typeof tr.peers === 'number' ? tr.peers : null,
       message: (tr.message ?? '').trim(),
+      detail: (tr.detail ?? tr.message ?? '').trim(),
       lastOkAt: tr.lastOkAt ?? 0,
       nextAnnounceAt: tr.nextAnnounceAt ?? 0,
     }
   })
+}
+
+// ── Tracker 筛选 / 排序 ──
+// 与 crates/downloads/src/model/bt_trackers.rs 对齐，共用夹具 crates/downloads/tests/fixtures/bt_tracker_view_cases.json。
+
+export type TrackerFilter = 'all' | 'working' | 'updating' | 'notWorking' | 'notContacted'
+
+export const TRACKER_FILTERS: readonly TrackerFilter[] = ['all', 'working', 'updating', 'notWorking', 'notContacted']
+
+export type TrackerSortKey = 'url' | 'status' | 'peers' | 'nextAnnounce' | 'lastOk'
+
+/** `null` = 服务端顺序。 */
+export type TrackerSort = { key: TrackerSortKey; desc: boolean } | null
+
+export type TrackerCounts = Record<TrackerFilter, number>
+
+export function trackerCounts(rows: readonly Pick<TrackerRow, 'status'>[]): TrackerCounts {
+  const counts: TrackerCounts = { all: rows.length, working: 0, updating: 0, notWorking: 0, notContacted: 0 }
+  for (const row of rows) {
+    if (row.status === 'working' || row.status === 'updating' || row.status === 'notWorking' || row.status === 'notContacted') counts[row.status] += 1
+  }
+  return counts
+}
+
+/** 升序：先看失败。 */
+const STATUS_RANK: Record<BtTrackerStatus, number> = { notWorking: 0, updating: 1, working: 2, notContacted: 3, unknown: 4 }
+
+/** 排序值；`null` = 缺省（无论升降序都排最后）。lastOk 取负使「最近」在升序最前。 */
+function sortValue(row: TrackerRow, key: TrackerSortKey): number | string | null {
+  switch (key) {
+    case 'url':
+      return row.url.toLowerCase()
+    case 'status':
+      return STATUS_RANK[row.status] ?? STATUS_RANK.unknown
+    case 'peers':
+      return row.peers
+    case 'nextAnnounce':
+      return row.nextAnnounceAt === 0 ? null : row.nextAnnounceAt
+    case 'lastOk':
+      return row.lastOkAt === 0 ? null : -row.lastOkAt
+  }
+}
+
+/** 过滤 + 稳定排序，返回 `rows` 下标。 */
+export function trackerView(rows: readonly TrackerRow[], filter: TrackerFilter, sort: TrackerSort): number[] {
+  const indices: number[] = []
+  rows.forEach((row, index) => {
+    if (filter === 'all' || row.status === filter) indices.push(index)
+  })
+  if (sort === null) return indices
+  const { key, desc } = sort
+  const values = rows.map((row) => sortValue(row, key))
+  return indices.sort((a, b) => {
+    const va = values[a] ?? null
+    const vb = values[b] ?? null
+    if (va === null || vb === null) return va === vb ? a - b : va === null ? 1 : -1
+    const cmp = va < vb ? -1 : va > vb ? 1 : 0
+    return cmp === 0 ? a - b : desc ? -cmp : cmp
+  })
+}
+
+/** 表头点击三态：未排序 → 升序 → 降序 → 未排序；换列从升序开始。 */
+export function nextTrackerSort(current: TrackerSort, key: TrackerSortKey): TrackerSort {
+  if (current === null || current.key !== key) return { key, desc: false }
+  return current.desc ? null : { key, desc: true }
 }
 
 /** 中间省略：头部由 CSS 截断，尾部固定显示（保留域名后的路径末段 / 端口）。 */

@@ -18,12 +18,14 @@ use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Div, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement, Pixels, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, canvas, div, prelude::FluentBuilder as _, px,
+    IntoElement, ListAlignment, ListSizingBehavior, ListState, ParentElement, Pixels, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, canvas, div, list,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, h_flex,
+    Icon, WindowExt as _, h_flex,
     menu::{ContextMenuExt as _, PopupMenuItem},
+    notification::Notification,
     skeleton::Skeleton,
     v_flex,
 };
@@ -32,6 +34,9 @@ use super::{DetailTab, TaskDetailView, rate_text};
 use crate::{
     controller::{DownloadsCommand, DownloadsResult, PortFuture},
     flags::flag_slot,
+    model::bt_trackers::{
+        TrackerCounts, TrackerFilter, TrackerSort, TrackerSortKey, next_sort, tracker_view,
+    },
     model::{RowKey, TaskState, format_bytes},
 };
 
@@ -48,6 +53,10 @@ const WIDE_MIN_WIDTH: f32 = 800.;
 const MEDIUM_MIN_WIDTH: f32 = 520.;
 /// 用 `—` 表示未知 / 无。
 const DASH: &str = "—";
+/// tracker 虚拟列表视口外预渲染高度（px）。
+const TRACKER_LIST_OVERDRAW: f32 = 240.;
+/// 未量过的 tracker 行高估值（px），用于首帧总高与滚动条。
+const TRACKER_ROW_HINT: f32 = 32.;
 
 // 列宽（界面缩放前的 px）。
 const COL_STATUS: f32 = 128.;
@@ -165,6 +174,8 @@ pub(super) struct TrackerRow {
     pub(super) status: BtTrackerStatus,
     pub(super) peers: Option<u64>,
     pub(super) message: String,
+    /// 原始错误文本（供复制）；服务端未给时回退到 `message`。
+    pub(super) detail: String,
     pub(super) next: RelativeTime,
     pub(super) last: RelativeTime,
 }
@@ -181,6 +192,15 @@ pub(super) fn tracker_row(dto: &BtTrackerDto, now: i64) -> TrackerRow {
         status: dto.status,
         peers: dto.peers,
         message: dto.message.trim().to_owned(),
+        detail: {
+            let detail = dto.detail.trim();
+            if detail.is_empty() {
+                dto.message.trim()
+            } else {
+                detail
+            }
+            .to_owned()
+        },
         next: if reporting {
             next_announce(dto.next_announce_at, now)
         } else {
@@ -248,7 +268,6 @@ fn status_key(status: BtTrackerStatus) -> &'static str {
 }
 
 /// 页签的轮询状态与最近一次成功数据（随任务切换整体重置）。
-#[derive(Default)]
 pub(super) struct BtLive {
     status: Option<fluxdown_protocol::BtStatusDto>,
     /// 最近一次请求失败：保留旧数据，只在页内显示一行提示。
@@ -260,6 +279,33 @@ pub(super) struct BtLive {
     last_render: Option<Instant>,
     /// 内容区宽度（实际 px），由 canvas 量得。
     width: Rc<Cell<f32>>,
+    /// Tracker 页筛选 / 排序（视图偏好，切换任务保留）。
+    tracker_filter: TrackerFilter,
+    tracker_sort: Option<TrackerSort>,
+    /// 筛选 + 排序后要显示的 `status.trackers` 下标。
+    tracker_view: Vec<usize>,
+    /// tracker 行虚拟列表（行高随消息行可变）。
+    tracker_list: ListState,
+    /// 上次渲染的布局档；变化时行高需重量。
+    tracker_layout: Cell<Option<BtLayout>>,
+}
+
+impl Default for BtLive {
+    fn default() -> Self {
+        Self {
+            status: None,
+            failed: false,
+            polling: false,
+            generation: 0,
+            last_render: None,
+            width: Rc::default(),
+            tracker_filter: TrackerFilter::default(),
+            tracker_sort: None,
+            tracker_view: Vec::new(),
+            tracker_list: ListState::new(0, ListAlignment::Top, px(TRACKER_LIST_OVERDRAW)),
+            tracker_layout: Cell::new(None),
+        }
+    }
 }
 
 impl BtLive {
@@ -270,6 +316,22 @@ impl BtLive {
         self.polling = false;
         self.generation = self.generation.wrapping_add(1);
         self.last_render = None;
+        self.tracker_view.clear();
+        self.tracker_list.reset(0);
+    }
+
+    /// 数据 / 筛选 / 排序变化后重算可见行；行数不变时只重量行高（保留滚动位置）。
+    fn refresh_tracker_view(&mut self) {
+        let view = self.status.as_ref().map_or_else(Vec::new, |status| {
+            tracker_view(&status.trackers, self.tracker_filter, self.tracker_sort)
+        });
+        if view.len() == self.tracker_list.item_count() {
+            self.tracker_list.remeasure();
+        } else {
+            self.tracker_list
+                .reset_with_uniform_height(view.len(), px(TRACKER_ROW_HINT));
+        }
+        self.tracker_view = view;
     }
 }
 
@@ -367,15 +429,74 @@ struct TrackerCells {
     url: SharedString,
     is_dht: bool,
     source_label: Option<SharedString>,
+    /// 来源说明（徽标 / URL 悬停提示）。
+    source_hint: Option<SharedString>,
     peers: Option<SharedString>,
     message: SharedString,
+    /// 原始错误文本；空 = 无可复制错误。
+    detail: SharedString,
     next: SharedString,
     last: SharedString,
     /// 窄布局元信息行的标签。
-    meta_peers: SharedString,
-    meta_next: SharedString,
-    meta_last: SharedString,
-    copy_label: SharedString,
+    meta: TrackerMeta,
+}
+
+/// 窄布局元信息行的列名（Peer 数 / 下次汇报 / 上次成功）。
+#[derive(Clone)]
+struct TrackerMeta {
+    peers: SharedString,
+    next: SharedString,
+    last: SharedString,
+}
+
+/// 虚拟列表逐行渲染共用的取值（每次渲染构造一次，行回调按需借用）。
+struct TrackerItemText {
+    look: Look,
+    copy: TrackerCopyText,
+    meta: TrackerMeta,
+    layout: BtLayout,
+    now: i64,
+}
+
+/// 一个 tracker 的展示格（状态文案、来源说明、相对时间都已本地化）。
+fn tracker_cells(
+    dto: &BtTrackerDto,
+    look: &Look,
+    translator: &Translator,
+    now: i64,
+    meta: &TrackerMeta,
+) -> TrackerCells {
+    let t = |key: &str| SharedString::from(translator.text(key).to_owned());
+    let row = tracker_row(dto, now);
+    let (source_label, source_hint) = match row.source {
+        BtTrackerSource::Torrent => ("btTrackerSourceTorrent", "btTrackerSourceTorrentHint"),
+        BtTrackerSource::Session => ("btTrackerSourceSession", "btTrackerSourceSessionHint"),
+    };
+    TrackerCells {
+        dot: look.status_color(row.status),
+        label_color: look.status_text_color(row.status),
+        status_label: t(status_key(row.status)),
+        url: SharedString::from(row.url),
+        is_dht: false,
+        source_label: Some(t(source_label)),
+        source_hint: Some(t(source_hint)),
+        peers: row.peers.map(|count| SharedString::from(count.to_string())),
+        message: SharedString::from(row.message),
+        detail: SharedString::from(row.detail),
+        next: SharedString::from(relative_text(translator, row.next)),
+        last: SharedString::from(relative_text(translator, row.last)),
+        meta: meta.clone(),
+    }
+}
+
+/// 所有 tracker 行共用的复制文案。
+struct TrackerCopyText {
+    copy_url: SharedString,
+    copy_error: SharedString,
+    /// 错误消息悬停提示的末行（「点击复制错误信息」）。
+    click_to_copy_error: SharedString,
+    url_copied: SharedString,
+    error_copied: SharedString,
 }
 
 fn dot(look: &Look, color: Hsla) -> Div {
@@ -422,7 +543,7 @@ fn header_cell(look: &Look, label: SharedString, width: Option<f32>, right: bool
         .child(label)
 }
 
-fn header_row(look: &Look, cells: Vec<Div>) -> Div {
+fn header_row<E: IntoElement>(look: &Look, cells: Vec<E>) -> Div {
     h_flex()
         .items_center()
         .gap(look.sm)
@@ -547,7 +668,7 @@ fn ellipsis_cell(
     id: (&'static str, usize),
     text: SharedString,
     tip: Option<SharedString>,
-) -> impl IntoElement {
+) -> gpui::Stateful<Div> {
     div()
         .id(id)
         .flex_1()
@@ -561,36 +682,122 @@ fn ellipsis_cell(
         .child(text)
 }
 
-fn copy_menu(
-    row: gpui::Stateful<Div>,
+/// 一个「复制」菜单项：文案、复制内容、复制后的成功提示（`None` = 不提示）。
+#[derive(Clone)]
+struct CopyItem {
     label: SharedString,
-    value: Option<SharedString>,
-) -> AnyElement {
-    let Some(value) = value else {
+    value: SharedString,
+    done: Option<SharedString>,
+}
+
+fn copy_to_clipboard(
+    value: &SharedString,
+    done: Option<&SharedString>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
+    if let Some(done) = done {
+        window.push_notification(Notification::success(done.clone()), cx);
+    }
+}
+
+/// 右键菜单：逐项复制。
+fn copy_menu(row: gpui::Stateful<Div>, items: Vec<CopyItem>) -> AnyElement {
+    if items.is_empty() {
         return row.into_any_element();
-    };
+    }
     row.context_menu(move |menu, _window, _cx| {
-        let value = value.clone();
-        menu.item(
-            PopupMenuItem::new(label.clone())
-                .icon(FluxIcon::Copy)
-                .on_click(move |_, _window, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
-                }),
-        )
+        items.iter().fold(menu, |menu, item| {
+            let item = item.clone();
+            menu.item(
+                PopupMenuItem::new(item.label.clone())
+                    .icon(FluxIcon::Copy)
+                    .on_click(move |_, window, cx| {
+                        copy_to_clipboard(&item.value, item.done.as_ref(), window, cx);
+                    }),
+            )
+        })
     })
     .into_any_element()
 }
 
+/// 表头点击排序回调（参数为被点的列）。
+type SortHandler = Rc<dyn Fn(&TrackerSortKey, &mut Window, &mut App)>;
+
+/// 可排序表头格：标签后缀当前方向箭头，点击按 [`next_sort`] 三态切换。
+fn sort_cell(
+    look: &Look,
+    label: &SharedString,
+    width: Option<f32>,
+    right: bool,
+    key: TrackerSortKey,
+    header: &TrackerHeaderText,
+) -> AnyElement {
+    let arrow = match header.sort {
+        Some(sort) if sort.key == key && sort.desc => " ↓",
+        Some(sort) if sort.key == key => " ↑",
+        _ => "",
+    };
+    let active = !arrow.is_empty();
+    let text = if active {
+        SharedString::from(format!("{label}{arrow}"))
+    } else {
+        label.clone()
+    };
+    let hint = header.sort_hint.clone();
+    let on_sort = Rc::clone(&header.on_sort);
+    header_cell(look, text, width, right)
+        .id(("bt-tracker-sort", key as usize))
+        .cursor_pointer()
+        .when(active, |this| this.text_color(look.fg))
+        .hover({
+            let fg = look.fg;
+            move |style| style.text_color(fg)
+        })
+        .tooltip(move |window, cx| tooltip_view(hint.clone(), window, cx))
+        .on_click(move |_, window, cx| on_sort(&key, window, cx))
+        .into_any_element()
+}
+
 fn tracker_header(look: &Look, layout: BtLayout, text: &TrackerHeaderText) -> Option<Div> {
-    let status = header_cell(look, text.status.clone(), Some(COL_STATUS), false);
-    let url = header_cell(look, text.url.clone(), None, false);
-    let peers = header_cell(look, text.peers.clone(), Some(COL_PEERS), true);
-    let next = header_cell(look, text.next.clone(), Some(COL_TIME), false);
-    let last = header_cell(look, text.last.clone(), Some(COL_TIME), false);
+    let status = sort_cell(
+        look,
+        &text.status,
+        Some(COL_STATUS),
+        false,
+        TrackerSortKey::Status,
+        text,
+    );
+    let url = sort_cell(look, &text.url, None, false, TrackerSortKey::Url, text);
+    let peers = sort_cell(
+        look,
+        &text.peers,
+        Some(COL_PEERS),
+        true,
+        TrackerSortKey::Peers,
+        text,
+    );
+    let next = sort_cell(
+        look,
+        &text.next,
+        Some(COL_TIME),
+        false,
+        TrackerSortKey::NextAnnounce,
+        text,
+    );
+    let last = sort_cell(
+        look,
+        &text.last,
+        Some(COL_TIME),
+        false,
+        TrackerSortKey::LastOk,
+        text,
+    );
     match layout {
         BtLayout::Wide => {
-            let message = header_cell(look, text.message.clone(), Some(COL_MESSAGE), false);
+            let message = header_cell(look, text.message.clone(), Some(COL_MESSAGE), false)
+                .into_any_element();
             Some(header_row(
                 look,
                 vec![status, url, peers, message, next, last],
@@ -608,11 +815,15 @@ struct TrackerHeaderText {
     message: SharedString,
     next: SharedString,
     last: SharedString,
+    sort: Option<TrackerSort>,
+    sort_hint: SharedString,
+    on_sort: SortHandler,
 }
 
 fn tracker_row_el(
     index: usize,
     cells: &TrackerCells,
+    copy: &TrackerCopyText,
     look: &Look,
     layout: BtLayout,
     last: bool,
@@ -629,7 +840,12 @@ fn tracker_row_el(
                 .text_color(cells.label_color)
                 .child(cells.status_label.clone()),
         );
-    let url_tip = (!cells.is_dht).then(|| cells.url.clone());
+    // 悬停 URL：完整地址 + 来源说明（中布局不放来源徽标，说明只在这里）。
+    let url_tip = (!cells.is_dht).then(|| match &cells.source_hint {
+        Some(hint) => SharedString::from(format!("{}\n{hint}", cells.url)),
+        None => cells.url.clone(),
+    });
+    let show_chip = layout != BtLayout::Medium;
     let url_line = || {
         h_flex()
             .items_center()
@@ -640,13 +856,30 @@ fn tracker_row_el(
                 cells.url.clone(),
                 url_tip.clone(),
             ))
-            .when_some(cells.source_label.clone(), |this, label| {
-                this.child(chip(look, label))
+            .when(show_chip, |this| {
+                this.when_some(cells.source_label.clone(), |this, label| {
+                    let hint = cells.source_hint.clone();
+                    this.child(
+                        chip(look, label)
+                            .id(("bt-tracker-source", index))
+                            .when_some(hint, |this, hint| {
+                                this.tooltip(move |window, cx| {
+                                    tooltip_view(hint.clone(), window, cx)
+                                })
+                            }),
+                    )
+                })
             })
             .when(cells.is_dht, |this| this.font_weight(FontWeight::MEDIUM))
     };
     let message_line = |clamp: usize| {
-        let tip = cells.message.clone();
+        // 悬停显示原始错误并提示可点击；点击一键复制原始错误。
+        let has_detail = !cells.detail.is_empty();
+        let tip = if has_detail {
+            SharedString::from(format!("{}\n{}", cells.detail, copy.click_to_copy_error))
+        } else {
+            cells.message.clone()
+        };
         div()
             .id(("bt-tracker-msg", index))
             .min_w_0()
@@ -655,6 +888,13 @@ fn tracker_row_el(
             .text_size(look.xs_size)
             .line_height(look.xs_line)
             .text_color(look.destructive)
+            .when(has_detail, |this| {
+                let value = cells.detail.clone();
+                let done = copy.error_copied.clone();
+                this.cursor_pointer().on_click(move |_, window, cx| {
+                    copy_to_clipboard(&value, Some(&done), window, cx);
+                })
+            })
             .tooltip(move |window, cx| tooltip_view(tip.clone(), window, cx))
             .child(cells.message.clone())
     };
@@ -719,10 +959,10 @@ fn tracker_row_el(
         BtLayout::Narrow => {
             let mut meta: Vec<String> = Vec::with_capacity(3);
             if let Some(peers) = &cells.peers {
-                meta.push(format!("{}: {peers}", cells.meta_peers));
+                meta.push(format!("{}: {peers}", cells.meta.peers));
             }
-            meta.push(format!("{}: {}", cells.meta_next, cells.next));
-            meta.push(format!("{}: {}", cells.meta_last, cells.last));
+            meta.push(format!("{}: {}", cells.meta.next, cells.next));
+            meta.push(format!("{}: {}", cells.meta.last, cells.last));
             h_flex().items_start().child(
                 v_flex()
                     .flex_1()
@@ -763,8 +1003,22 @@ fn tracker_row_el(
             let hover = look.hover;
             move |style| style.bg(hover)
         });
-    let copy = (!cells.is_dht).then(|| cells.url.clone());
-    copy_menu(row, cells.copy_label.clone(), copy)
+    let mut copies: Vec<CopyItem> = Vec::with_capacity(2);
+    if !cells.is_dht {
+        copies.push(CopyItem {
+            label: copy.copy_url.clone(),
+            value: cells.url.clone(),
+            done: Some(copy.url_copied.clone()),
+        });
+    }
+    if !cells.detail.is_empty() {
+        copies.push(CopyItem {
+            label: copy.copy_error.clone(),
+            value: cells.detail.clone(),
+            done: Some(copy.error_copied.clone()),
+        });
+    }
+    copy_menu(row, copies)
 }
 
 fn peer_header(look: &Look, layout: BtLayout, text: &PeerHeaderText) -> Option<Div> {
@@ -993,7 +1247,14 @@ fn peer_row_el(
             let hover = look.hover;
             move |style| style.bg(hover)
         });
-    copy_menu(row, copy_label.clone(), Some(addr))
+    copy_menu(
+        row,
+        vec![CopyItem {
+            label: copy_label.clone(),
+            value: addr,
+            done: None,
+        }],
+    )
 }
 
 impl TaskDetailView {
@@ -1086,6 +1347,7 @@ impl TaskDetailView {
             Ok(DownloadsResult::BtStatus(status)) => {
                 self.bt.status = Some(status);
                 self.bt.failed = false;
+                self.bt.refresh_tracker_view();
             }
             Ok(_) | Err(_) => self.bt.failed = true,
         }
@@ -1116,14 +1378,21 @@ impl TaskDetailView {
         BtLayout::for_width(width / look.scale.max(0.01))
     }
 
-    /// 页签外框：量宽 canvas + 失败提示行 + 内容。
-    fn bt_frame(&self, content: AnyElement, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+    /// 页签外框：量宽 canvas + 失败提示行 + 内容。`fill` = 撑满页签高度（内容自带虚拟滚动）。
+    fn bt_frame(
+        &self,
+        content: AnyElement,
+        fill: bool,
+        look: &Look,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let entity_id = cx.entity_id();
         let width = Rc::clone(&self.bt.width);
         let scale = look.scale.max(0.01);
         v_flex()
             .relative()
             .w_full()
+            .when(fill, |this| this.h_full().min_h_0())
             .gap(look.sm)
             .child(
                 canvas(
@@ -1152,6 +1421,99 @@ impl TaskDetailView {
             .into_any_element()
     }
 
+    fn set_tracker_filter(&mut self, filter: TrackerFilter, cx: &mut Context<Self>) {
+        if self.bt.tracker_filter == filter {
+            return;
+        }
+        self.bt.tracker_filter = filter;
+        self.bt.refresh_tracker_view();
+        cx.notify();
+    }
+
+    fn set_tracker_sort(&mut self, key: TrackerSortKey, cx: &mut Context<Self>) {
+        self.bt.tracker_sort = next_sort(self.bt.tracker_sort, key);
+        self.bt.refresh_tracker_view();
+        cx.notify();
+    }
+
+    /// 状态筛选标签行：「全部」常显，其余只在有计数或正被选中时出现。
+    fn tracker_filter_bar(
+        &self,
+        look: &Look,
+        counts: &TrackerCounts,
+        translator: &Translator,
+        cx: &Context<Self>,
+    ) -> Div {
+        let active = self.bt.tracker_filter;
+        let chips = TrackerFilter::ALL
+            .into_iter()
+            .filter(|&filter| {
+                filter == TrackerFilter::All || filter == active || counts.get(filter) > 0
+            })
+            .map(|filter| {
+                let key = match filter {
+                    TrackerFilter::All => "btTrackerFilterAll",
+                    TrackerFilter::Working => status_key(BtTrackerStatus::Working),
+                    TrackerFilter::Updating => status_key(BtTrackerStatus::Updating),
+                    TrackerFilter::NotWorking => status_key(BtTrackerStatus::NotWorking),
+                    TrackerFilter::NotContacted => status_key(BtTrackerStatus::NotContacted),
+                };
+                let selected = filter == active;
+                let color = if selected { look.accent } else { look.muted };
+                h_flex()
+                    .id(("bt-tracker-filter", filter as usize))
+                    .flex_none()
+                    .items_center()
+                    .gap(look.xs)
+                    .px(look.sm)
+                    .rounded(look.radius)
+                    .border_1()
+                    .border_color(if selected { look.accent } else { look.hairline })
+                    .text_size(look.xs_size)
+                    .line_height(look.xs_line)
+                    .text_color(color)
+                    .font_features(tabular_numbers())
+                    .cursor_pointer()
+                    .hover({
+                        let hover = look.hover;
+                        move |style| style.bg(hover)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_tracker_filter(filter, cx);
+                    }))
+                    .child(translator.text(key).to_owned())
+                    .child(
+                        div()
+                            .text_color(if selected { look.accent } else { look.tertiary })
+                            .child(counts.get(filter).to_string()),
+                    )
+            });
+        h_flex().flex_wrap().gap(look.xs).children(chips)
+    }
+
+    /// 虚拟列表的第 `position` 行（筛选 + 排序后的位置）。
+    fn tracker_item(&self, position: usize, item: &TrackerItemText, cx: &App) -> AnyElement {
+        let dto = self
+            .bt
+            .tracker_view
+            .get(position)
+            .and_then(|&index| self.bt.status.as_ref()?.trackers.get(index));
+        let Some(dto) = dto else {
+            return div().into_any_element();
+        };
+        let translator = self.translator.read(cx);
+        let cells = tracker_cells(dto, &item.look, translator, item.now, &item.meta);
+        // 下标 0 留给 DHT 伪行，元素 id 不冲突。
+        tracker_row_el(
+            position + 1,
+            &cells,
+            &item.copy,
+            &item.look,
+            item.layout,
+            position + 1 == self.bt.tracker_view.len(),
+        )
+    }
+
     pub(super) fn render_bt_trackers(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let look = Look::new(cx);
         let layout = self.bt_layout(window, &look);
@@ -1161,8 +1523,13 @@ impl TaskDetailView {
             } else {
                 skeleton_rows(&look, 3).into_any_element()
             };
-            return self.bt_frame(content, &look, cx);
+            return self.bt_frame(content, false, &look, cx);
         };
+        // 布局档变化（宽 / 中 / 窄）改变行高，已量过的行需重量。
+        if self.bt.tracker_layout.get() != Some(layout) {
+            self.bt.tracker_layout.set(Some(layout));
+            self.bt.tracker_list.remeasure();
+        }
         let translator = self.translator.read(cx);
         let t = |key: &str| SharedString::from(translator.text(key).to_owned());
         let now = chrono::Utc::now().timestamp();
@@ -1174,8 +1541,30 @@ impl TaskDetailView {
             message: t("btTrackerMessage"),
             next: t("btTrackerNextAnnounce"),
             last: t("btTrackerLastOk"),
+            sort: self.bt.tracker_sort,
+            sort_hint: t("btTrackerSortHint"),
+            on_sort: Rc::new(cx.listener(|this, key: &TrackerSortKey, _, cx| {
+                this.set_tracker_sort(*key, cx);
+            })),
         };
-        let copy_label = t("btCopyTrackerUrl");
+        let meta = TrackerMeta {
+            peers: header.peers.clone(),
+            next: header.next.clone(),
+            last: header.last.clone(),
+        };
+        let item = Rc::new(TrackerItemText {
+            look: look.clone(),
+            copy: TrackerCopyText {
+                copy_url: t("btCopyTrackerUrl"),
+                copy_error: t("btCopyTrackerError"),
+                click_to_copy_error: t("btTrackerErrorClickToCopy"),
+                url_copied: t("btTrackerUrlCopied"),
+                error_copied: t("btTrackerErrorCopied"),
+            },
+            meta: meta.clone(),
+            layout,
+            now,
+        });
         let dht_on = status.dht_enabled;
         let dht = TrackerCells {
             dot: if dht_on { look.success } else { look.tertiary },
@@ -1188,63 +1577,57 @@ impl TaskDetailView {
             url: t("btTrackerDht"),
             is_dht: true,
             source_label: None,
+            source_hint: None,
             peers: None,
             message: SharedString::default(),
+            detail: SharedString::default(),
             next: SharedString::from(DASH),
             last: SharedString::from(DASH),
-            meta_peers: header.peers.clone(),
-            meta_next: header.next.clone(),
-            meta_last: header.last.clone(),
-            copy_label: copy_label.clone(),
+            meta,
         };
-        let mut all = vec![dht];
-        all.extend(status.trackers.iter().map(|dto| {
-            let row = tracker_row(dto, now);
-            TrackerCells {
-                dot: look.status_color(row.status),
-                label_color: look.status_text_color(row.status),
-                status_label: t(status_key(row.status)),
-                url: SharedString::from(row.url),
-                is_dht: false,
-                source_label: Some(t(match row.source {
-                    BtTrackerSource::Torrent => "btTrackerSourceTorrent",
-                    BtTrackerSource::Session => "btTrackerSourceSession",
-                })),
-                peers: row.peers.map(|count| SharedString::from(count.to_string())),
-                message: SharedString::from(row.message),
-                next: SharedString::from(relative_text(translator, row.next)),
-                last: SharedString::from(relative_text(translator, row.last)),
-                meta_peers: header.peers.clone(),
-                meta_next: header.next.clone(),
-                meta_last: header.last.clone(),
-                copy_label: copy_label.clone(),
-            }
-        }));
         let banner = none_working(&status.trackers).then(|| t("btTrackersNoneWorking"));
         let empty = status.trackers.is_empty().then(|| t("btTrackersEmpty"));
+        let filtered_out = (!status.trackers.is_empty() && self.bt.tracker_view.is_empty())
+            .then(|| t("btTrackersFilterEmpty"));
+        let counts = TrackerCounts::of(&status.trackers);
+        let filter_bar = (!status.trackers.is_empty())
+            .then(|| self.tracker_filter_bar(&look, &counts, translator, cx));
 
-        let mut table = table_frame(&look);
+        let mut table = table_frame(&look).min_h_0();
         if let Some(head) = tracker_header(&look, layout, &header) {
             table = table.child(head);
         }
-        let total = all.len();
-        for (index, cells) in all.iter().enumerate() {
-            table = table.child(tracker_row_el(
-                index,
-                cells,
-                &look,
-                layout,
-                index + 1 == total,
-            ));
-        }
+        table = table.child(tracker_row_el(
+            0,
+            &dht,
+            &item.copy,
+            &look,
+            layout,
+            self.bt.tracker_view.is_empty(),
+        ));
+        let rows = list(
+            self.bt.tracker_list.clone(),
+            cx.processor(move |this, position: usize, _window, cx| {
+                this.tracker_item(position, &item, cx)
+            }),
+        )
+        .with_sizing_behavior(ListSizingBehavior::Infer)
+        .w_full()
+        .min_h_0();
         let content = v_flex()
             .w_full()
+            .flex_1()
+            .min_h_0()
             .gap(look.sm)
             .when_some(banner, |this, text| this.child(warning_banner(&look, text)))
-            .child(table)
+            .when_some(filter_bar, |this, bar| this.child(bar))
+            .child(table.child(rows))
+            .when_some(filtered_out, |this, text| {
+                this.child(empty_state(&look, text))
+            })
             .when_some(empty, |this, text| this.child(empty_state(&look, text)))
             .into_any_element();
-        self.bt_frame(content, &look, cx)
+        self.bt_frame(content, true, &look, cx)
     }
 
     pub(super) fn render_bt_peers(
@@ -1260,7 +1643,7 @@ impl TaskDetailView {
             } else {
                 skeleton_rows(&look, 4).into_any_element()
             };
-            return self.bt_frame(content, &look, cx);
+            return self.bt_frame(content, false, &look, cx);
         };
         let running = self.bt_task_running();
         let translator = self.translator.read(cx);
@@ -1327,7 +1710,7 @@ impl TaskDetailView {
             .child(note(&look, summary, look.muted).font_features(tabular_numbers()))
             .child(content)
             .into_any_element();
-        self.bt_frame(body, &look, cx)
+        self.bt_frame(body, false, &look, cx)
     }
 }
 
@@ -1473,6 +1856,9 @@ mod tests {
         let idle = tracker_row(&dto, now);
         assert_eq!(idle.next, RelativeTime::Unknown);
         assert_eq!(idle.message, "timed out");
+        assert_eq!(idle.detail, "timed out");
+        dto.detail = " deadline has elapsed ".to_owned();
+        assert_eq!(tracker_row(&dto, now).detail, "deadline has elapsed");
     }
 
     #[test]

@@ -339,9 +339,12 @@ pub struct BtTrackerDto {
     /// 最近一次成功 announce 返回的 peer 数；未知缺省。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peers: Option<u64>,
-    /// 失败原因；非失败为空。
+    /// 失败原因的简短归类（qBittorrent 风格，如 `Timed out`）；非失败为空。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub message: String,
+    /// 失败的原始错误文本（供「复制错误」）；非失败为空。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
     /// 最近一次成功的 unix 秒；0 = 从未成功。
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub last_ok_at: i64,

@@ -1715,6 +1715,7 @@ fn bt_status_to_dto(
                         state: TrackerState::Updating,
                         peers: None,
                         message: String::new(),
+                        detail: String::new(),
                         last_ok_at: 0,
                         next_announce_at: 0,
                     });
@@ -1724,6 +1725,7 @@ fn bt_status_to_dto(
                     status,
                     peers: entry.peers,
                     message: entry.message,
+                    detail: entry.detail,
                     last_ok_at: entry.last_ok_at,
                     next_announce_at: entry.next_announce_at,
                 }
