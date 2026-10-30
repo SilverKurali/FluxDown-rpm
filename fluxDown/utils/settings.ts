@@ -123,15 +123,16 @@ export interface FluxDownSettings {
   // === 自定义协议 ===
 
   /**
-   * 启用 fluxdown:// 自定义协议下载（Android 与桌面均生效）。
+   * 启用 fluxdown:// 自定义协议下载（仅桌面端生效；Android 忽略此开关）。
    * 开启后拦截下载时不再投递 NMH/远端，而是导航到
    * fluxdown://download?url=... 协议 URL，由系统唤起已注册该协议的
-   * FluxDown 客户端（Android: VIEW intent；桌面: Windows 注册表 /
-   * Linux x-scheme-handler / macOS CFBundleURLTypes 协议处理器）。
+   * FluxDown 客户端（Windows 注册表 / Linux x-scheme-handler / macOS
+   * CFBundleURLTypes 协议处理器）。
    * 限制：不经 NMH，Cookie/Headers/method/body 无法携带；
    * 音视频分轨（audioUrl）请求会回退浏览器下载。
    * 桌面端 NMH 链路功能是协议模式的严格超集，建议仅在 NMH 不可用的
-   * 受限环境开启。默认关闭。
+   * 受限环境开启。Android 版浏览器始终走 Intent 唤起
+   * （background/android-handoff.ts，可携带 Cookie / 来源页 / 请求头），不读取此开关。默认关闭。
    */
   enableFluxdownProtocol: boolean;
 }
@@ -611,6 +612,40 @@ export function shouldIntercept(
   //    同类产品（IDM/FDM）在此场景下也会拦截。
   //    如果用户不想拦截特定站点，可通过排除域名列表处理。
   return true;
+}
+
+/**
+ * 点击链接时（响应头到达前）是否像一次会被接管的下载：用于提前预热 NMH，让 App 冷启动与
+ * 对方服务器首字节等待并行。只认强信号——`<a download>` 或 URL 扩展名命中生效拦截列表；
+ * 预热会拉起 App，普通网页链接绝不能触发。站点 never、排除扩展名、自身远程 Web UI 一律否。
+ */
+export function isLikelyDownloadClick(
+  url: string,
+  hasDownloadAttr: boolean,
+  pageUrl: string | undefined,
+  settings: FluxDownSettings,
+  profiles: Record<string, SiteProfile> = {},
+): boolean {
+  if (!settings.enabled) return false;
+  if (isFluxDownServerDownload(url, pageUrl, settings.remoteUrl)) return false;
+  for (const target of [url, pageUrl]) {
+    if (!target) continue;
+    let host: string;
+    try {
+      host = new URL(target).hostname;
+    } catch {
+      if (target === url) return false;
+      continue;
+    }
+    if (profileFor(profiles, host).profile.intercept === "never") return false;
+  }
+  if (
+    settings.excludeExtensions.length > 0 &&
+    matchByExtension(url, undefined, settings.excludeExtensions)
+  ) {
+    return false;
+  }
+  return hasDownloadAttr || matchByExtension(url, undefined, effectiveExtensions(settings));
 }
 
 /**

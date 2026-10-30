@@ -34,6 +34,16 @@ pub const DAEMON_TASK_SET_SEED_LIMITS: &str = "daemon.task.setSeedLimits";
 /// 重哈希落盘数据，只读。慢方法：耗时与数据量成正比，同一任务同时只跑一个（`conflict`），
 /// 非已完成 BT 任务返回 `invalidArgument`，任务不存在返回 `notFound`。
 pub const DAEMON_TASK_VERIFY: &str = "daemon.task.verify";
+/// 本机做种（`DaemonSeedLocalParams` → `{taskId}`）：把 daemon 主机上已有的文件 / 文件夹
+/// （可选现成 `.torrent`）登记为已完成并开始做种。无现成种子时需要为数据做哈希，慢方法；
+/// BT 被禁用或路径 / 种子不匹配返回 `invalidArgument`。
+pub const DAEMON_TASK_SEED_LOCAL: &str = "daemon.task.seedLocal";
+/// BT 任务分享材料（`DaemonTorrentShareParams` → `TorrentShareDto`）：磁力链接与可选 `.torrent`
+/// 内容。非 BT 任务 / 任务不存在返回 `invalidArgument` / `notFound`。
+pub const DAEMON_TASK_TORRENT_SHARE: &str = "daemon.task.torrentShare";
+/// BT 任务实况（`DaemonBtStatusParams` → `BtStatusDto`）：peer 列表与逐 tracker 汇报状态，
+/// 供详情页轮询（对齐 qBittorrent 的 Peers / Trackers 页签）。非 BT 任务返回 `invalidArgument`。
+pub const DAEMON_TASK_BT_STATUS: &str = "daemon.task.btStatus";
 /// 批量暂停 / 恢复（`{taskIds}`）：整批只推一次任务快照；未知 id 忽略，空列表为空操作。
 pub const DAEMON_TASK_PAUSE_MANY: &str = "daemon.task.pauseMany";
 pub const DAEMON_TASK_RESUME_MANY: &str = "daemon.task.resumeMany";
@@ -356,6 +366,13 @@ pub const AGENT_PLATFORM_SET_FILE_ASSOCIATION: &str = "agent.platform.setFileAss
 pub const AGENT_PLATFORM_SET_URL_PROTOCOL: &str = "agent.platform.setUrlProtocol";
 /// 系统文件管理器为文件显示的图标（PNG）；参数见 `PlatformFileIconParams`。
 pub const AGENT_PLATFORM_FILE_ICON: &str = "agent.platform.fileIcon";
+/// `app_icon::PlatformSetAppIconParams` → `app_icon::AppIconStateDto`：切换 / 导入桌面应用图标，成功后
+/// agent 写入偏好 `desktop.app_icon` 并同步托盘、窗口与快捷方式图标。
+pub const AGENT_PLATFORM_SET_APP_ICON: &str = "agent.platform.setAppIcon";
+/// `app_icon::PlatformAppIconImageParams` → `app_icon::PlatformAppIconImageDto`：当前自定义应用图标的 PNG。
+pub const AGENT_PLATFORM_APP_ICON_IMAGE: &str = "agent.platform.appIconImage";
+/// `{}` → `{ "ok": true }`：为桌面界面进程现有窗口补设当前应用图标（Windows / X11；其余平台无操作）。
+pub const AGENT_PLATFORM_SYNC_WINDOW_ICONS: &str = "agent.platform.syncWindowIcons";
 /// `SoundPreviewParams` → `{ "ok": true }`：由 agent 在本机播放一次提示音偏好值（`off` / `system` / `file:<绝对路径>`）。
 pub const AGENT_SOUND_PREVIEW: &str = "agent.sound.preview";
 pub const AGENT_CAPTURE_SUBMIT: &str = "agent.capture.submit";
@@ -443,6 +460,9 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_TASK_RESCAN,
     DAEMON_TASK_SET_SEED_LIMITS,
     DAEMON_TASK_VERIFY,
+    DAEMON_TASK_SEED_LOCAL,
+    DAEMON_TASK_TORRENT_SHARE,
+    DAEMON_TASK_BT_STATUS,
     DAEMON_TASK_PAUSE_MANY,
     DAEMON_TASK_RESUME_MANY,
     DAEMON_TASK_DELETE_MANY,
@@ -648,6 +668,9 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_PLATFORM_SET_FILE_ASSOCIATION,
     AGENT_PLATFORM_SET_URL_PROTOCOL,
     AGENT_PLATFORM_FILE_ICON,
+    AGENT_PLATFORM_SET_APP_ICON,
+    AGENT_PLATFORM_APP_ICON_IMAGE,
+    AGENT_PLATFORM_SYNC_WINDOW_ICONS,
     AGENT_SOUND_PREVIEW,
     AGENT_CAPTURE_SUBMIT,
     AGENT_CAPTURE_SUBMIT_TORRENT_FILE,
@@ -695,6 +718,7 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_DIAGNOSTICS_PROBE,
     DAEMON_DIAGNOSTICS_FIX_COMPONENT,
     DAEMON_TASK_VERIFY,
+    DAEMON_TASK_SEED_LOCAL,
     DAEMON_EGRESS_PLAN,
 ];
 
