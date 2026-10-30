@@ -17,8 +17,9 @@ use std::{cell::RefCell, rc::Rc};
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     AnyElement, App, Bounds, BoxShadow, Div, ElementId, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled, Window, div, point, prelude::FluentBuilder as _, px, size,
+    IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, div, linear_color_stop, linear_gradient,
+    point, prelude::FluentBuilder as _, px, size,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, Size,
@@ -115,6 +116,9 @@ type TabSelect = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 ///
 /// 选中白底是一块随选中项滑动的底块（弹簧驱动，宽度同步过渡），标签文字色同步淡变。
 /// 底块按上一帧量得的标签位置定位；首帧尚无测量时由选中项自己画底，下一帧交给底块。
+///
+/// 容器放不下全部标签时（如窄侧栏里的 BT 详情）轨道收缩到可用宽度，标签行横向滚动：
+/// 纵向滚轮同样横滚，被裁一侧显示渐隐提示，选中项变化时自动滚入视野。
 pub fn segmented_tabs(
     id: impl Into<ElementId>,
     labels: impl IntoIterator<Item = SharedString>,
@@ -127,15 +131,18 @@ pub fn segmented_tabs(
     let colors = tokens.colors;
     let control = theme.density().control;
     let tab_radius = theme.components().tab_radius;
+    let track = theme.extended().colors.nav_hover;
 
     div()
         .flex()
-        .flex_none()
+        .flex_shrink()
+        .min_w_0()
+        .max_w_full()
         .items_center()
         .h(control)
         .p(px(2.))
         .rounded(tab_radius + px(1.))
-        .bg(theme.extended().colors.nav_hover)
+        .bg(track)
         .child(SegmentedTabs {
             id: id.into(),
             labels: labels.into_iter().collect(),
@@ -151,6 +158,8 @@ pub fn segmented_tabs(
                 foreground: colors.foreground,
                 muted_foreground: colors.muted_foreground,
                 ring: colors.ring,
+                track,
+                fade_width: tokens.spacing.xl,
                 shadow: tokens.shadow.sm.clone(),
             },
         })

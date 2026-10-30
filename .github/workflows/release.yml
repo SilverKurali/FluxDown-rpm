@@ -321,6 +321,7 @@ jobs:
                 assets/i18n/*)       APP=true; MOBILE=true; IOS=true; SERVER=true ;;
                 website-v2/src/lib/gpui-theme/*) SERVER=true ;;
                 assets/icon-packs/*) APP=true; SERVER=true ;;
+                assets/flags/*)      APP=true; SERVER=true ;;
                 # 官网独立部署（deploy-website-v2.yml），不发 release；gpui-theme 例外已在上方先匹配。
                 # website/ 是已删除的 v1 旧站：删除提交与历史 tag 区间的 diff 仍会列出它，同样不触发构建
                 website-v2/*|website/*) ;;
