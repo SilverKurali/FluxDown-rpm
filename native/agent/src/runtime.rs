@@ -1108,7 +1108,7 @@ async fn bind_with_fallback(
     address: std::net::SocketAddr,
     fallback: bool,
 ) -> std::io::Result<TcpListener> {
-    let error = match TcpListener::bind(address).await {
+    let error = match bind_gateway_socket(address) {
         Ok(listener) => return Ok(listener),
         Err(error) => error,
     };
@@ -1127,16 +1127,68 @@ async fn bind_with_fallback(
         error = %error,
         "UI gateway port is in use or reserved by the system; falling back to an OS-assigned port"
     );
-    TcpListener::bind(std::net::SocketAddr::new(address.ip(), 0))
-        .await
-        .map_err(|fallback_error| {
-            std::io::Error::new(
-                fallback_error.kind(),
-                format!(
-                    "could not bind the UI gateway on {address} ({error}) nor on an OS-assigned port: {fallback_error}"
-                ),
-            )
-        })
+    bind_gateway_socket(std::net::SocketAddr::new(address.ip(), 0)).map_err(|fallback_error| {
+        std::io::Error::new(
+            fallback_error.kind(),
+            format!(
+                "could not bind the UI gateway on {address} ({error}) nor on an OS-assigned port: {fallback_error}"
+            ),
+        )
+    })
+}
+
+/// 绑定 UI Gateway 监听 socket。IPv6 通配地址（`[::]`）显式关闭 `IPV6_V6ONLY`，同一 socket
+/// 同时接 IPv4 与 IPv6（Windows 默认只接 IPv6，Linux 可被 `bindv6only` 改掉，不能靠系统默认）；
+/// 本机不支持 IPv6 时退回同端口的 `0.0.0.0`。占用 / 权限错误原样返回，IPv4 同样会失败。
+pub(crate) fn bind_gateway_socket(address: std::net::SocketAddr) -> std::io::Result<TcpListener> {
+    let std::net::IpAddr::V6(ip) = address.ip() else {
+        return bind_socket(address, false);
+    };
+    if !ip.is_unspecified() {
+        return bind_socket(address, false);
+    }
+    let error = match bind_socket(address, true) {
+        Ok(listener) => return Ok(listener),
+        Err(error) => error,
+    };
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+    ) {
+        return Err(error);
+    }
+    let ipv4 = std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), address.port());
+    tracing::warn!(
+        %address,
+        error = %error,
+        fallback = %ipv4,
+        "IPv6 is unavailable; the UI gateway listens on IPv4 only"
+    );
+    bind_socket(ipv4, false).map_err(|fallback_error| {
+        std::io::Error::new(
+            fallback_error.kind(),
+            format!("{address}: {error}; {ipv4}: {fallback_error}"),
+        )
+    })
+}
+
+/// 与 `TcpListener::bind` 同语义（Unix `SO_REUSEADDR`、backlog 1024），`dual_stack` 时关闭
+/// `IPV6_V6ONLY`。
+fn bind_socket(address: std::net::SocketAddr, dual_stack: bool) -> std::io::Result<TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(address),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    if dual_stack {
+        socket.set_only_v6(false)?;
+    }
+    #[cfg(not(windows))]
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&address.into())?;
+    socket.listen(1024)?;
+    TcpListener::from_std(socket.into())
 }
 
 /// UI Gateway 监听地址：`FLUXDOWN_AGENT_BIND` 覆盖时必须是回环；否则按持久化的
@@ -1334,7 +1386,7 @@ pub(crate) fn daemon_socket_address(
 
 #[cfg(test)]
 mod tests {
-    use super::{bind_gateway_listener, gateway_bind_address};
+    use super::{bind_gateway_listener, bind_gateway_socket, gateway_bind_address};
     use crate::state::AgentState;
 
     #[test]
@@ -1493,6 +1545,28 @@ mod tests {
             }
         }
         drop(occupied);
+    }
+
+    /// server 默认 `[::]`：同一监听同时接 IPv4 与 IPv6（飞牛 FN Connect 经 `[::1]` 转发、IPv6
+    /// DDNS 直连）；本机无 IPv6 时退回 `0.0.0.0`，IPv4 仍可用。
+    #[tokio::test]
+    async fn ipv6_wildcard_binding_accepts_ipv4_and_ipv6_clients() {
+        let listener =
+            bind_gateway_socket("[::]:0".parse().expect("wildcard")).expect("dual-stack bind");
+        let bound = listener.local_addr().expect("bound address");
+        let ipv4 = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), bound.port());
+        tokio::net::TcpStream::connect(ipv4)
+            .await
+            .expect("IPv4 client reaches the IPv6 wildcard listener");
+        if bound.is_ipv6() {
+            let ipv6 =
+                std::net::SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), bound.port());
+            tokio::net::TcpStream::connect(ipv6)
+                .await
+                .expect("IPv6 client reaches the wildcard listener");
+        } else {
+            assert!(bound.ip().is_unspecified(), "{bound}");
+        }
     }
 
     #[tokio::test]

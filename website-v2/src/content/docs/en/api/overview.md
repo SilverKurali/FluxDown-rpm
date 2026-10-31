@@ -8,7 +8,7 @@ order: 1
 FluxDown exposes an HTTP API for extensions, userscripts, aria2 clients, and automation. The aria2 `/jsonrpc` endpoint and the official clients' `/rpc` endpoint are different protocols.
 
 - **Desktop** listens on `127.0.0.1:17800` by default. GPUI's local-service settings can enable LAN access (`local_server_lan_enabled`), binding `0.0.0.0` on the next start; loopback is a default, not a hardcoded restriction. Management API and MCP default off; takeover and aria2 default on.
-- **The [headless server](/docs/en/headless-server/setup/)** is `fluxdown-agent --server` with a sibling `fluxdownd`. Only `FLUXDOWN_BIND` determines its listener (default `0.0.0.0:17800`). Compatibility groups default on for a fresh installation, but **an unset access key does not mean anonymous access**. The Web UI manages downloads over the agent's `/rpc`.
+- **The [headless server](/docs/en/headless-server/setup/)** is `fluxdown-agent --server` with a sibling `fluxdownd`. Only `FLUXDOWN_BIND` determines its listener (default `[::]:17800`, IPv4 + IPv6). Compatibility groups default on for a fresh installation, but **an unset access key does not mean anonymous access**. The Web UI manages downloads over the agent's `/rpc`.
 
 ## Route groups
 

@@ -9,7 +9,7 @@ sourceHash: "7fc5e6bae5f1"
 FluxDown 的 HTTP API 供扩展、用户脚本、aria2 客户端与自动化工具使用；不要把 aria2 的 `/jsonrpc` 与官方客户端的 `/rpc` 混为一谈。
 
 - **桌面客户端**默认监听 `127.0.0.1:17800`。GPUI 的本地服务设置可开启局域网访问（`local_server_lan_enabled`），改为 `0.0.0.0`，下次启动生效；并非永远只监听回环。管理 API 与 MCP 默认关闭，脚本接管与 aria2 默认开启。
-- **[headless 服务器](/docs/zh/headless-server/setup/)**由同目录的 `fluxdown-agent --server` 与 `fluxdownd` 提供，监听地址只由 `FLUXDOWN_BIND` 决定（默认 `0.0.0.0:17800`）。全新安装默认开启兼容分组，但**未设置访问密钥不等于匿名开放**；Web 界面经 agent 的 `/rpc` 管理下载。
+- **[headless 服务器](/docs/zh/headless-server/setup/)**由同目录的 `fluxdown-agent --server` 与 `fluxdownd` 提供，监听地址只由 `FLUXDOWN_BIND` 决定（默认 `[::]:17800`，IPv4 + IPv6）。全新安装默认开启兼容分组，但**未设置访问密钥不等于匿名开放**；Web 界面经 agent 的 `/rpc` 管理下载。
 
 ## 五组路由
 
