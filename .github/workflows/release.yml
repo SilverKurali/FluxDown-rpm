@@ -2318,18 +2318,6 @@ jobs:
             rehearsal/release-body.md
           if-no-files-found: warn
 
-  # ── 123 云盘镜像：发布成功后经东京服务器中转（pan123-upload.yml）──
-  # GitHub runner 直传 123 极慢，所以不在 upload-* 里做；发布已完成，这里失败只影响应用内更新的 123 下载源
-  # （回落 dl-cn / GitHub），补救：gh workflow run pan123-upload.yml -f tag=<tag>。远端已有同大小文件跳过。
-  mirror-pan123:
-    name: Mirror to 123pan
-    needs: [changes, publish-release]
-    if: ${{ !cancelled() && needs.changes.outputs.rehearsal == 'false' && needs.publish-release.result == 'success' }}
-    uses: ./.github/workflows/pan123-upload.yml
-    with:
-      tag: ${{ needs.changes.outputs.tag }}
-    secrets: inherit
-
   # ── 发布公告：草稿转正后推送到 Telegram 频道（t.me/fluxdown）──
   # release 由 GITHUB_TOKEN 发布，不会触发 on: release 事件，所以公告在本流水线内发送。
   # 只有组件齐全、本次把草稿转正时才公告（tag 推送或补齐的那次补发）；仍为草稿则跳过。
