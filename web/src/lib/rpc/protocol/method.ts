@@ -97,6 +97,9 @@ export const METHOD = {
   DAEMON_PLUGIN_UNINSTALL: 'daemon.plugin.uninstall',
   DAEMON_PLUGIN_MARKET_LIST: 'daemon.plugin.marketList',
   DAEMON_PLUGIN_MARKET_INSTALL: 'daemon.plugin.marketInstall',
+  // 以下两条 agent 专用边界方法，Web 不使用：仅为与 ALL_METHODS 对齐而保留。
+  DAEMON_PLUGIN_INSTALL_PRIVATE: 'daemon.plugin.installPrivate',
+  DAEMON_PLUGIN_REVOKE_PRIVATE: 'daemon.plugin.revokePrivate',
   DAEMON_PLUGIN_IGNORE_RETRY: 'daemon.plugin.ignoreRetry',
   DAEMON_PLUGIN_SITE_DEFAULTS: 'daemon.plugin.siteDefaults',
   DAEMON_PLUGIN_SET_SITE_DEFAULT: 'daemon.plugin.setSiteDefault',
@@ -221,6 +224,8 @@ export const METHOD = {
   AGENT_REFERRAL_VALIDATE: 'agent.referral.validate',
   AGENT_PLUGIN_FAVORITE_LIST: 'agent.pluginFavorite.list',
   AGENT_PLUGIN_FAVORITE_SET: 'agent.pluginFavorite.set',
+  AGENT_PRIVATE_PLUGIN_LIST: 'agent.privatePlugin.list',
+  AGENT_PRIVATE_PLUGIN_INSTALL: 'agent.privatePlugin.install',
 
   // 以下方法读写宿主机路径 / 桌面集成，按连接能力门控（多数 Web 不使用）。
   AGENT_PLATFORM_OPEN_TASK: 'agent.platform.openTask',
@@ -253,7 +258,7 @@ export const METHOD = {
   AGENT_UPDATE_DOWNLOAD: 'agent.update.download',
   AGENT_UPDATE_INSTALL: 'agent.update.install',
   AGENT_UPDATE_CANCEL: 'agent.update.cancel',
-  /** 完成后关机；无活跃任务时拒绝（invalidArgument）。 */
+  /** 定时关机 / 睡眠 `{delaySecs, action}` → `{armed}`；没有任务时立即倒计时，`delaySecs = 0` 仅有任务时受理。 */
   AGENT_POWER_ARM: 'agent.power.arm',
   AGENT_POWER_DISARM: 'agent.power.disarm',
   AGENT_CLOUD_NOTIFY_GET: 'agent.cloudNotify.get',

@@ -17,8 +17,12 @@ pub enum SelectionKind {
     Hls {
         options: Vec<HlsQualityOptionDto>,
     },
+    /// BT 文件选择。`save_dir` = 任务当前保存目录（主机路径，供选择窗预填；旧 daemon 缺省）。
+    #[serde(rename_all = "camelCase")]
     Bt {
         files: Vec<BtFileDto>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        save_dir: String,
     },
     Variant {
         options: Vec<ResolveVariantOptionDto>,
@@ -146,8 +150,12 @@ pub enum SelectionOutcome {
     Hls {
         index: i32,
     },
+    /// 应答 [`SelectionKind::Bt`]：`save_dir` 非空且不同于任务当前目录时，引擎丢弃已暂存的
+    /// 数据、把任务改到该目录后重新开始；缺省 = 沿用当前目录。
     Bt {
         indices: Vec<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save_dir: Option<String>,
     },
     Variant {
         index: i32,
@@ -1604,6 +1612,10 @@ pub struct PluginDto {
     /// 桌面端据此重新挂载桌面脚本视图。旧 daemon 不下发时为 0。
     #[serde(default)]
     pub package_revision: u64,
+    /// 安装来源：空 = 公开市场 / 本机包 / 旧版安装；`"private"` = FluxCloud 私有商店
+    /// （不受公开市场更新 / 撤回影响，由私有目录单独对账）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
 }
 
 /// 插件贡献点（镜像 `engine::plugin::ContributesDecl`）。
@@ -1872,6 +1884,12 @@ pub struct MarketEntryDto {
     /// 插件桌面视图声明的网络主机（授权界面展示）。
     #[serde(default)]
     pub network_hosts: Vec<String>,
+    /// 渠道标记：公开市场条目无此字段；FluxCloud 私有目录恒为 `"private"`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// 私有条目的授权到期时间（RFC 3339）；缺省 / `null` = 永久（公开条目恒缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 /// 从市场安装请求体。
@@ -1884,6 +1902,39 @@ pub struct MarketInstallRequest {
     /// 由客户端刷新目录后重新确认。缺省 = 不钉版本。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+}
+
+/// `daemon.plugin.installPrivate` 参数：agent 已校验 sha256 的包 blob + FluxCloud 私有目录条目。
+///
+/// 条目 `channel` 必须为 `"private"`；`mirrors` 被忽略（私有包只经 agent 票据下载）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallPrivateParams {
+    pub blob_id: String,
+    pub entry: MarketEntryDto,
+}
+
+/// 一条私有插件撤回：`yanked == "malicious"` 的 `(pluginId, version)`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PrivateRevocationDto {
+    pub plugin_id: String,
+    pub version: String,
+}
+
+/// `daemon.plugin.revokePrivate` 参数：agent 从 FluxCloud 私有目录取得的撤回清单。
+///
+/// `scope`：云端声明的「该账号曾有授权的插件」全集；存在时 `revoked` 是 scope 内插件的权威全集，
+/// daemon 据此解封已不在清单里的私有撤回。缺省（旧版云端）= 只增不清，不解封。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRevokePrivateParams {
+    pub revoked: Vec<PrivateRevocationDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Vec<String>>,
 }
 
 /// `daemon.plugin.consent` 参数：`permissions` / `networkHosts` 必须与插件当前请求的集合完全相等。
