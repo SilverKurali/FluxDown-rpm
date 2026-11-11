@@ -86,7 +86,7 @@
 - **uTP（`bt_enable_utp`，默认开）**：开启时监听模式为 `TcpAndUtp`，出站并发拨 TCP + uTP；
   #825 实测在上限 512 基础上稳态再翻倍，代价是 UDP 收发的系统态 CPU 明显更高（上游仍标为
   experimental）。改动经 daemon 重建共享会话生效。librqbit 来自 `zerx-lab/rqbit` 分支 `fluxdown/main`（FluxDown 补丁分支：
-  上游 main + MSE + Android HTTPS + 握手超时下发 + 初检末尾暂停不丢失 + 防吸血 `PeerPolicy` 钩子 + 最稀有优先选片）。升级上游时在该分支
+  上游 main + MSE + Android HTTPS + 握手超时下发 + 初检末尾暂停不丢失 + 防吸血 `PeerPolicy` 钩子 + 最稀有优先选片 + 上传槽 choker）。升级上游时在该分支
   合并 `upstream/main` 并推送（不变基、不强推，FluxDown 历史钉过的 rev 都须仍是它的祖先），再改根 `Cargo.toml` 的 rev；fork 的 `main` 只跟上游同步，不是事实源；
   `upstream/*` 分支各对应一个给 ikatson/rqbit 的开放 PR，同步上游也用合并。`librqbit-utp` 临时 patch 到上游 git main：
   crates.io 0.7.0 的分发循环遇 Windows `WSAECONNRESET(10054)` 即退出，整个会话 uTP 失效；
@@ -102,6 +102,24 @@
   右键菜单「选片方式」：最稀有优先 / 按顺序下载二选一 + 首尾独立复选。
   宿主侧以 `SharedBtSession` 的登记为准：启动 BT 任务时由 manager 按 DB 登记，`store_handle` 每次入册都按登记重设句柄
   （盖掉 librqbit 自持久化里的旧值），改选项在同一把锁内作用于已入册句柄，下载中从下一个请求的块起生效。
+- **BT 上传对端选择（choker，对齐 qBittorrent / libtorrent）**：fork `crates/librqbit/src/choker.rs`，每个 Live 种子一个 `Choker`
+  （上游 PR ikatson/rqbit#737，叠在 #720 之上）。连接默认 choked，只有发过 Interested 的对端才可能拿到上传槽（unchoke）：
+  常规槽每 10 秒重排，先比对端给我们的下载速率（tit-for-tat），再比我们给它的上传速率（做种时即 qBittorrent 的「最快上传」），
+  再让位给最久没拿到槽的；乐观解锁槽占 1/5（至少 1 个），每 30 秒轮给等得最久的对端。有空槽时对端一 Interested 就在同一次
+  调用里 unchoke，持槽者断开 / NotInterested 立刻补位；拿槽不满 5 秒不参与重排。choke 即丢弃该连接已排队的上传
+  （`UploadGate::set_choked`，限速队列与写队列里的块不读盘、不发送、不计上传量），choked 期间的请求静默忽略。
+  槽数 = `SessionOptions::upload_slots`（会话级配置，每个种子各自计数）：`RateBased`（libtorrent rate based choker 的阈值，
+  最少 4 槽，1 MiB/s 约 22 槽、5 MiB/s 约 50 槽）/ `Fixed(n)` / `Unlimited`（旧行为）。设置键 `bt_upload_slots`
+  （BT「常规」页，四端同一行；整数 0–512，默认 0 = 自动 = `RateBased`，非零 = `Fixed(n)`，上限对齐 `BT_PEER_LIMIT`；
+  设备本地，不进云同步目录——合适的槽数取决于本机上行带宽）经 `BtConfig::upload_slots` →
+  `bt_downloader.rs::upload_slots`；会话级选项，改动走 `invalidate_bt_session` 重建会话生效。
+  与防吸血的衔接见 ops.md 防吸血条（Throttle 不占槽、Choke 永不再给槽）。
+  **被对端 choke**（`on_i_am_choked`）：对端 choke 即作废我们的全部在途请求（BEP 3），本端同步清空在途请求并把该对端占着的片
+  放回队列给别的对端，解除 choke 后重新请求；请求循环发现片已不归自己（被偷 / 已归还）就换片。
+  **读超时豁免**（`PeerConnectionHandler::may_be_silent`）：等我们槽位的对端、choke 着我们而我们仍缺片的对端本就无话可说，
+  连接上没有我方在途请求时不按 `read_write_timeout` 断开（下载中只在 `peer_limit` 许可有余量时豁免，许可吃紧照旧淘汰静默连接；
+  做种时等槽的对端一律保留），连续 5 分钟连 keep-alive 都没有才断（`SILENT_PEER_TIMEOUT`）。读循环每半个超时问一次，
+  豁免结束（拿到槽 / 被解除 choke）后才开始计「无故静默」，满一个超时才断。
 - **BT 会话保活与完成校验**：`maybe_release_bt_session` 在存在「已暂停的未完成
   torrent（句柄在册）」时**不拆**共享会话——resume 走 `unpause`（Paused→Live
   零校验秒恢复）；全部 BT 任务终态化（完成/删除且无做种）才释放。初检中暂停由
@@ -171,8 +189,8 @@
 - **改设置不打断任务（对齐 qBittorrent）**：tracker 列表（自定义 / 订阅开关、地址、刷新结果）不进
   `SessionOptions::trackers`，由 `SharedBtSession::add_input` 在每次 add 注入（种子文件走
   `AddTorrentOptions::trackers`，磁力并入 `tr=`，librqbit 对磁力不认 opts.trackers），`set_bt_config`
-  热更新，只作用于新加入的种子，**不重建会话**。只有监听类键（`bt_enabled` / DHT / UPnP / uTP / 端口 /
-  MSE）走 `invalidate_bt_session`：先 cancel `closing` 令在途重新挂载放弃旧会话，合并「在途挂载
+  热更新，只作用于新加入的种子，**不重建会话**。只有会话级键（`bt_enabled` / DHT / UPnP / uTP / 端口 /
+  MSE / `bt_upload_slots`）走 `invalidate_bt_session`：先 cancel `closing` 令在途重新挂载放弃旧会话，合并「在途挂载
   （`reseeding_task_ids`，先读）+ 做种表」，关停旧会话（取消 librqbit 会话释放端口、在同步线程等最后
   引用释放），新会话上重新挂载全部做种并 `batch_resume` 被暂停的下载；禁用 BT 时才落「会话释放」/
   暂停。`SharedBtSession` 的 runtime 在 Drop 里按上下文关停（async 上下文 `shutdown_background`），
