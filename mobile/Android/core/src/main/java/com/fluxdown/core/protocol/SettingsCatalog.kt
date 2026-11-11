@@ -137,7 +137,7 @@ object SettingsCatalog {
         daemon("bt_guard_rule_lag", choice(btGuardModes), "observe"),
         daemon("bt_guard_rule_fingerprint", choice(btGuardModes), "observe"),
         daemon("bt_guard_cloud_mode", choice(btGuardModes), "observe"),
-        daemon("bt_guard_excess_ratio_pct", int(110, 1000), "200"),
+        daemon("bt_guard_excess_ratio_pct", int(110, 2000), "200"),
         daemon("bt_guard_min_torrent_mib", int(0, 1_048_576), "64"),
         daemon("bt_guard_rewind_tolerance_pct", int(0, 100), "7"),
         daemon("bt_guard_throttle_kib", int(1, 1_048_576), "32"),
@@ -160,6 +160,8 @@ object SettingsCatalog {
         daemon("ed2k_server_sub_cache", readOnly, ""),
         daemon("ed2k_server_sub_updated_at", readOnly, "0"),
         daemon("ed2k_nodes_dat_url", text, ""),
+        daemon("ed2k_nodes_dat_count", readOnly, "0"),
+        daemon("ed2k_nodes_dat_updated_at", readOnly, "0"),
         // 代理
         daemon("proxy_mode", choice(proxyModes), "none"),
         daemon("proxy_type", choice(proxyTypes), "http"),

@@ -157,6 +157,16 @@ export interface Ed2kServerSubRefreshResponse {
   error: string;
 }
 
+/** Kad 节点（nodes.dat）订阅刷新结果。 */
+export interface Ed2kNodesSubRefreshResponse {
+  success: boolean;
+  nodeCount: number;
+  okSources: number;
+  totalSources: number;
+  updatedAt: number;
+  error: string;
+}
+
 // ── 配置键目录（镜像 daemon_config.rs 的 DAEMON_CONFIG_FIELDS）──
 
 export const BT_SEED_TIME_UNITS = ['minutes', 'hours', 'days'] as const;
@@ -278,7 +288,7 @@ export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   oneOf('bt_guard_rule_lag', 'observe', BT_GUARD_MODES),
   oneOf('bt_guard_rule_fingerprint', 'observe', BT_GUARD_MODES),
   oneOf('bt_guard_cloud_mode', 'observe', BT_GUARD_MODES),
-  int('bt_guard_excess_ratio_pct', '200', 110, 1000),
+  int('bt_guard_excess_ratio_pct', '200', 110, 2000),
   int('bt_guard_min_torrent_mib', '64', 0, 1_048_576),
   int('bt_guard_rewind_tolerance_pct', '7', 0, 100),
   int('bt_guard_throttle_kib', '32', 1, 1_048_576),
@@ -301,7 +311,10 @@ export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   text('ed2k_server_sub_urls'),
   readOnly('ed2k_server_sub_cache'),
   readOnly('ed2k_server_sub_updated_at', '0'),
+  // 设备本地：每行一个 nodes.dat 地址，不进云同步
   text('ed2k_nodes_dat_url'),
+  readOnly('ed2k_nodes_dat_count', '0'),
+  readOnly('ed2k_nodes_dat_updated_at', '0'),
   // 代理
   oneOf('proxy_mode', 'none', PROXY_MODES),
   oneOf('proxy_type', 'http', PROXY_TYPES),
