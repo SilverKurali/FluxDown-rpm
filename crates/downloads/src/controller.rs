@@ -22,6 +22,8 @@ use crate::model::{
 
 /// 本机偏好：新建下载对话框上次使用的保存目录（设备本地，不进云同步）。
 pub const LAST_SAVE_DIR_PREF: &str = "download.last_save_dir";
+/// 本机偏好：新建下载分类模式（`auto` / `none` / `category:<id>`；设备本地，不进云同步）。
+pub(crate) const LAST_CATEGORY_MODE_PREF: &str = "download.last_category_mode";
 /// 偏好：新建下载默认沿用上次保存目录。
 pub const REMEMBER_LAST_SAVE_DIR_PREF: &str = "download.remember_last_save_dir";
 /// 本机偏好：新建下载保存目录历史（字符串数组，最新在前；设备本地，不进云同步）。
@@ -113,6 +115,12 @@ pub enum DownloadsCommand {
     Ed2kIdCheck,
     /// 防吸血：给 IP 组加封禁 / 限速 / 加白条目（`daemon.bt.guard.entries.add`），连接页右键菜单用。
     BtGuardAddEntry(fluxdown_protocol::BtGuardEntriesAddParams),
+    /// 防吸血「封禁此客户端」：基于最新 `bt_guard_client_rules` 追加
+    /// `clientName contains <value> → ban`（见 [`crate::append_ban_client_rule`]），冲突时重取重放。
+    /// 结果为 [`DownloadsResult::Value`]：`true` 新增、`false` 已有同名规则。
+    BtGuardBanClient {
+        value: String,
+    },
     /// 防吸血「查看证据」：读取该 IP 组相关的名单条目与近期事件，结果为
     /// [`DownloadsResult::BtGuardEvidence`]。
     BtGuardEvidence {

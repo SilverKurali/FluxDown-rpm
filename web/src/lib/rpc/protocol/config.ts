@@ -181,6 +181,8 @@ export const BT_MSE_MODES = ['disabled', 'enabled', 'forced'] as const;
 export const BT_PIECE_ORDERS = ['rarest', 'sequential'] as const;
 /** uTP 拥塞控制：LEDBAT（让路给其他流量）/ CUBIC（只按丢包退让）。 */
 export const BT_UTP_CONGESTIONS = ['ledbat', 'cubic'] as const;
+/** BT 代理来源：「代理」页的手动代理服务器 / 系统代理（建 BT 会话时检测）。 */
+export const BT_PROXY_SOURCES = ['manual', 'system'] as const;
 /** 防吸血规则 / 云名单模式。 */
 export const BT_GUARD_MODES = ['off', 'observe', 'enforce'] as const;
 /** 防吸血：下载中任务的动作上限。 */
@@ -273,6 +275,7 @@ export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   bool('bt_announce_all_tiers', 'true'),
   bool('bt_announce_all_trackers', 'true'),
   bool('bt_proxy_enabled', 'false'),
+  oneOf('bt_proxy_source', 'manual', BT_PROXY_SOURCES),
   bool('bt_proxy_peers', 'true'),
   bool('bt_i2p_enabled', 'false'),
   text('bt_i2p_sam_host', '127.0.0.1'),
@@ -303,7 +306,7 @@ export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   oneOf('bt_guard_rule_rerequest', 'observe', BT_GUARD_MODES),
   oneOf('bt_guard_rule_rewind', 'observe', BT_GUARD_MODES),
   oneOf('bt_guard_rule_lag', 'observe', BT_GUARD_MODES),
-  oneOf('bt_guard_rule_fingerprint', 'observe', BT_GUARD_MODES),
+  oneOf('bt_guard_rule_fingerprint', 'enforce', BT_GUARD_MODES),
   oneOf('bt_guard_cloud_mode', 'observe', BT_GUARD_MODES),
   int('bt_guard_excess_ratio_pct', '200', 110, 2000),
   int('bt_guard_min_torrent_mib', '64', 0, 1_048_576),
@@ -316,6 +319,7 @@ export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   bool('bt_guard_skip_lan', 'true'),
   int('bt_guard_ipv6_prefix', '64', 48, 128),
   text('bt_guard_filter_urls'),
+  text('bt_guard_client_rules'),
   bool('bt_guard_cloud_enabled', 'true'),
   // 设备本地：不进云同步
   bool('bt_guard_report_enabled', 'false'),

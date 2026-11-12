@@ -49,6 +49,8 @@ pub const BT_MSE_MODES: &[&str] = &["disabled", "enabled", "forced"];
 pub const BT_PIECE_ORDERS: &[&str] = &["rarest", "sequential"];
 /// uTP 拥塞控制：LEDBAT（延迟敏感，主动给其他流量让路，BEP 29 的标准算法）/ CUBIC（只按丢包退让）。
 pub const BT_UTP_CONGESTIONS: &[&str] = &["ledbat", "cubic"];
+/// BT 代理来源：「代理」页的手动代理服务器 / 系统代理（建 BT 会话时检测）。
+pub const BT_PROXY_SOURCES: &[&str] = &["manual", "system"];
 /// BT 防吸血规则 / 云名单的执行模式。
 pub const BT_GUARD_MODES: &[&str] = &["off", "observe", "enforce"];
 /// BT 防吸血：下载中任务的动作上限。
@@ -217,9 +219,15 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
     // tracker 汇报策略（BEP 12，对齐 qBittorrent 的两项高级设置）：都关 = 逐层失败转移。
     field("bt_announce_all_tiers", DaemonConfigKind::Bool, "true"),
     field("bt_announce_all_trackers", DaemonConfigKind::Bool, "true"),
-    // BT 走「代理」页的手动代理服务器（SOCKS5 / HTTP）；默认直连。
+    // BT 经代理出站（SOCKS5 / SOCKS4 / HTTP）；默认直连。`bt_proxy_source` 选代理来源：
+    // 「代理」页的手动代理服务器，或建 BT 会话时检测到的系统代理。
     // `bt_proxy_peers` 关闭时只有 tracker 走代理，对端连接直连。
     field("bt_proxy_enabled", DaemonConfigKind::Bool, "false"),
+    field(
+        "bt_proxy_source",
+        DaemonConfigKind::Enum(BT_PROXY_SOURCES),
+        "manual",
+    ),
     field("bt_proxy_peers", DaemonConfigKind::Bool, "true"),
     // I2P（经本机 I2P 路由的 SAM 桥）。`bt_i2p_mixed` = I2P 种子同时允许明网对端。
     field("bt_i2p_enabled", DaemonConfigKind::Bool, "false"),
@@ -330,10 +338,11 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
         DaemonConfigKind::Enum(BT_GUARD_MODES),
         "observe",
     ),
+    // 名字规则默认直接执行；其余检测规则默认仅观察。
     field(
         "bt_guard_rule_fingerprint",
         DaemonConfigKind::Enum(BT_GUARD_MODES),
-        "observe",
+        "enforce",
     ),
     field(
         "bt_guard_cloud_mode",
@@ -392,6 +401,8 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
         "64",
     ),
     field("bt_guard_filter_urls", DaemonConfigKind::Text, ""),
+    // 本机名字规则：JSON 数组（顺序即优先级），元素形态同云名单 `clientRules`。
+    field("bt_guard_client_rules", DaemonConfigKind::Text, ""),
     field("bt_guard_cloud_enabled", DaemonConfigKind::Bool, "true"),
     // 设备本地（不进云同步）：是否向 FluxCloud 上报命中规则的对端证据。
     field("bt_guard_report_enabled", DaemonConfigKind::Bool, "false"),
@@ -731,7 +742,7 @@ mod tests {
             ("bt_guard_rule_rerequest", "observe"),
             ("bt_guard_rule_rewind", "observe"),
             ("bt_guard_rule_lag", "observe"),
-            ("bt_guard_rule_fingerprint", "observe"),
+            ("bt_guard_rule_fingerprint", "enforce"),
             ("bt_guard_cloud_mode", "observe"),
             ("bt_guard_excess_ratio_pct", "200"),
             ("bt_guard_min_torrent_mib", "64"),
@@ -744,6 +755,7 @@ mod tests {
             ("bt_guard_skip_lan", "true"),
             ("bt_guard_ipv6_prefix", "64"),
             ("bt_guard_filter_urls", ""),
+            ("bt_guard_client_rules", ""),
             ("bt_guard_cloud_enabled", "true"),
             ("bt_guard_report_enabled", "false"),
         ] {
