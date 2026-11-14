@@ -146,11 +146,11 @@ export class CategoryIndex {
   }
 
   matches(id: string, view: DownloadTaskView): boolean {
-    const override = view.dto?.properties?.category ?? ''
-    if (override !== '') return id === BUILTIN_ALL_ID || id === override
     const index = this.firstIndexById.get(id)
     if (index === undefined) return false
     const rule = this.rules[index] as CategoryRule
+    const override = view.dto?.properties?.category ?? ''
+    if (override !== '') return rule.matcher.type === 'all' || id === override
     if (rule.matcher.type === 'all') return true
     if (rule.matcher.type === 'other') return !this.specific.some((other) => CategoryIndex.ruleMatches(other, view))
     return CategoryIndex.ruleMatches(rule, view)
@@ -174,8 +174,10 @@ export class CategoryIndex {
   forEachMatch(view: DownloadTaskView, emit: (id: string) => void): void {
     const override = view.dto?.properties?.category ?? ''
     if (override !== '') {
-      emit(BUILTIN_ALL_ID)
-      if (this.firstIndexById.has(override)) emit(override)
+      for (let index = 0; index < this.rules.length; index += 1) {
+        const rule = this.rules[index] as CategoryRule
+        if (this.firstIndexById.get(rule.dto.id) === index && (rule.matcher.type === 'all' || rule.dto.id === override)) emit(rule.dto.id)
+      }
       return
     }
     let specificHit = false

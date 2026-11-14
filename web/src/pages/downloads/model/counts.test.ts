@@ -85,12 +85,16 @@ describe('SidebarCounts', () => {
   })
 
   test('explicit category override replaces rule classification in filters and counts', () => {
-    const overridden = { ...view(999, 'movie.zip', 'paused', 'local', '', ''), dto: { properties: { category: 'builtin_video' } } } as unknown as DownloadTaskView
-    expect(filterMatches({ status: 'all', category: 'builtin_video' }, overridden, categories)).toBe(true)
-    expect(filterMatches({ status: 'all', category: 'builtin_archive' }, overridden, categories)).toBe(false)
-    const counts = new SidebarCounts([overridden], categories)
-    expect(counts.filter({ status: 'all', category: 'builtin_video' })).toBe(1)
-    expect(counts.filter({ status: 'all', category: 'builtin_archive' })).toBe(0)
+    for (const category of ['builtin_video', 'builtin_other', 'builtin_all', 'missing']) {
+      const overridden = { ...view(999, 'movie.zip', 'paused', 'local', '', ''), dto: { properties: { category } } } as unknown as DownloadTaskView
+      const counts = new SidebarCounts([overridden], categories)
+      for (const id of [...new Set(categories.rules.map((rule) => rule.dto.id)), 'missing']) {
+        const filter = { status: 'all' as const, category: id }
+        const matches = filterMatches(filter, overridden, categories)
+        expect(counts.filter(filter)).toBe(matches ? 1 : 0)
+        if (id === 'builtin_archive') expect(matches).toBe(false)
+      }
+    }
   })
 
   test('forEachMatch 与逐 id matches 等价：other 仅在没有具体分类命中时命中', () => {

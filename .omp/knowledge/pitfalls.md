@@ -130,6 +130,8 @@
 ## GPUI（gpui-fast 保留模式）
 
 另见 AGENTS.md §4：render 读的状态必须在 entity / global / `ListState` / `ScrollHandle` 内，父 view notify 不再重建子 view，渲染期不得无条件写 entity / global。
+- **扩展任务行投影不能丢掉已有任务事实**：统一编辑增加分类／标签时曾漏映射 `group_id`、`save_dir`，导致组成员误显示「忽略插件重试」且目录上下文丢失。`DownloadTaskView::local` 必须保留二者；不要用改菜单断言来掩盖事实缺失 → `crates/downloads/src/model/mod.rs::DownloadTaskView::local`、回归 `components::task_table::context_menu_tests::plugin_retry_fact_excludes_task_group_members`。
+- **「全部」命中不能抑制「其他」计数，手动分类须单独求值**：`CategoryIndex::for_each_match` 曾把 `Matcher::All` 也计作具体命中，导致未分类任务的侧栏计数为零；手动归入 `other` 也不能进入自动兜底分支。Rust／Web 均须满足一次扫描计数与逐项过滤等价，重复规则只计一次 → `crates/downloads/src/model/categories.rs`、`model/counts.rs::category_override_counts_match_filters_including_other`、Web `model/counts.test.ts`。
 
 - **顶栏主操作插槽不能占满横向空间**：`size_full()` 或把插槽单独包在 `flex_1()` 容器中，会把紧随其后的暂停 / 开始控件挤到搜索框旁；主按钮根节点用 `h_full().flex_none()`，弹性留白统一放在左区控件之后 → `crates/downloads/src/components/title_bar.rs::DownloadTitleBar::render`、`crates/shell/src/view.rs::render_title_bar`。
 - **插件详情的归档规则状态直接复用 protocol DTO**：`fluxdown_ui_extensions` 没有直接依赖 serde，另写 `Deserialize` 镜像会导致编译失败并让 wire 字段漂移；市场详情通过 `PluginDetail::default` 补齐仅已安装插件才有的状态 → `crates/extensions/src/components/plugin_detail.rs`（`PluginArchiveRulesDto` / `PluginDetail::from_market`）。
@@ -157,6 +159,7 @@
 ## Web SPA
 
 - **新建下载等处生成 UUID 不得用 `crypto.randomUUID()`，一律 `randomUuid()`**：浏览器只在安全上下文（HTTPS / localhost）暴露它，NAS / Docker 经 `http://<局域网 IP>:17800` 访问时缺失，调用即抛错；`getRandomValues` 无此限制 → `web/src/lib/uuid.ts::randomUuid`（使用方 `web/src/pages/downloads/dialogs/importRunner.ts`）。
+- **新增可省略的任务 DTO 字段须同步 Web 归一化契约测试**：Rust `TaskDto.properties` 在全默认时省略，Web `normalizeTask` 会补齐；只更新 `TASK_DEFAULTS` 而漏更新测试的独立期望，会同时破坏任务、快照、事件和转发帧的四个契约用例（#1146 CI）。默认值应对齐 Rust serde，非默认的编辑属性也须验证保留 → `native/protocol/src/task_edit.rs::TaskPropertiesDto`、`web/src/lib/rpc/normalize.ts::TASK_DEFAULTS`、`normalize.test.ts`。
 
 ## 浏览器扩展
 

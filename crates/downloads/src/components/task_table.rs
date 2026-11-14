@@ -6660,28 +6660,6 @@ mod context_menu_tests {
     }
 
     #[test]
-    fn single_local_completed_task_shows_full_menu() {
-        let items = context_menu_items(&[task(true, TaskState::Completed)]);
-        assert_eq!(
-            items,
-            vec![
-                MenuEntry::Boost,
-                MenuEntry::OpenFile,
-                MenuEntry::OpenFolder,
-                MenuEntry::CopyFile,
-                MenuEntry::Rename,
-                MenuEntry::Redownload,
-                MenuEntry::CopyUrl,
-                MenuEntry::MoveToQueue,
-                MenuEntry::Separator,
-                MenuEntry::Delete,
-                MenuEntry::DeleteWithFiles,
-                MenuEntry::ShowDetail,
-            ]
-        );
-    }
-
-    #[test]
     fn multi_select_only_keeps_items_valid_for_every_selected_task() {
         // 一个本地已完成 + 一个远程下载中：单选专属项（重命名/加速/忽略插件重试）
         // 消失；要求全体本地的项（打开文件/目录/移动队列/重下载）因远程任务

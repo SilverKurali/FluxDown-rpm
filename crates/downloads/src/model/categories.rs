@@ -179,16 +179,23 @@ impl CategoryIndex {
         task: &DownloadTaskView,
         mut emit: impl FnMut(&'a str),
     ) {
-        let mut specific_hit = !task.category_override.is_empty();
+        if !task.category_override.is_empty() {
+            for (rule, first_with_id) in self.rules.iter().zip(&self.first_with_id) {
+                if *first_with_id
+                    && (rule.dto.id == task.category_override
+                        || matches!(rule.matcher, Matcher::All))
+                {
+                    emit(&rule.dto.id);
+                }
+            }
+            return;
+        }
+        let mut specific_hit = false;
         let mut other_ids: Vec<&'a str> = Vec::new();
         for (rule, first_with_id) in self.rules.iter().zip(&self.first_with_id) {
             let is_other = matches!(rule.matcher, Matcher::Other);
-            let hit = if task.category_override.is_empty() {
-                !is_other && Self::rule_matches(rule, task)
-            } else {
-                rule.dto.id == task.category_override || matches!(rule.matcher, Matcher::All)
-            };
-            specific_hit |= hit && (!is_other || !task.category_override.is_empty());
+            let hit = !is_other && Self::rule_matches(rule, task);
+            specific_hit |= hit && !matches!(rule.matcher, Matcher::All);
             if !first_with_id {
                 continue;
             }

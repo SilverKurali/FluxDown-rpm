@@ -410,6 +410,8 @@ impl DownloadTaskView {
         view.queue_order = task.queue_order;
         view.origin_url.clone_from(&task.origin_url);
         view.referrer.clone_from(&task.referrer);
+        view.save_dir.clone_from(&task.save_dir);
+        view.group_id.clone_from(&task.group_id);
         view.category_override.clone_from(&task.properties.category);
         view.category_fold = task.properties.category.to_lowercase();
         view.tags_fold = task
