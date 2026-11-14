@@ -2196,6 +2196,10 @@ pub struct SettingFieldDto {
     /// 辅助脚本按钮文案（空则用默认文案）。
     #[serde(default)]
     pub helper_label: Option<String>,
+    /// Per-client display text keyed by locale; technical values remain unchanged.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub localizations:
+        std::collections::BTreeMap<String, crate::plugin_i18n::SettingLocalizationDto>,
 }
 
 /// plugin 层嗅探规则包（`daemon.plugin.sniffRules`）：`pack` 为 `null` 表示从未有过插件规则
