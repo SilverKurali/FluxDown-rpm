@@ -1911,6 +1911,9 @@ pub struct TaskDto {
     /// `rule:system` / `rule:manual` / `rule:custom`；空串 = 非 Auto 且未命中规则。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auto_route: String,
+    /// Non-secret task overrides from the unified property editor.
+    #[serde(default, skip_serializing_if = "crate::TaskPropertiesDto::is_empty")]
+    pub properties: crate::TaskPropertiesDto,
     /// 加速来源累计字节（多 CDN / 智能代理 / 多网卡）；源站 = 已下载 − 三者之和。
     #[serde(default, skip_serializing_if = "is_default_source_bytes")]
     pub source_bytes: crate::TaskSourceBytesDto,
@@ -2193,6 +2196,10 @@ pub struct SettingFieldDto {
     /// 辅助脚本按钮文案（空则用默认文案）。
     #[serde(default)]
     pub helper_label: Option<String>,
+    /// Per-client display text keyed by locale; technical values remain unchanged.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub localizations:
+        std::collections::BTreeMap<String, crate::plugin_i18n::SettingLocalizationDto>,
 }
 
 /// plugin 层嗅探规则包（`daemon.plugin.sniffRules`）：`pack` 为 `null` 表示从未有过插件规则

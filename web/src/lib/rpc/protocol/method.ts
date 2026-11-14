@@ -12,6 +12,8 @@ export const METHOD = {
 
   DAEMON_TASK_LIST: 'daemon.task.list',
   DAEMON_TASK_GET: 'daemon.task.get',
+  DAEMON_TASK_EDIT_INFO: 'daemon.task.editInfo',
+  DAEMON_TASK_EDIT: 'daemon.task.edit',
   DAEMON_TASK_ACTIVITY: 'daemon.task.activity',
   DAEMON_TASK_SPEED_HISTORY: 'daemon.task.speedHistory',
   /** BT 任务实况（`TaskIdParams` → `BtStatusDto`）：详情页 Tracker / 连接标签轮询；非 BT 任务 `invalidArgument`。 */
@@ -136,6 +138,7 @@ export const METHOD = {
   DAEMON_PLUGIN_VIEW_CLOSE: 'daemon.plugin.view.close',
   DAEMON_PLUGIN_VIEW_SNAPSHOT: 'daemon.plugin.view.snapshot',
   DAEMON_PLUGIN_VIEW_KEEPALIVE: 'daemon.plugin.view.keepalive',
+  DAEMON_PLUGIN_VIEW_SET_LOCALE: 'daemon.plugin.view.setLocale',
   DAEMON_PLUGIN_COMMAND: 'daemon.plugin.command',
   DAEMON_PLUGIN_INVOKE: 'daemon.plugin.invoke',
   DAEMON_PLUGIN_PAGE_INVOKE: 'daemon.plugin.pageInvoke',

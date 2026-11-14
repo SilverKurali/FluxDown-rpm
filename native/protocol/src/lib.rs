@@ -15,6 +15,7 @@ pub mod event;
 pub mod handshake;
 pub mod local_service;
 pub mod method;
+pub mod plugin_i18n;
 pub mod plugin_view;
 pub mod proxy_rules;
 pub mod rpc;
@@ -24,6 +25,8 @@ pub mod shortcuts;
 pub mod sound;
 pub mod table_sync;
 pub mod task_activity;
+pub mod task_edit;
+pub use task_edit::{EditTaskParams, TaskEditCapabilities, TaskEditSnapshot, TaskPropertiesDto};
 pub mod update_prompt;
 pub use task_activity::{
     TaskActivityDto, TaskActivityPage, TaskActivityQuery, TaskRuntimeDto, TaskSegmentDto,
@@ -154,12 +157,12 @@ pub use event::{
 pub use plugin_view::{
     NAV_BUILTIN_TARGETS, PluginCommandParams, PluginInvokeParams, PluginPageInvokeParams,
     PluginPageInvokeResultDto, PluginViewEventParams, PluginViewFrameDto,
-    PluginViewKeepaliveParams, PluginViewOpenParams, PluginViewOpenedDto, PluginViewSessionParams,
-    PluginViewSnapshotDto, VIEW_CLOSE_REASON_REQUESTED, VIEW_ERROR_PROP, VIEW_ROOT_ID,
-    VIEW_SCHEMA_JSON, VIEW_TONES_JSON, ViewEffect, ViewError, ViewEventDto, ViewEventPayloadType,
-    ViewEventSpec, ViewItemSpec, ViewKindSpec, ViewLimits, ViewNode, ViewOp, ViewPropFormat,
-    ViewPropSpec, ViewPropType, ViewSchema, apply_view_ops, diff_view, normalize_view,
-    plugin_route_id, view_schema,
+    PluginViewKeepaliveParams, PluginViewLocaleParams, PluginViewOpenParams, PluginViewOpenedDto,
+    PluginViewSessionParams, PluginViewSnapshotDto, VIEW_CLOSE_REASON_REQUESTED, VIEW_ERROR_PROP,
+    VIEW_ROOT_ID, VIEW_SCHEMA_JSON, VIEW_TONES_JSON, ViewEffect, ViewError, ViewEventDto,
+    ViewEventPayloadType, ViewEventSpec, ViewItemSpec, ViewKindSpec, ViewLimits, ViewNode, ViewOp,
+    ViewPropFormat, ViewPropSpec, ViewPropType, ViewSchema, apply_view_ops, diff_view,
+    normalize_view, plugin_route_id, view_schema,
 };
 pub use rpc::{
     APP_VERSION, CLOSE_REASON_SERVICE_QUIT, CLOSE_REASON_SERVICE_RESTART, ClientHello,
