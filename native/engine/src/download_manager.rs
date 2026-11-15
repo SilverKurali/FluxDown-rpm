@@ -14223,7 +14223,7 @@ impl DownloadManager {
             .map_err(db_error)?
             .filter(|bytes| !bytes.is_empty());
         // 种子自带的 tracker 层（BEP 12；磁力链接每个 `tr=` 自成一层）、私有标记与 v2 info hash。
-        let (info_hash, mut info_hash_v2, own_tiers, private): (
+        let (info_hash, mut info_hash_v2, own_tiers, mut private): (
             String,
             Option<String>,
             Vec<Vec<String>>,
@@ -14297,9 +14297,13 @@ impl DownloadManager {
             .map(|handle| crate::bt_status::web_seed_rows(handle.web_seeds()))
             .unwrap_or_default();
         if let Some(handle) = handle {
-            // 磁力任务的 v2 哈希在取得元数据后才知道。
+            // 磁力任务的 v2 哈希与私有标记在取得元数据后才知道。
             info_hash_v2 =
                 info_hash_v2.or_else(|| handle.info_hash_v2().map(|hash| hash.as_string()));
+            private = private
+                || handle
+                    .with_metadata(|meta| meta.info.info().private)
+                    .is_ok_and(|flag| flag);
             if let Some(live) = handle.live() {
                 // 国旗：库未就绪时后台下载（只在有人查看 peer 列表时触发）。
                 crate::geoip::ensure_background(self.data_dir.clone(), self.proxy_config.clone());
@@ -14351,8 +14355,14 @@ impl DownloadManager {
                 .then_with(|| (b.downloaded + b.uploaded).cmp(&(a.downloaded + a.uploaded)))
                 .then_with(|| a.addr.cmp(&b.addr))
         });
+        let dht = crate::bt_status::DhtStatus::resolve(
+            self.bt_config.enable_dht,
+            private,
+            self.bt_session.as_ref().map(|bt| bt.dht_nodes()),
+        );
         Ok(BtStatusView {
             dht_enabled: self.bt_config.enable_dht,
+            dht,
             counts,
             trackers,
             peers,
@@ -16535,7 +16545,8 @@ impl DownloadManager {
             .filter(|list| !list.is_empty() && list.iter().all(|&index| index >= 0))
             .map(|list| list.into_iter().map(|index| index as usize).collect());
 
-        Ok(crate::bt_verify::run(
+        let local_work = crate::transfer_activity::LocalWorkGuard::new(self.sink.clone());
+        let check = crate::bt_verify::run(
             LandedCheck {
                 task_id: task_id.to_owned(),
                 save_dir: PathBuf::from(&task.save_dir),
@@ -16549,7 +16560,9 @@ impl DownloadManager {
                 },
             },
             guard,
-        ))
+            local_work,
+        );
+        Ok(check)
     }
 
     /// 已完成任务落盘文件的哈希（`daemon.task.hash` 与下载完成后自动计算共用）：资格校验与
@@ -16587,6 +16600,7 @@ impl DownloadManager {
             .begin(task_id)
             .ok_or(FileHashError::Busy)?;
         let gate = self.file_hash_gate.clone();
+        let local_work = crate::transfer_activity::LocalWorkGuard::new(self.sink.clone());
         let completed_at = task.completed_at;
         let task_id = task.task_id;
         Ok(async move {
@@ -16618,6 +16632,7 @@ impl DownloadManager {
             );
             let worker_token = token.clone();
             let joined = tokio::task::spawn_blocking(move || {
+                let _local_work = local_work;
                 hash_file(&path, algorithm, || worker_token.is_cancelled())
             })
             .await;

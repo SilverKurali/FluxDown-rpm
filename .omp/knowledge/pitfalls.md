@@ -44,6 +44,8 @@
 
 另见 AGENTS.md §4：BT 判定只认 `magnet:` 与 `torrent-file://`、「复制链接」读 `origin_url`、`dht.json` 撞端口排除区间。
 
+- **随机默认监听端口只能在配置缺失时生成，并原子保存 BT 两个边界**：每次启动重随机会破坏手动 NAT / 防火墙规则；无差别迁移旧值会覆盖用户自选范围与 eD2K 的显式 `0`。只缺一个 BT 边界时沿用另一个，不能拼接随机值 → `native/engine/src/db.rs::init_default_config`、回归 `default_listen_ports_*`（#872）。
+
 - **Windows 子路径 NotFound 不保证父路径是目录**：BT 完成命名先检查目标目录本身，普通文件返回 NotADirectory，避免把其下的候选名误判为空闲 → `native/engine/src/bt_downloader.rs::dedup_name_in_dir`；回归 `completion_layout_propagates_destination_scan_error`。
 - **路径安全测试的 `Path` 解析跟随宿主平台**：Windows 上 `Path::new("a:b")` 会成为盘符前缀，即使传给校验函数的 `windows_rules` 为 false 也不是 `Normal` 组件；「非 Windows 可使用冒号」断言只在非 Windows 执行 → `native/engine/src/bt_downloader.rs::torrent_path_guard_windows_rules_reject_drive_and_reserved`、`native/engine/src/bt_task_files.rs::rename_applies_windows_rules_only_when_asked`。
 - **种子内相对路径必须过 `torrent_relative_path_is_safe`，且 Windows 规则只对 Windows 强加**：Windows 下组件内的 `:`（盘符前缀 / ADS）、控制字符、设备保留名会改写基路径或落到设备；这些在其他平台是合法文件名，不得误杀 → `native/engine/src/bt_downloader.rs::torrent_relative_path_is_safe`（含 `a:b` 非 Windows 放行断言）。
@@ -110,6 +112,7 @@
 
 另见 AGENTS.md §4：本机端口默认宽松显式严格（WSAEACCES 回退）、远程控制凭据与会话撤销、空闲静默、遥测只有两条匿名事件。
 
+- **需要行号／键名的配置草稿诊断须放在预览结果中，不能只依赖 RPC 错误 message**：现有 agent 网关会用 `agent RPC failed` 包装失败，Web 实测只剩通用文案，丢掉 daemon 原始逐行原因。Aria2 编辑器用 `Aria2OptionsResponse.error` 携带诊断，有错时 `values` 为空、两端禁止提交 patch → `native/protocol/src/aria2_options.rs`、`native/daemon/src/service.rs::aria2_options_preview_is_read_only_and_preserves_omitted_settings`、`native/agent/src/gateway.rs`。
 - **归档能力扩展不能顺带改变云端 / LAN 被动接收任务的分类策略**：这两类任务沿用既有 `category_route: None`，不得因接收端存在分类偏好而自动附加路由；默认目录跟随授权只在原本支持该交互的建任务入口传递 → `native/agent/src/remote.rs::create_local_task`、`native/agent/src/link/service.rs`（`DaemonTaskCreator`）。
 - **捕获确认必须显式传递用户禁用自动分类的意图**：仅比较目录值无法区分自动预填与用户手动选回同一目录，确认请求用 `disableCategoryRoute` 阻止 agent 在完成阶段重新启用分类 → `native/agent/src/capture.rs::resolve`、`crates/downloads/src/submission.rs`，回归 `manual_category_directory_disables_capture_route`。
 - **进程测试要区分强杀回收与优雅关停**：Windows `Child::kill` 不是正常退出，不能复用要求成功退出码的断言；`system.shutdown` 与 Unix SIGTERM 仍必须成功退出 → `native/daemon/tests/daemon/process_contract.rs::ProcessGuard::{terminate,wait_for_success,wait_for_exit}`。
@@ -168,6 +171,7 @@
 
 - **新建下载等处生成 UUID 不得用 `crypto.randomUUID()`，一律 `randomUuid()`**：浏览器只在安全上下文（HTTPS / localhost）暴露它，NAS / Docker 经 `http://<局域网 IP>:17800` 访问时缺失，调用即抛错；`getRandomValues` 无此限制 → `web/src/lib/uuid.ts::randomUuid`（使用方 `web/src/pages/downloads/dialogs/importRunner.ts`）。
 - **新增可省略的任务 DTO 字段须同步 Web 归一化契约测试**：Rust `TaskDto.properties` 在全默认时省略，Web `normalizeTask` 会补齐；只更新 `TASK_DEFAULTS` 而漏更新测试的独立期望，会同时破坏任务、快照、事件和转发帧的四个契约用例（#1146 CI）。默认值应对齐 Rust serde，非默认的编辑属性也须验证保留 → `native/protocol/src/task_edit.rs::TaskPropertiesDto`、`web/src/lib/rpc/normalize.ts::TASK_DEFAULTS`、`normalize.test.ts`。
+- **设置行的 `pointer-events-none` 不会禁用键盘与辅助技术操作**：偏好开关依赖另一开关时，除行级灰化外还须把 `disabled` 传给底层 `Switch`；静默自动更新关闭自动检查后必须原生禁用 → `web/src/pages/settings/kit/fields.tsx::PrefSwitchRow`。
 
 ## 浏览器扩展
 
