@@ -231,6 +231,9 @@
     `set_task_location` 后恢复原状态（继续下载 / `spawn_reseed_from_disk` 续种）。动手前把意图写进 config `bt_move_<task_id>`（`MoveJournal`），新位置落库后删；
     进程中途退出时下次启动 `recover_bt_moves`（在 staging 扫描与续种之前）以续传模式做完并落库；回滚也失败（数据分散两处）时任务标错误、日志保留。
     搬移期间 `bt_moves` 登记拒绝恢复 / 暂停 / 删除 / 改文件 / 校验 / 哈希（删除按「文件保留」失败返回）。
+    **非 BT 任务**（HTTP / FTP / eD2K / HLS…，用户 2026-11-16 要求右键「移动到…」对所有本机单任务可用）：daemon `MoveTaskStorage` 先调
+    `task_edit::storage_move` 生成只改 `save_dir` 的统一编辑（按当前 revision），交给 `begin_task_edit` 的搬移（目标文件 + `.fdownloading` + 音轨边车 + `task_artifacts`，
+    `task_edit_move_<id>` 日志，旧文件在落库前一直权威）；BT 才走上面的会话搬移。GPUI `move_storage_visible` / Web `canMoveStorage` = 恰好一个本机任务。
 - **BT 防吸血**（`bt_guard/`，经 rqbit fork 的 `PeerPolicy` 钩子接入 `SharedBtSession::new`）：规则、处置阶梯、分层封禁、持久化与空闲静默约束见
   `ops.md`「已实现（BT 防吸血）」条；改 rqbit fork 先在 `fluxdown/main` 分支提交再更新根 `Cargo.toml` 的 rev。
 - **peer 国旗**（`geoip.rs`，对齐 qBittorrent）：DB-IP「国家 lite」`.mmdb`（CC BY 4.0，关于页署名）+ 自带最小 MaxMind DB 读取器（零依赖，24/28/32 位记录，
@@ -335,7 +338,7 @@
   **删除任务不触发自动重下**：单删/批删在同一事务清空 RSS 条目的任务回链，将原 `Downloaded` 改为 `Ignored`（已读），其余处置状态保留；不能退回 `New`，否则下一轮自动抓取会重新派发。提交后仅向受影响订阅广播条目快照及源计数，手动下载仍对任何状态开放。
 
 ### 受管组件子系统（`components/`，`components` feature）
-外部二进制 **ffmpeg + yt-dlp** 的按需安装器/解析器（**不打包**，合规边界——用户在设置「组件」页触发下载）。解析优先级 `manual`（config path）→ `managed`（`<data_dir>/bin/`）→ `system` PATH，wire 为 `ComponentSource{Manual,Managed,System,None}`。ffmpeg = BtbN 静态归档（取单文件，macOS 不支持受管）；yt-dlp = 单平台二进制（全平台）。版本列表经官方镜像 `fluxdown.com/api/components`（旧版客户端用旧域名 `fluxdown.zerx.dev`，两域同源）+ GitHub 兜底。**被两处消费**：插件 `flux.ffmpeg`/`flux.ytdlp` 能力面 + 设置「组件」UI。载荷下载（`components/segmented.rs`，#453）：`Range: bytes=0-0` 探测 → 206 且总长已知、未压缩时预分配并按 `SEGMENT_POLICY`（≤4 段、每段 ≥2MiB）并发 Range 写入，单段断流 / 30s 停滞 / 5xx·408·429 从断点退避重试（3 次，2s 起倍增），任一段最终失败整体回退单流；探测回 200 则直接把该响应当单流消费。哈希对落盘文件读回计算，多来源（用户镜像 → 插件改写 → 原址）回退与「不符即删」不变。不进任务列表、不跨安装续传。
+外部二进制 **ffmpeg + yt-dlp** 的按需安装器/解析器（**不打包**，合规边界——用户在设置「组件」页触发下载）。解析优先级 `manual`（config path）→ `managed`（`<data_dir>/bin/`）→ `system` PATH，wire 为 `ComponentSource{Manual,Managed,System,None}`。ffmpeg = FFmpeg-Builds/FFmpeg-Builds（原 BtbN/FFmpeg-Builds，2026-11 整仓迁移，#1152）静态归档（取单文件，macOS 不支持受管）；yt-dlp = 单平台二进制（全平台）。资产与校验文件 URL 须落在 `UPSTREAM_DOWNLOAD_PREFIX`（按原始上游地址校验，在用户镜像 / 插件改写之前）；上游再迁仓必须同改 `ffmpeg.rs` 的 `RELEASE_API` / `UPSTREAM_DOWNLOAD_PREFIX` 与官网 `api/components/[name].ts`。版本列表经官方镜像 `fluxdown.com/api/components`（旧版客户端用旧域名 `fluxdown.zerx.dev`，两域同源）+ GitHub 兜底。**被两处消费**：插件 `flux.ffmpeg`/`flux.ytdlp` 能力面 + 设置「组件」UI。载荷下载（`components/segmented.rs`，#453）：`Range: bytes=0-0` 探测 → 206 且总长已知、未压缩时预分配并按 `SEGMENT_POLICY`（≤4 段、每段 ≥2MiB）并发 Range 写入，单段断流 / 30s 停滞 / 5xx·408·429 从断点退避重试（3 次，2s 起倍增），任一段最终失败整体回退单流；探测回 200 则直接把该响应当单流消费。哈希对落盘文件读回计算，多来源（用户镜像 → 插件改写 → 原址）回退与「不符即删」不变。不进任务列表、不跨安装续传。
 
 ---
 
