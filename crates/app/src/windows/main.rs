@@ -127,7 +127,15 @@ fn open_with(cx: &mut App, focus: bool) -> Option<WindowHandle<Root>> {
                         Icon::new(FluxIcon::Sparkles),
                     )
                     .layout_id(entry.layout_id())
-                    .optional(optional),
+                    .optional(optional)
+                    .indicator({
+                        let assistant = assistant.downgrade();
+                        move |cx| {
+                            assistant
+                                .upgrade()
+                                .is_some_and(|assistant| assistant.read(cx).badge_pending())
+                        }
+                    }),
                 ),
                 ActivityEntry::Webhooks => routes.push(
                     ShellRoute::new(
@@ -190,13 +198,22 @@ fn open_with(cx: &mut App, focus: bool) -> Option<WindowHandle<Root>> {
             }),
         };
         let assistant_for_focus = assistant.downgrade();
+        let assistant_for_close = assistant.downgrade();
         let side_panel =
             ShellSidePanel::new(assistant_header, assistant.clone(), "assistantPanelClose")
                 .on_open(move |window, cx| {
                     let Ok(()) = assistant_for_focus
-                        .update(cx, |assistant, cx| assistant.focus_input(window, cx))
+                        .update(cx, |assistant, cx| assistant.on_panel_open(window, cx))
                     else {
                         // 助手视图已随窗口释放，无需聚焦。
+                        return;
+                    };
+                })
+                .on_close(move |window, cx| {
+                    let Ok(()) = assistant_for_close
+                        .update(cx, |assistant, cx| assistant.on_panel_close(window, cx))
+                    else {
+                        // 助手视图已随窗口释放，无需归还焦点。
                         return;
                     };
                 });
@@ -220,6 +237,16 @@ fn open_with(cx: &mut App, focus: bool) -> Option<WindowHandle<Root>> {
             shell.observe_widget_source(&downloads, cx);
             // 版本条目被隐藏时，更新状态变化决定是否临时显示它。
             shell.observe_widget_source(&version_button, cx);
+            // 面板收起或停在历史视图时有待确认的工具调用，助手按钮显示圆点（对话视图里确认卡片就在
+            // 眼前，不重复提醒）；流式回答的逐帧更新不触发 shell 重绘。
+            let had_pending = std::cell::Cell::new(false);
+            cx.observe(&assistant, move |_, assistant, cx| {
+                let pending = assistant.read(cx).badge_pending();
+                if had_pending.replace(pending) != pending {
+                    cx.notify();
+                }
+            })
+            .detach();
             let preferences = Desktop::preferences(cx).clone();
             activity::apply_visibility(shell, &preferences, cx);
             crate::chrome_layout::apply(shell, &preferences, cx);

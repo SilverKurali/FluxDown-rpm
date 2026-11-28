@@ -2,7 +2,7 @@
 //!
 //! 这里不碰 GPUI：视图只读这些函数的结果，时间由调用方传入，保证可单测。
 
-use std::{collections::HashMap, ops::Range};
+use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use fluxdown_protocol::{
     ApplicationErrorCode, AssistantConfigDto, AssistantConfirmationState, AssistantIssueDto,
@@ -30,6 +30,8 @@ pub(crate) const MEMBERSHIP_OFFER_TOOL: &str = "offer_membership";
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Block {
     Text(String),
+    /// 工具调用之前的中间说明文字（历史里的 `assistant_step`）：永远属于「过程」，不会被当作最终回答。
+    Step(String),
     Tool(AssistantToolCallDto),
     Issue(AssistantIssueDto),
 }
@@ -39,6 +41,10 @@ pub(crate) enum Block {
 pub(crate) struct Live {
     pub(crate) status: AssistantRunStatus,
     pub(crate) error: Option<String>,
+    /// 失败原因标识（`timeout` / `maxTurns` / `streamLost` 等）。
+    pub(crate) reason: Option<String>,
+    /// 旁观执行：由其他设备（或本机重启前）发起，本机只显示进度，不执行工具、不能确认。
+    pub(crate) observing: bool,
 }
 
 /// 一问一答：用户提问、中间过程、最终回答与问题单草稿。
@@ -46,8 +52,12 @@ pub(crate) struct Live {
 pub(crate) struct Turn {
     /// 折叠状态等界面状态的键：执行 ID 优先，其次消息 / 起始时间。
     pub(crate) key: String,
+    /// 提问所在的云端用户消息 ID：重新生成 / 编辑重发据此替换；只有已落库的历史轮次有。
+    pub(crate) user_message_id: Option<String>,
     pub(crate) question: String,
     pub(crate) image_count: usize,
+    /// 历史提问附图的附件 ID（经 `agent.assistant.attachment` 取图）。
+    pub(crate) image_ids: Vec<String>,
     /// 可评价的回答消息 ID：历史里最后一条有内容的 assistant 消息；实时执行取执行的
     /// `message_id`（只有正常作答 / 固定回复才有）。`None` = 本轮没有可评价的回答。
     pub(crate) message_id: Option<String>,
@@ -55,32 +65,70 @@ pub(crate) struct Turn {
     pub(crate) rating: Option<String>,
     /// 最终回答之前的全部条目：中间文本与工具调用（可折叠的「过程」）。
     pub(crate) steps: Vec<Block>,
-    /// 最终回答（Markdown）；尚未产出时为 `None`。
-    pub(crate) answer: Option<String>,
+    /// 最终回答（Markdown）；尚未产出时为 `None`。`Arc` 让每次重绘不再复制整段文本。
+    pub(crate) answer: Option<Arc<str>>,
+    /// 回答没写完就中断（取消 / 超时 / 失败）：内容是中断前已输出的部分。
+    pub(crate) answer_interrupted: bool,
     /// 本轮是否显示开通会员卡片：有成功的 `offer_membership` 工具调用（同轮多次也只一张）。
     pub(crate) membership_offer: bool,
     pub(crate) issues: Vec<AssistantIssueDto>,
     pub(crate) live: Option<Live>,
+    /// 云端执行 ID（收到首帧才有）。已有执行 ID 说明云端已保存这条提问，只是历史还没读到。
+    pub(crate) run_id: Option<String>,
     /// 云端历史轮次的起始时间（RFC 3339），用于把问题单挂到对应轮次；实时轮次为 `None`。
     started_at: Option<String>,
 }
 
 impl Turn {
+    pub(crate) fn new(key: String) -> Self {
+        Self {
+            key,
+            run_id: None,
+            user_message_id: None,
+            question: String::new(),
+            image_count: 0,
+            image_ids: Vec::new(),
+            message_id: None,
+            rating: None,
+            steps: Vec::new(),
+            answer: None,
+            answer_interrupted: false,
+            membership_offer: false,
+            issues: Vec::new(),
+            live: None,
+            started_at: None,
+        }
+    }
+
     pub(crate) fn run_active(&self) -> bool {
         self.live
             .as_ref()
             .is_some_and(|live| live.status.is_active())
     }
 
+    /// 旁观他处发起的执行（本机不执行它的工具、不能确认）。
+    pub(crate) fn is_observing(&self) -> bool {
+        self.live.as_ref().is_some_and(|live| live.observing)
+    }
+
+    /// 本轮提问里本次新附的图张数（沿用的旧图另有附件 ID，不在其内）。
+    pub(crate) fn new_image_count(&self) -> usize {
+        self.image_count.saturating_sub(self.image_ids.len())
+    }
+
     /// 本轮是否有等待用户确认的工具调用（未过期）。
     pub(crate) fn has_pending_confirmation(&self, now_ms: i64) -> bool {
+        // 旁观执行的确认只能在发起它的设备上处理，这里不算「待确认」。
+        if self.is_observing() {
+            return false;
+        }
         let active = self.run_active();
         self.steps.iter().any(|block| match block {
             Block::Tool(call) => matches!(
                 confirm_view(call, active, now_ms),
                 Some(ConfirmView::Pending { .. })
             ),
-            Block::Text(_) | Block::Issue(_) => false,
+            Block::Text(_) | Block::Step(_) | Block::Issue(_) => false,
         })
     }
 
@@ -97,10 +145,11 @@ impl Turn {
         self.answer.as_ref()?;
         match &self.live {
             Some(live)
-                if !matches!(
-                    live.status,
-                    AssistantRunStatus::Completed | AssistantRunStatus::Replied
-                ) =>
+                if self.started_at.is_none()
+                    && !matches!(
+                        live.status,
+                        AssistantRunStatus::Completed | AssistantRunStatus::Replied
+                    ) =>
             {
                 None
             }
@@ -109,13 +158,13 @@ impl Turn {
     }
 }
 
-/// 「过程」折叠区是否展开：有待确认的工具时强制展开；否则取用户选择，缺省为
-/// 「执行中且最终回答尚未产出」时展开，回答出现后收起。
+/// 「过程」折叠区是否展开：有待确认的工具时强制展开；否则取用户选择，缺省为执行进行中展开、
+/// 结束后收起（不随「回答是否已出现」开合，免得中间文字后接工具调用时反复抖动）。
 pub(crate) fn steps_open(turn: &Turn, user_choice: Option<bool>, now_ms: i64) -> bool {
     if turn.has_pending_confirmation(now_ms) {
         return true;
     }
-    user_choice.unwrap_or_else(|| turn.run_active() && turn.answer.is_none())
+    user_choice.unwrap_or_else(|| turn.run_active())
 }
 
 /// 一轮条目拆分后的结果。
@@ -182,27 +231,73 @@ fn live_turn(run: &AssistantRunDto, overrides: &HashMap<String, AssistantIssueDt
         || format!("live:{}", run.started_at_unix_ms),
         |id| format!("run:{id}"),
     );
-    Turn {
-        key,
-        question: run.question.clone(),
-        image_count: 0,
-        message_id: run.message_id.clone().filter(|_| {
-            matches!(
-                run.status,
-                AssistantRunStatus::Completed | AssistantRunStatus::Replied
-            )
-        }),
-        rating: None,
-        steps,
-        answer,
-        issues,
-        membership_offer,
-        live: Some(Live {
-            status: run.status,
-            error: run.error.clone().filter(|error| !error.is_empty()),
-        }),
-        started_at: None,
+    let mut turn = Turn::new(key);
+    turn.question.clone_from(&run.question);
+    turn.run_id.clone_from(&run.run_id);
+    // 沿用的旧图（keepImages）以附件 ID 给出，与本次新附的张数分开；轮次的总张数是两者之和。
+    turn.image_ids.clone_from(&run.image_ids);
+    turn.image_count = run.image_count as usize + run.image_ids.len();
+    turn.message_id = run.message_id.clone().filter(|_| {
+        matches!(
+            run.status,
+            AssistantRunStatus::Completed | AssistantRunStatus::Replied
+        )
+    });
+    turn.answer_interrupted = answer.is_some()
+        && matches!(
+            run.status,
+            AssistantRunStatus::Failed | AssistantRunStatus::Canceled
+        );
+    turn.steps = steps;
+    turn.answer = answer.map(Arc::from);
+    turn.issues = issues;
+    turn.membership_offer = membership_offer;
+    turn.live = Some(live_status(run));
+    turn
+}
+
+fn live_status(run: &AssistantRunDto) -> Live {
+    Live {
+        status: run.status,
+        error: run.error.clone().filter(|error| !error.is_empty()),
+        reason: run.error_reason.clone().filter(|reason| !reason.is_empty()),
+        observing: run.observing,
     }
+}
+
+/// 已结束且已落库的执行：以历史为准；但历史若是执行中途读到的（还没有最终回答、或工具仍在
+/// 运行）而实时内容更完整，就继续用实时内容（带上历史里的用户消息 ID / 附图 / 评价 / 起始时间），
+/// 直到结束后那次重读成功。失败 / 停止的状态与原因随轮次保留，失败说明与重试据此显示。
+fn finished_turn(
+    group: HistoryTurn,
+    run: &AssistantRunDto,
+    overrides: &HashMap<String, AssistantIssueDto>,
+) -> Turn {
+    let history = group.into_turn();
+    let history_tool_running = history.steps.iter().any(
+        |block| matches!(block, Block::Tool(call) if call.status == AssistantToolStatus::Running),
+    );
+    let overlay = live_turn(run, overrides);
+    if (history.answer.is_none() && overlay.answer.is_some()) || history_tool_running {
+        let mut turn = overlay;
+        turn.user_message_id = history.user_message_id;
+        if !history.image_ids.is_empty() {
+            turn.image_ids = history.image_ids;
+        }
+        turn.image_count = turn.image_count.max(history.image_count);
+        turn.message_id = turn.message_id.or(history.message_id);
+        turn.rating = history.rating;
+        turn.started_at = history.started_at;
+        return turn;
+    }
+    let mut turn = history;
+    if matches!(
+        run.status,
+        AssistantRunStatus::Failed | AssistantRunStatus::Canceled
+    ) {
+        turn.live = overlay.live;
+    }
+    turn
 }
 
 /// 问题单在本地确认 / 丢弃后的最新状态优先于推送与历史里的旧副本。
@@ -220,10 +315,13 @@ struct HistoryTurn {
     run_id: Option<String>,
     key: String,
     started_at: String,
+    user_message_id: Option<String>,
     question: String,
     image_count: usize,
+    image_ids: Vec<String>,
     /// 最后一条有内容的 assistant 消息：`(消息 ID, 云端评价)`。
     answer_message: Option<(String, Option<String>)>,
+    answer_interrupted: bool,
     blocks: Vec<Block>,
 }
 
@@ -237,9 +335,12 @@ impl HistoryTurn {
             run_id: message.run_id.clone(),
             key,
             started_at: message.created_at.clone(),
+            user_message_id: None,
             question: String::new(),
             image_count: 0,
+            image_ids: Vec::new(),
             answer_message: None,
+            answer_interrupted: false,
             blocks: Vec::new(),
         }
     }
@@ -249,11 +350,19 @@ impl HistoryTurn {
             "user" => {
                 self.question.clone_from(&message.content);
                 self.image_count = message.images.len();
+                self.image_ids.clone_from(&message.images);
+                self.user_message_id = Some(message.id.clone());
             }
             "assistant" => {
                 if !message.content.trim().is_empty() {
                     self.blocks.push(Block::Text(message.content.clone()));
                     self.answer_message = Some((message.id.clone(), message.rating.clone()));
+                    self.answer_interrupted = message.interrupted;
+                }
+            }
+            "assistant_step" => {
+                if !message.content.trim().is_empty() {
+                    self.blocks.push(Block::Step(message.content.clone()));
                 }
             }
             "tool_call" => self.blocks.push(Block::Tool(tool_from_call(message))),
@@ -271,7 +380,7 @@ impl HistoryTurn {
                         None => Some(call.name.as_str()) == message.tool_name.as_deref(),
                     }
             }
-            Block::Text(_) | Block::Issue(_) => false,
+            Block::Text(_) | Block::Step(_) | Block::Issue(_) => false,
         });
         // 历史里保留完整结果（服务端工具也带上），界面展示时再截断；复制对话时用完整内容。
         let preview = Some(message.content.trim().to_owned()).filter(|text| !text.is_empty());
@@ -305,19 +414,21 @@ impl HistoryTurn {
         let (message_id, rating) = self
             .answer_message
             .map_or((None, None), |(id, rating)| (Some(id), rating));
-        Turn {
-            key: self.key,
-            question: self.question,
-            image_count: self.image_count,
-            message_id,
-            rating,
-            steps,
-            answer,
-            issues,
-            membership_offer,
-            live: None,
-            started_at: Some(self.started_at),
-        }
+        let mut turn = Turn::new(self.key);
+        turn.run_id = self.run_id;
+        turn.user_message_id = self.user_message_id;
+        turn.question = self.question;
+        turn.image_count = self.image_count;
+        turn.image_ids = self.image_ids;
+        turn.message_id = message_id;
+        turn.rating = rating;
+        turn.steps = steps;
+        turn.answer_interrupted = self.answer_interrupted && answer.is_some();
+        turn.answer = answer.map(Arc::from);
+        turn.issues = issues;
+        turn.membership_offer = membership_offer;
+        turn.started_at = Some(self.started_at);
+        turn
     }
 }
 
@@ -388,7 +499,7 @@ pub(crate) fn build_timeline(
                 let already = std::mem::replace(&mut consumed[index], true);
                 let run = live[index];
                 if !run.status.is_active() {
-                    turns.push(group.into_turn());
+                    turns.push(finished_turn(group, run, overrides));
                 } else if !already {
                     turns.push(live_turn(run, overrides));
                 }
@@ -434,19 +545,11 @@ fn place_issues(
             .or_else(|| turns.len().checked_sub(1));
         match target.and_then(|index| turns.get_mut(index)) {
             Some(turn) => turn.issues.push(issue),
-            None => turns.push(Turn {
-                key: format!("issue:{}", issue.id),
-                question: String::new(),
-                image_count: 0,
-                message_id: None,
-                rating: None,
-                steps: Vec::new(),
-                answer: None,
-                issues: vec![issue],
-                membership_offer: false,
-                live: None,
-                started_at: None,
-            }),
+            None => {
+                let mut turn = Turn::new(format!("issue:{}", issue.id));
+                turn.issues.push(issue);
+                turns.push(turn);
+            }
         }
     }
 }
@@ -640,9 +743,14 @@ pub(crate) enum ToolState {
     Failed,
     /// 所属执行已结束，工具却没有结果（连接中断等）。
     Interrupted,
+    /// 已批准的写操作在执行中被停止：本机请求可能已生效，结果未知。
+    ResultUnknown,
 }
 
 pub(crate) fn tool_state(call: &AssistantToolCallDto, run_active: bool) -> ToolState {
+    if call.interrupted {
+        return ToolState::ResultUnknown;
+    }
     match call.status {
         AssistantToolStatus::Succeeded => ToolState::Succeeded,
         AssistantToolStatus::Failed => ToolState::Failed,
@@ -704,14 +812,127 @@ pub(crate) const fn remaining_seconds(remaining_ms: i64) -> i64 {
     (remaining_ms + 999) / 1000
 }
 
-/// 倒计时文案:一分钟以内 `N s`,否则 `M:SS`。
-pub(crate) fn format_countdown(seconds: i64) -> String {
+/// 取界面文案：`(键, 占位符参数)`。
+pub(crate) type Translate<'a> = &'a dyn Fn(&str, &[(&str, &str)]) -> String;
+
+/// 倒计时文案:一分钟以内 `N s`(单位走 i18n),否则 `M:SS`。
+pub(crate) fn format_countdown(seconds: i64, t: Translate) -> String {
     let seconds = seconds.max(0);
     if seconds < 60 {
-        format!("{seconds} s")
+        t("assistantUnitSeconds", &[("n", &seconds.to_string())])
     } else {
         format!("{}:{:02}", seconds / 60, seconds % 60)
     }
+}
+
+/// 配置请求的响应并入当前状态：执行（`runs`）只信推送，永远保留当前的；请求发出后若有推送
+/// 改写了配置（`stale`），响应里的配置（用量 / 额度）比推送旧，整份丢弃，只在当前还没有配置
+/// 时才采用响应的配置。
+pub(crate) fn merge_config_response(
+    current: &AssistantStateDto,
+    response: AssistantStateDto,
+    stale: bool,
+) -> AssistantStateDto {
+    if !stale {
+        return AssistantStateDto {
+            runs: current.runs.clone(),
+            ..response
+        };
+    }
+    let mut merged = current.clone();
+    if merged.config.is_none() {
+        merged.config = response.config;
+    }
+    // agent 时钟只用来算偏差：始终取最新一次的值。
+    merged.now_unix_ms = response.now_unix_ms;
+    merged
+}
+
+/// 点踩后补充说明的字符数上限（与云端 `rate` 的 `comment` 一致）。
+pub(crate) const MAX_RATING_COMMENT_CHARS: usize = 500;
+
+/// 评价说明的提交值：去首尾空白后 1–[`MAX_RATING_COMMENT_CHARS`] 个字符；空白或超长返回 `None`。
+pub(crate) fn rating_comment(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let count = trimmed.chars().count();
+    (1..=MAX_RATING_COMMENT_CHARS)
+        .contains(&count)
+        .then(|| trimmed.to_owned())
+}
+
+/// 失败轮次的一键重试方案。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RetryPlan {
+    /// 已落库：替换这条用户消息及之后的对话，沿用旧图（`keep_images`）。
+    Replace {
+        user_message_id: String,
+        text: String,
+        keep_images: bool,
+    },
+    /// 云端从未给过执行 ID（首帧前就失败）：提问没有落库，在同一会话里以同一问题重发；
+    /// `with_images` 为本地图片仍在、一并带上。
+    Resend { text: String, with_images: bool },
+}
+
+/// 一轮失败后能否一键重试：只有最后一轮、执行失败（不含用户主动停止）、问题文本非空才有。
+/// 已落库（有用户消息 ID）的替换原提问；没有用户消息 ID 但已有执行 ID 的，云端先保存提问再开流，
+/// 只是历史还没读到，此时重发会重复提问并多占一次会话上限，所以不给方案（读到历史后变成替换）。
+/// 执行 ID 都没有的才重发；带图的只在本地图片张数与提问张数一致时才能重发（页面刷新后图片已不在本地）。
+pub(crate) fn retry_plan(turn: &Turn, is_last: bool, local_images: usize) -> Option<RetryPlan> {
+    if !is_last
+        || !turn
+            .live
+            .as_ref()
+            .is_some_and(|live| live.status == AssistantRunStatus::Failed)
+    {
+        return None;
+    }
+    let text = turn.question.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some(id) = &turn.user_message_id {
+        return Some(RetryPlan::Replace {
+            user_message_id: id.clone(),
+            text: text.to_owned(),
+            keep_images: turn.image_count > 0,
+        });
+    }
+    if turn.run_id.is_some() {
+        return None;
+    }
+    if turn.image_count == 0 {
+        return Some(RetryPlan::Resend {
+            text: text.to_owned(),
+            with_images: false,
+        });
+    }
+    (local_images == turn.image_count).then(|| RetryPlan::Resend {
+        text: text.to_owned(),
+        with_images: true,
+    })
+}
+
+impl Turn {
+    /// 失败的轮次已有执行 ID、却还没读到它的用户消息：需要重读会话历史后才能重试。
+    pub(crate) fn awaiting_history(&self) -> bool {
+        self.run_id.is_some()
+            && self.user_message_id.is_none()
+            && self
+                .live
+                .as_ref()
+                .is_some_and(|live| live.status == AssistantRunStatus::Failed)
+    }
+}
+
+/// 距对话底部还有多远（像素）：`max` 为可滚动总量，`offset` 为当前偏移（向下滚时为负）。
+pub(crate) fn distance_from_bottom(max: f32, offset: f32) -> f32 {
+    (max + offset).max(0.)
+}
+
+/// 离底部超过一屏才显示「回到底部」。
+pub(crate) fn show_scroll_to_bottom(max: f32, offset: f32, viewport: f32) -> bool {
+    viewport > 0. && distance_from_bottom(max, offset) > viewport
 }
 
 /// 所有进行中执行里等待确认的调用数。
@@ -719,7 +940,7 @@ pub(crate) fn pending_confirmations(state: &AssistantStateDto, now_ms: i64) -> u
     state
         .runs
         .iter()
-        .filter(|run| run.status.is_active())
+        .filter(|run| run.status.is_active() && !run.observing)
         .flat_map(|run| run.items.iter())
         .filter(|item| match item {
             AssistantRunItemDto::Tool { call } => matches!(
@@ -740,7 +961,9 @@ pub(crate) fn pending_elsewhere(
     state
         .runs
         .iter()
-        .filter(|run| run.status.is_active() && Some(run.session_id.as_str()) != current)
+        .filter(|run| {
+            run.status.is_active() && !run.observing && Some(run.session_id.as_str()) != current
+        })
         .find(|run| {
             run.items.iter().any(|item| match item {
                 AssistantRunItemDto::Tool { call } => matches!(
@@ -790,12 +1013,16 @@ pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
     }
 }
 
-/// 工具耗时：不足 1 秒用毫秒，否则一位小数的秒。
-pub(crate) fn format_duration(duration_ms: i64) -> String {
+/// 工具耗时：不足 1 秒用毫秒，否则一位小数的秒（单位走 i18n）。
+pub(crate) fn format_duration(duration_ms: i64, t: Translate) -> String {
     if duration_ms < 1000 {
-        format!("{} ms", duration_ms.max(0))
+        t(
+            "assistantUnitMilliseconds",
+            &[("n", &duration_ms.max(0).to_string())],
+        )
     } else {
-        format!("{}.{} s", duration_ms / 1000, (duration_ms % 1000) / 100)
+        let seconds = format!("{}.{}", duration_ms / 1000, (duration_ms % 1000) / 100);
+        t("assistantUnitSeconds", &[("n", &seconds)])
     }
 }
 
@@ -809,6 +1036,7 @@ pub(crate) fn tool_status_key(confirmation: Option<ConfirmView>, state: ToolStat
     match (confirmation, state) {
         (Some(ConfirmView::Pending { .. }), _) => "assistantToolWaiting",
         (Some(ConfirmView::Declined | ConfirmView::Expired), _) => "assistantToolSkipped",
+        (_, ToolState::ResultUnknown) => "assistantToolResultUnknown",
         (_, ToolState::Running) => "assistantToolRunning",
         (_, ToolState::Succeeded) => "assistantToolDone",
         (_, ToolState::Failed) => "assistantToolFailed",
@@ -820,37 +1048,42 @@ pub(crate) fn tool_status_key(confirmation: Option<ConfirmView>, state: ToolStat
 
 /// 一轮对话的 Markdown 副本：提问、全部过程（中间文本、每次工具调用的状态 / 耗时 / 完整参数与
 /// 结果）、最终回答、失败 / 停止说明与问题单草稿。`t` 按文案键取界面语言的标签。
-pub(crate) fn turn_transcript(turn: &Turn, now_ms: i64, t: impl Fn(&str) -> String) -> String {
+pub(crate) fn turn_transcript(turn: &Turn, now_ms: i64, t: Translate) -> String {
+    let tr = |key: &str| t(key, &[]);
     let mut out = format!(
         "## {}\n\n{}\n\n## {}\n",
-        t("assistantTranscriptUser"),
+        tr("assistantTranscriptUser"),
         turn.question.trim(),
-        t("assistantTranscriptAssistant"),
+        tr("assistantTranscriptAssistant"),
     );
     let active = turn.run_active();
     for block in &turn.steps {
         match block {
-            Block::Text(text) => push_paragraph(&mut out, text.trim()),
-            Block::Tool(call) => push_tool(&mut out, call, active, now_ms, &t),
+            Block::Text(text) | Block::Step(text) => push_paragraph(&mut out, text.trim()),
+            Block::Tool(call) => push_tool(&mut out, call, active, now_ms, t),
             Block::Issue(_) => {}
         }
     }
     if let Some(answer) = &turn.answer {
         push_paragraph(&mut out, answer.trim());
+        if turn.answer_interrupted {
+            push_paragraph(&mut out, &tr("assistantAnswerInterrupted"));
+        }
     }
     if turn.membership_offer {
-        push_paragraph(&mut out, &format!("### {}", t("assistantMembershipTitle")));
-        push_paragraph(&mut out, &t("assistantMembershipBody"));
+        push_paragraph(&mut out, &format!("### {}", tr("assistantMembershipTitle")));
+        push_paragraph(&mut out, &tr("assistantMembershipBody"));
     }
     if let Some(live) = &turn.live {
         match live.status {
             AssistantRunStatus::Failed => {
-                push_paragraph(&mut out, &t("assistantRunFailed"));
+                push_paragraph(&mut out, &tr("assistantRunFailed"));
+                push_paragraph(&mut out, &tr(run_error_key(live.reason.as_deref())));
                 if let Some(error) = &live.error {
                     push_paragraph(&mut out, error.trim());
                 }
             }
-            AssistantRunStatus::Canceled => push_paragraph(&mut out, &t("assistantStopped")),
+            AssistantRunStatus::Canceled => push_paragraph(&mut out, &tr("assistantStopped")),
             AssistantRunStatus::Starting
             | AssistantRunStatus::Running
             | AssistantRunStatus::Completed
@@ -878,25 +1111,26 @@ fn push_tool(
     call: &AssistantToolCallDto,
     run_active: bool,
     now_ms: i64,
-    t: &impl Fn(&str) -> String,
+    t: Translate,
 ) {
+    let tr = |key: &str| t(key, &[]);
     let status = tool_status_key(
         confirm_view(call, run_active, now_ms),
         tool_state(call, run_active),
     );
     let mut head = format!(
         "### {} `{}` · {}",
-        t("assistantTranscriptTool"),
+        tr("assistantTranscriptTool"),
         call.name,
-        t(status)
+        tr(status)
     );
     if call.kind == "client" {
         head.push_str(" · ");
-        head.push_str(&t("assistantToolLocal"));
+        head.push_str(&tr("assistantToolLocal"));
     }
     if let Some(duration) = call.duration_ms {
         head.push_str(" · ");
-        head.push_str(&format_duration(duration));
+        head.push_str(&format_duration(duration, t));
     }
     push_paragraph(out, &head);
     if let Some(arguments) = call
@@ -904,7 +1138,7 @@ fn push_tool(
         .as_ref()
         .filter(|arguments| arguments_summary(Some(arguments)).is_some())
     {
-        push_paragraph(out, &format!("{}:", t("assistantToolArguments")));
+        push_paragraph(out, &format!("{}:", tr("assistantToolArguments")));
         push_paragraph(out, &fenced(&arguments_pretty(arguments), "json"));
     }
     if let Some(output) = call
@@ -912,7 +1146,7 @@ fn push_tool(
         .as_deref()
         .filter(|output| !output.trim().is_empty())
     {
-        push_paragraph(out, &format!("{}:", t("assistantToolOutput")));
+        push_paragraph(out, &format!("{}:", tr("assistantToolOutput")));
         push_paragraph(out, &fenced(&format_tool_output(output), ""));
     }
 }
@@ -985,24 +1219,29 @@ pub(crate) fn gate(signed_in: bool, state: &AssistantStateDto, fetch_failed: boo
 pub(crate) enum SendFailure {
     SignedOut,
     NotOpen,
+    /// 当日次数用完（套餐每日上限）：重新取配置让额度卡片出现。
     QuotaExceeded,
+    /// 每分钟限频：稍后再试，额度并未用完。
+    RateLimited,
     /// 该会话已有执行在进行。
     Busy,
     Unavailable,
     /// 参数被拒（过长等）。
     Rejected,
     Failed,
+    /// 本会话提问数已达套餐上限：开始新对话才能继续。
+    SessionLimit,
 }
 
+/// 按失败原因（`reason`）归类，其次按错误码：额度用尽与每分钟限频是两回事，不能混用文案。
 pub(crate) fn classify_send_error(error: &RpcErrorData) -> SendFailure {
-    if error.reason == Some(ErrorReason::RateLimited) {
-        return SendFailure::QuotaExceeded;
-    }
-    if error.reason == Some(ErrorReason::SessionExpired) {
-        return SendFailure::SignedOut;
-    }
-    if error.reason == Some(ErrorReason::CloudUnreachable) {
-        return SendFailure::Unavailable;
+    match error.reason {
+        Some(ErrorReason::AssistantQuotaExceeded) => return SendFailure::QuotaExceeded,
+        Some(ErrorReason::RateLimited) => return SendFailure::RateLimited,
+        Some(ErrorReason::AssistantSessionLimit) => return SendFailure::SessionLimit,
+        Some(ErrorReason::SessionExpired) => return SendFailure::SignedOut,
+        Some(ErrorReason::CloudUnreachable) => return SendFailure::Unavailable,
+        _ => {}
     }
     match error.code {
         ApplicationErrorCode::Unauthorized => SendFailure::SignedOut,
@@ -1016,12 +1255,140 @@ pub(crate) fn classify_send_error(error: &RpcErrorData) -> SendFailure {
     }
 }
 
+/// 剩余提问次数不超过这个数时，输入区提示还能问几次。
+pub(crate) const SESSION_REMAINING_HINT_MAX: u64 = 3;
+
+/// 当前会话的提问上限状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionQuota {
+    /// 不限，或剩余次数还多：界面不变。
+    Free,
+    /// 还剩这么多次（1..=[`SESSION_REMAINING_HINT_MAX`]）：输入区附近提示。
+    Low(u64),
+    /// 已达上限：不能再提问（是否还有进行中的执行由调用方判断）。
+    Reached,
+}
+
+/// `limit` = 配置的 `sessionLimit`（0 = 不限），`used` = 会话详情的 `questionsUsed`。
+pub(crate) const fn session_quota(limit: u32, used: u64) -> SessionQuota {
+    if limit == 0 {
+        return SessionQuota::Free;
+    }
+    let limit = limit as u64;
+    if used >= limit {
+        return SessionQuota::Reached;
+    }
+    let remaining = limit - used;
+    if remaining <= SESSION_REMAINING_HINT_MAX {
+        SessionQuota::Low(remaining)
+    } else {
+        SessionQuota::Free
+    }
+}
+
+/// 提问以外的动作（确认 / 评分 / 问题单 / 会话管理）失败的归类。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActionError {
+    /// 确认窗口已过期：该调用没有执行。
+    ConfirmExpired,
+    Failed,
+}
+
+pub(crate) fn classify_action_error(error: &RpcErrorData) -> ActionError {
+    if error.reason == Some(ErrorReason::AssistantConfirmExpired) {
+        ActionError::ConfirmExpired
+    } else {
+        ActionError::Failed
+    }
+}
+
+impl ActionError {
+    pub(crate) const fn key(self) -> &'static str {
+        match self {
+            Self::ConfirmExpired => "assistantErrConfirmExpired",
+            Self::Failed => "assistantActionFailed",
+        }
+    }
+}
+
+impl SendFailure {
+    pub(crate) const fn key(self) -> &'static str {
+        match self {
+            Self::SignedOut => "assistantErrSignedOut",
+            Self::NotOpen => "assistantErrNotOpen",
+            Self::QuotaExceeded => "assistantErrQuota",
+            Self::RateLimited => "assistantErrRateLimited",
+            Self::Busy => "assistantErrBusy",
+            Self::Unavailable => "assistantErrUnavailable",
+            Self::Rejected => "assistantErrRejected",
+            Self::Failed => "assistantErrFailed",
+            Self::SessionLimit => "assistantErrSessionLimit",
+        }
+    }
+}
+
+/// 执行失败原因（`AssistantRunDto::error_reason`）对应的文案键；未知原因按 `error` 处理。
+pub(crate) fn run_error_key(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("timeout") => "assistantRunErrTimeout",
+        Some("maxTurns") => "assistantRunErrMaxTurns",
+        Some("noAnswer") => "assistantRunErrNoAnswer",
+        Some("contextOverflow") => "assistantRunErrContextOverflow",
+        Some("imageUnsupported") => "assistantRunErrImageUnsupported",
+        Some("unavailable") => "assistantRunErrUnavailable",
+        Some("streamLost") => "assistantRunErrStreamLost",
+        Some("network") => "assistantRunErrNetwork",
+        _ => "assistantRunErrError",
+    }
+}
+
+/// 是否是已知的失败原因：未知 / 缺省时界面附带显示失败原文。
+pub(crate) fn run_error_known(reason: Option<&str>) -> bool {
+    matches!(
+        reason,
+        Some(
+            "timeout"
+                | "maxTurns"
+                | "noAnswer"
+                | "contextOverflow"
+                | "imageUnsupported"
+                | "unavailable"
+                | "streamLost"
+                | "network"
+        )
+    )
+}
+
+/// agent 主机时钟比本机快多少毫秒（本机收到时刻 − agent 生成该状态的时刻）；旧 agent 不带时钟
+/// （`now_unix_ms == 0`）视为无偏差。
+pub(crate) const fn clock_offset_ms(local_now_ms: i64, agent_now_ms: i64) -> i64 {
+    if agent_now_ms == 0 {
+        0
+    } else {
+        local_now_ms - agent_now_ms
+    }
+}
+
+/// 把本机时刻换算成 agent 时钟下的时刻（与 `confirm_deadline_unix_ms` 同一时钟）。
+pub(crate) const fn agent_now_ms(local_now_ms: i64, offset_ms: i64) -> i64 {
+    local_now_ms - offset_ms
+}
+
 #[cfg(test)]
 mod tests {
     use fluxdown_protocol::AssistantToolEffect;
     use serde_json::json;
 
     use super::*;
+
+    /// 测试用翻译：`<键>` 加 `{参数=值}` 后缀，断言不依赖具体语言。
+    fn fake_t(key: &str, args: &[(&str, &str)]) -> String {
+        let mut out = format!("<{key}>");
+        for (name, value) in args {
+            out.push_str(&format!("{{{name}={value}}}"));
+        }
+        out
+    }
 
     fn message(
         id: &str,
@@ -1073,10 +1440,7 @@ mod tests {
             question: "live question".to_owned(),
             started_at_unix_ms: 1_000,
             items,
-            message_id: None,
-            error: None,
-            input_tokens: 0,
-            output_tokens: 0,
+            ..AssistantRunDto::default()
         }
     }
 
@@ -1120,7 +1484,7 @@ mod tests {
             message("m4", Some("r1"), 4, "assistant", "about 80 Mbps"),
         ];
         let turns = build_timeline("s1", &history, &[], &[], &none());
-        let text = turn_transcript(&turns[0], 0, |key| format!("<{key}>"));
+        let text = turn_transcript(&turns[0], 0, &fake_t);
         assert!(text.starts_with("## <assistantTranscriptUser>\n\nhow fast?\n"));
         assert!(text.contains("`net_measure` · <assistantToolDone>"));
         assert!(text.contains("```json\n{\n  \"url\": \"https://a.example\"\n}\n```"));
@@ -1167,7 +1531,7 @@ mod tests {
         let Block::Tool(call) = &turns[0].steps[0] else {
             panic!("expected tool step");
         };
-        assert_eq!(tool_state(call, false), ToolState::Interrupted);
+        assert!(matches!(tool_state(call, false), ToolState::Interrupted));
         assert_eq!(turns[0].answer, None);
     }
 
@@ -1401,7 +1765,7 @@ mod tests {
             ],
         )];
         let turns = build_timeline("s1", &[], &[], &runs, &none());
-        let out = turn_transcript(&turns[0], 0, |key| format!("<{key}>"));
+        let out = turn_transcript(&turns[0], 0, &fake_t);
         assert!(!out.contains(MEMBERSHIP_OFFER_TOOL));
         let answer_at = out.find("final");
         let card_at = out.find("### <assistantMembershipTitle>");
@@ -1541,11 +1905,7 @@ mod tests {
         assert_eq!(remaining_seconds(1_000), 1);
         assert_eq!(remaining_seconds(1_001), 2);
         assert_eq!(remaining_seconds(29_500), 30);
-        assert_eq!(format_countdown(0), "0 s");
-        assert_eq!(format_countdown(59), "59 s");
-        assert_eq!(format_countdown(60), "1:00");
-        assert_eq!(format_countdown(125), "2:05");
-        assert_eq!(format_countdown(-3), "0 s");
+        assert_eq!(remaining_seconds(0), 0);
     }
 
     #[test]
@@ -1612,7 +1972,8 @@ mod tests {
         assert!(steps_open(&thinking[0], None, now));
         assert!(!steps_open(&thinking[0], Some(false), now));
 
-        let answered = build_timeline(
+        // 回答文本出现不会把进行中的「过程」收起（否则中间文字后接工具调用时反复抖动）。
+        let answering = build_timeline(
             "s1",
             &[],
             &[],
@@ -1629,8 +1990,29 @@ mod tests {
             )],
             &none(),
         );
-        assert!(!steps_open(&answered[0], None, now));
-        assert!(steps_open(&answered[0], Some(true), now));
+        assert!(steps_open(&answering[0], None, now));
+        assert!(!steps_open(&answering[0], Some(false), now));
+
+        // 执行结束后默认收起，用户展开的选择保留。
+        let finished = build_timeline(
+            "s1",
+            &[],
+            &[],
+            &[run(
+                "s1",
+                Some("r1"),
+                AssistantRunStatus::Completed,
+                vec![
+                    AssistantRunItemDto::Tool {
+                        call: AssistantToolCallDto::default(),
+                    },
+                    text("answer"),
+                ],
+            )],
+            &none(),
+        );
+        assert!(!steps_open(&finished[0], None, now));
+        assert!(steps_open(&finished[0], Some(true), now));
 
         // 待确认时强制展开，用户收起也无效。
         let confirming = build_timeline(
@@ -1751,9 +2133,17 @@ mod tests {
             classify_send_error(&error(ApplicationErrorCode::Internal)),
             SendFailure::Failed
         );
+        // 每分钟限频不是额度用尽：各走各的文案。
         assert_eq!(
             classify_send_error(
                 &error(ApplicationErrorCode::Unavailable).with_reason(ErrorReason::RateLimited)
+            ),
+            SendFailure::RateLimited
+        );
+        assert_eq!(
+            classify_send_error(
+                &error(ApplicationErrorCode::Unavailable)
+                    .with_reason(ErrorReason::AssistantQuotaExceeded)
             ),
             SendFailure::QuotaExceeded
         );
@@ -1797,10 +2187,12 @@ mod tests {
 
     #[test]
     fn duration_labels() {
-        assert_eq!(format_duration(0), "0 ms");
-        assert_eq!(format_duration(850), "850 ms");
-        assert_eq!(format_duration(1_000), "1.0 s");
-        assert_eq!(format_duration(12_345), "12.3 s");
+        let ms = |n: &str| format!("<assistantUnitMilliseconds>{{n={n}}}");
+        let s = |n: &str| format!("<assistantUnitSeconds>{{n={n}}}");
+        assert_eq!(format_duration(0, &fake_t), ms("0"));
+        assert_eq!(format_duration(850, &fake_t), ms("850"));
+        assert_eq!(format_duration(1_000, &fake_t), s("1.0"));
+        assert_eq!(format_duration(12_345, &fake_t), s("12.3"));
     }
 
     #[test]
@@ -2047,5 +2439,801 @@ mod tests {
         // 不是纯删除（替换）。
         assert_eq!(placeholder_remnant(old, "a [Image #X] b", 1), None);
         assert_eq!(placeholder_remnant(old, "a [Image #1] bc", 1), None);
+    }
+
+    #[test]
+    fn assistant_steps_always_land_in_the_process() {
+        let mut history = vec![
+            message("m1", Some("r1"), 1, "user", "q"),
+            message("m2", Some("r1"), 2, "assistant_step", "let me check"),
+            tool_message("m3", "r1", 3, "tool_call", "c1", "net_measure", false),
+            tool_message("m4", "r1", 4, "tool_result", "c1", "net_measure", false),
+            message("m5", Some("r1"), 5, "assistant_step", "   "),
+            message("m6", Some("r1"), 6, "assistant", "done"),
+        ];
+        let turns = build_timeline("s1", &history, &[], &[], &none());
+        assert_eq!(turns[0].answer.as_deref(), Some("done"));
+        assert_eq!(turns[0].message_id.as_deref(), Some("m6"));
+        // 空白的中间说明被丢弃；剩 Step + Tool，且顺序保持。
+        assert_eq!(turns[0].steps.len(), 2);
+        assert_eq!(turns[0].steps[0], Block::Step("let me check".to_owned()));
+        assert!(matches!(turns[0].steps[1], Block::Tool(_)));
+
+        // 最后一条是 assistant_step（没有最终回答）：它仍是过程，不会被当成回答，也不可评价。
+        history.truncate(2);
+        let turns = build_timeline("s1", &history, &[], &[], &none());
+        assert_eq!(turns[0].answer, None);
+        assert_eq!(turns[0].message_id, None);
+        assert_eq!(turns[0].rateable_message(), None);
+        assert_eq!(turns[0].steps, vec![Block::Step("let me check".to_owned())]);
+    }
+
+    #[test]
+    fn transcript_includes_step_text_in_order() {
+        let history = [
+            message("m1", Some("r1"), 1, "user", "q"),
+            message("m2", Some("r1"), 2, "assistant_step", "step text"),
+            message("m3", Some("r1"), 3, "assistant", "final text"),
+        ];
+        let turns = build_timeline("s1", &history, &[], &[], &none());
+        let out = turn_transcript(&turns[0], 0, &fake_t);
+        let step_at = out.find("step text");
+        let answer_at = out.find("final text");
+        assert!(step_at.is_some() && step_at < answer_at);
+    }
+
+    #[test]
+    fn history_turn_carries_user_message_id_and_images() {
+        let mut user = message("u1", Some("r1"), 1, "user", "look");
+        user.images = vec!["att-1".to_owned(), "att-2".to_owned()];
+        let history = [user, message("a1", Some("r1"), 2, "assistant", "ok")];
+        let turns = build_timeline("s1", &history, &[], &[], &none());
+        assert_eq!(turns[0].user_message_id.as_deref(), Some("u1"));
+        assert_eq!(turns[0].image_count, 2);
+        assert_eq!(turns[0].image_ids, ["att-1", "att-2"]);
+
+        // 实时轮次没有云端用户消息 ID，附图张数来自执行。
+        let mut live = run("s1", None, AssistantRunStatus::Starting, Vec::new());
+        live.image_count = 3;
+        let turns = build_timeline("s1", &[], &[], &[live], &none());
+        assert_eq!(turns[0].user_message_id, None);
+        assert_eq!(turns[0].image_count, 3);
+        assert!(turns[0].image_ids.is_empty());
+    }
+
+    #[test]
+    fn live_turn_keeps_error_and_reason_and_drops_empty_ones() {
+        let mut failed = run("s1", Some("r1"), AssistantRunStatus::Failed, Vec::new());
+        failed.error = Some("boom".to_owned());
+        failed.error_reason = Some("streamLost".to_owned());
+        let turns = build_timeline("s1", &[], &[], &[failed.clone()], &none());
+        let live = turns[0].live.as_ref();
+        assert_eq!(live.and_then(|l| l.error.as_deref()), Some("boom"));
+        assert_eq!(live.and_then(|l| l.reason.as_deref()), Some("streamLost"));
+
+        failed.error = Some(String::new());
+        failed.error_reason = Some(String::new());
+        let turns = build_timeline("s1", &[], &[], &[failed], &none());
+        let live = turns[0].live.as_ref();
+        assert_eq!(live.and_then(|l| l.error.as_deref()), None);
+        assert_eq!(live.and_then(|l| l.reason.as_deref()), None);
+    }
+
+    #[test]
+    fn interrupted_answer_flag_comes_from_history_and_stopped_runs() {
+        // 历史：assistant 消息自带 interrupted。
+        let mut cut = message("a1", Some("r1"), 2, "assistant", "half an ans");
+        cut.interrupted = true;
+        let history = [message("u1", Some("r1"), 1, "user", "q"), cut];
+        let turns = build_timeline("s1", &history, &[], &[], &none());
+        assert!(turns[0].answer_interrupted);
+        let history = [
+            message("u1", Some("r1"), 1, "user", "q"),
+            message("a1", Some("r1"), 2, "assistant", "full answer"),
+        ];
+        let turns = build_timeline("s1", &history, &[], &[], &none());
+        assert!(!turns[0].answer_interrupted);
+
+        // 实时：失败 / 取消且已有回答文本才算中断；正常结束、或没有任何文本都不是。
+        let flag = |status, items: Vec<AssistantRunItemDto>| {
+            let runs = [run("s1", Some("r1"), status, items)];
+            build_timeline("s1", &[], &[], &runs, &none())[0].answer_interrupted
+        };
+        assert!(flag(AssistantRunStatus::Failed, vec![text("part")]));
+        assert!(flag(AssistantRunStatus::Canceled, vec![text("part")]));
+        assert!(!flag(AssistantRunStatus::Completed, vec![text("all")]));
+        assert!(!flag(AssistantRunStatus::Running, vec![text("so far")]));
+        assert!(!flag(AssistantRunStatus::Failed, Vec::new()));
+
+        // 复制对话时带上「回答被中断」说明。
+        let runs = [run(
+            "s1",
+            Some("r1"),
+            AssistantRunStatus::Canceled,
+            vec![text("part")],
+        )];
+        let turns = build_timeline("s1", &[], &[], &runs, &none());
+        let out = turn_transcript(&turns[0], 0, &fake_t);
+        assert!(out.contains("<assistantAnswerInterrupted>"));
+        assert!(out.contains("<assistantStopped>"));
+    }
+
+    #[test]
+    fn steps_open_does_not_jitter_while_the_run_is_active() {
+        let now = 0;
+        let call = || AssistantRunItemDto::Tool {
+            call: AssistantToolCallDto::default(),
+        };
+        let turn = |status, items: Vec<AssistantRunItemDto>| {
+            let runs = [run("s1", Some("r1"), status, items)];
+            build_timeline("s1", &[], &[], &runs, &none()).remove(0)
+        };
+        // 进行中：中间文字、工具、再来文字，每个阶段展开状态都不变。
+        let stages = [
+            vec![text("plan")],
+            vec![text("plan"), call()],
+            vec![text("plan"), call(), text("partial answer")],
+            vec![text("plan"), call(), text("partial answer"), call()],
+        ];
+        for items in stages {
+            assert!(
+                steps_open(&turn(AssistantRunStatus::Running, items), None, now),
+                "running turn must stay open"
+            );
+        }
+        // 结束后收起（含失败 / 取消）；用户的选择始终优先于默认值。
+        for status in [
+            AssistantRunStatus::Completed,
+            AssistantRunStatus::Replied,
+            AssistantRunStatus::Failed,
+            AssistantRunStatus::Canceled,
+        ] {
+            let finished = turn(status, vec![call(), text("answer")]);
+            assert!(!steps_open(&finished, None, now), "{status:?}");
+            assert!(steps_open(&finished, Some(true), now), "{status:?}");
+        }
+        let running = turn(AssistantRunStatus::Running, vec![call()]);
+        assert!(!steps_open(&running, Some(false), now));
+        // 历史轮次（无实时状态）默认收起。
+        let history = [
+            message("u1", Some("r1"), 1, "user", "q"),
+            tool_message("t1", "r1", 2, "tool_call", "c1", "x", false),
+            message("a1", Some("r1"), 3, "assistant", "a"),
+        ];
+        let turns = build_timeline("s1", &history, &[], &[], &none());
+        assert!(!steps_open(&turns[0], None, now));
+    }
+
+    #[test]
+    fn tool_states_and_status_keys() {
+        let call = |status, interrupted| AssistantToolCallDto {
+            status,
+            interrupted,
+            ..AssistantToolCallDto::default()
+        };
+        assert!(matches!(
+            tool_state(&call(AssistantToolStatus::Running, false), true),
+            ToolState::Running
+        ));
+        assert!(matches!(
+            tool_state(&call(AssistantToolStatus::Running, false), false),
+            ToolState::Interrupted
+        ));
+        assert!(matches!(
+            tool_state(&call(AssistantToolStatus::Succeeded, false), false),
+            ToolState::Succeeded
+        ));
+        assert!(matches!(
+            tool_state(&call(AssistantToolStatus::Failed, false), false),
+            ToolState::Failed
+        ));
+        // 已批准的写操作被停止：不论状态与执行是否仍在进行，都是「结果未知」。
+        for status in [
+            AssistantToolStatus::Failed,
+            AssistantToolStatus::Running,
+            AssistantToolStatus::Succeeded,
+        ] {
+            for active in [true, false] {
+                assert!(
+                    matches!(
+                        tool_state(&call(status, true), active),
+                        ToolState::ResultUnknown
+                    ),
+                    "{status:?} active={active}"
+                );
+            }
+        }
+
+        let pending = Some(ConfirmView::Pending { remaining_ms: None });
+        assert_eq!(
+            tool_status_key(None, ToolState::ResultUnknown),
+            "assistantToolResultUnknown"
+        );
+        assert_eq!(
+            tool_status_key(Some(ConfirmView::Approved), ToolState::ResultUnknown),
+            "assistantToolResultUnknown"
+        );
+        assert_eq!(
+            tool_status_key(pending, ToolState::Running),
+            "assistantToolWaiting"
+        );
+        assert_eq!(
+            tool_status_key(Some(ConfirmView::Declined), ToolState::Failed),
+            "assistantToolSkipped"
+        );
+        assert_eq!(
+            tool_status_key(Some(ConfirmView::Expired), ToolState::Running),
+            "assistantToolSkipped"
+        );
+        assert_eq!(
+            tool_status_key(None, ToolState::Running),
+            "assistantToolRunning"
+        );
+        assert_eq!(
+            tool_status_key(None, ToolState::Succeeded),
+            "assistantToolDone"
+        );
+        assert_eq!(
+            tool_status_key(None, ToolState::Failed),
+            "assistantToolFailed"
+        );
+        assert_eq!(
+            tool_status_key(None, ToolState::Interrupted),
+            "assistantToolInterrupted"
+        );
+    }
+
+    #[test]
+    fn interrupted_write_shows_result_unknown_in_the_transcript() {
+        let runs = [run(
+            "s1",
+            Some("r1"),
+            AssistantRunStatus::Canceled,
+            vec![AssistantRunItemDto::Tool {
+                call: AssistantToolCallDto {
+                    status: AssistantToolStatus::Failed,
+                    interrupted: true,
+                    name: "tasks_delete".to_owned(),
+                    ..AssistantToolCallDto::default()
+                },
+            }],
+        )];
+        let turns = build_timeline("s1", &[], &[], &runs, &none());
+        let out = turn_transcript(&turns[0], 0, &fake_t);
+        assert!(out.contains("`tasks_delete` · <assistantToolResultUnknown>"));
+    }
+
+    #[test]
+    fn transcript_failed_run_uses_reason_text_and_raw_error() {
+        let mut failed = run("s1", Some("r1"), AssistantRunStatus::Failed, Vec::new());
+        failed.error = Some("  raw cloud error ".to_owned());
+        failed.error_reason = Some("timeout".to_owned());
+        let turns = build_timeline("s1", &[], &[], &[failed], &none());
+        let out = turn_transcript(&turns[0], 0, &fake_t);
+        assert!(out.contains("<assistantRunFailed>"));
+        assert!(out.contains("<assistantRunErrTimeout>"));
+        assert!(out.contains("\nraw cloud error\n"));
+    }
+
+    #[test]
+    fn send_failures_follow_reason_before_code() {
+        let error = |code| RpcErrorData::new(code, false);
+        let reason = |code, reason| error(code).with_reason(reason);
+        // 无 reason：按错误码。
+        assert_eq!(
+            classify_send_error(&error(ApplicationErrorCode::Unauthorized)),
+            SendFailure::SignedOut
+        );
+        assert_eq!(
+            classify_send_error(&error(ApplicationErrorCode::Unavailable)),
+            SendFailure::Unavailable
+        );
+        assert_eq!(
+            classify_send_error(&error(ApplicationErrorCode::Timeout)),
+            SendFailure::Unavailable
+        );
+        assert_eq!(
+            classify_send_error(&error(ApplicationErrorCode::Conflict)),
+            SendFailure::Busy
+        );
+        assert_eq!(
+            classify_send_error(&error(ApplicationErrorCode::Unsupported)),
+            SendFailure::NotOpen
+        );
+        assert_eq!(
+            classify_send_error(&error(ApplicationErrorCode::InvalidArgument)),
+            SendFailure::Rejected
+        );
+        assert_eq!(
+            classify_send_error(&error(ApplicationErrorCode::Internal)),
+            SendFailure::Failed
+        );
+        // 额度用尽与限频是两回事，reason 压过错误码（含 Conflict / Unavailable）。
+        assert_eq!(
+            classify_send_error(&reason(
+                ApplicationErrorCode::Unavailable,
+                ErrorReason::AssistantQuotaExceeded
+            )),
+            SendFailure::QuotaExceeded
+        );
+        assert_eq!(
+            classify_send_error(&reason(
+                ApplicationErrorCode::Unavailable,
+                ErrorReason::RateLimited
+            )),
+            SendFailure::RateLimited
+        );
+        assert_eq!(
+            classify_send_error(&reason(
+                ApplicationErrorCode::Conflict,
+                ErrorReason::RateLimited
+            )),
+            SendFailure::RateLimited
+        );
+        assert_eq!(
+            classify_send_error(&reason(
+                ApplicationErrorCode::Internal,
+                ErrorReason::SessionExpired
+            )),
+            SendFailure::SignedOut
+        );
+        assert_eq!(
+            classify_send_error(&reason(
+                ApplicationErrorCode::Internal,
+                ErrorReason::CloudUnreachable
+            )),
+            SendFailure::Unavailable
+        );
+    }
+
+    #[test]
+    fn session_limit_reason_is_its_own_failure() {
+        let error = RpcErrorData::new(ApplicationErrorCode::Conflict, false);
+        // reason 压过 Conflict（否则会被归成 Busy）。
+        assert_eq!(
+            classify_send_error(
+                &error
+                    .clone()
+                    .with_reason(ErrorReason::AssistantSessionLimit)
+            ),
+            SendFailure::SessionLimit
+        );
+        assert_eq!(classify_send_error(&error), SendFailure::Busy);
+    }
+
+    #[test]
+    fn session_quota_follows_limit_and_used() {
+        // 0 = 不限：无论用了多少都不变。
+        assert_eq!(session_quota(0, 0), SessionQuota::Free);
+        assert_eq!(session_quota(0, 999), SessionQuota::Free);
+        // 剩余较多：不提示。
+        assert_eq!(session_quota(10, 0), SessionQuota::Free);
+        assert_eq!(session_quota(10, 6), SessionQuota::Free);
+        // 剩余 3 / 2 / 1：提示。
+        assert_eq!(session_quota(10, 7), SessionQuota::Low(3));
+        assert_eq!(session_quota(10, 8), SessionQuota::Low(2));
+        assert_eq!(session_quota(10, 9), SessionQuota::Low(1));
+        // 剩余 0 与超出：已达上限。
+        assert_eq!(session_quota(10, 10), SessionQuota::Reached);
+        assert_eq!(session_quota(10, 11), SessionQuota::Reached);
+        // 上限不超过提示阈值时一开始就提示。
+        assert_eq!(session_quota(2, 0), SessionQuota::Low(2));
+    }
+
+    #[test]
+    fn send_failure_keys_are_distinct_and_stable() {
+        let all = [
+            (SendFailure::SignedOut, "assistantErrSignedOut"),
+            (SendFailure::NotOpen, "assistantErrNotOpen"),
+            (SendFailure::QuotaExceeded, "assistantErrQuota"),
+            (SendFailure::RateLimited, "assistantErrRateLimited"),
+            (SendFailure::Busy, "assistantErrBusy"),
+            (SendFailure::Unavailable, "assistantErrUnavailable"),
+            (SendFailure::Rejected, "assistantErrRejected"),
+            (SendFailure::Failed, "assistantErrFailed"),
+            (SendFailure::SessionLimit, "assistantErrSessionLimit"),
+        ];
+        for (failure, key) in all {
+            assert_eq!(failure.key(), key);
+        }
+        let mut keys: Vec<_> = all.iter().map(|(_, key)| *key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), all.len());
+    }
+
+    #[test]
+    fn action_errors_distinguish_expired_confirmations() {
+        let base = RpcErrorData::new(ApplicationErrorCode::Conflict, false);
+        assert_eq!(classify_action_error(&base), ActionError::Failed);
+        assert_eq!(
+            classify_action_error(&base.clone().with_reason(ErrorReason::RateLimited)),
+            ActionError::Failed
+        );
+        let expired = base.with_reason(ErrorReason::AssistantConfirmExpired);
+        assert_eq!(classify_action_error(&expired), ActionError::ConfirmExpired);
+        assert_eq!(
+            ActionError::ConfirmExpired.key(),
+            "assistantErrConfirmExpired"
+        );
+        assert_eq!(ActionError::Failed.key(), "assistantActionFailed");
+    }
+
+    #[test]
+    fn run_error_reasons_map_to_keys_and_know_themselves() {
+        let known = [
+            ("timeout", "assistantRunErrTimeout"),
+            ("maxTurns", "assistantRunErrMaxTurns"),
+            ("noAnswer", "assistantRunErrNoAnswer"),
+            ("contextOverflow", "assistantRunErrContextOverflow"),
+            ("imageUnsupported", "assistantRunErrImageUnsupported"),
+            ("unavailable", "assistantRunErrUnavailable"),
+            ("streamLost", "assistantRunErrStreamLost"),
+            ("network", "assistantRunErrNetwork"),
+        ];
+        for (reason, key) in known {
+            assert_eq!(run_error_key(Some(reason)), key);
+            assert!(run_error_known(Some(reason)), "{reason}");
+        }
+        // `error` / `canceled`、未知值与缺省：通用文案，且界面要附带失败原文。
+        for reason in [
+            Some("error"),
+            Some("canceled"),
+            Some("Timeout"),
+            Some(""),
+            None,
+        ] {
+            assert_eq!(run_error_key(reason), "assistantRunErrError", "{reason:?}");
+            assert!(!run_error_known(reason), "{reason:?}");
+        }
+    }
+
+    #[test]
+    fn clock_offset_corrects_confirmation_deadlines() {
+        // 旧 agent 不带时钟：无偏差。
+        assert_eq!(clock_offset_ms(1_000_000, 0), 0);
+        // 本机比 agent 快 5 s：偏差为正；换算回 agent 时钟。
+        let offset = clock_offset_ms(1_005_000, 1_000_000);
+        assert_eq!(offset, 5_000);
+        assert_eq!(agent_now_ms(1_005_000, offset), 1_000_000);
+        // 本机比 agent 慢。
+        let offset = clock_offset_ms(990_000, 1_000_000);
+        assert_eq!(offset, -10_000);
+        assert_eq!(agent_now_ms(990_000, offset), 1_000_000);
+        assert_eq!(agent_now_ms(123, 0), 123);
+
+        // 截止时间是 agent 时钟：不修正会把仍有效的确认当成过期。
+        let local_now = 1_003_000;
+        let corrected = agent_now_ms(local_now, 5_000);
+        let call = pending_call(Some(1_000_500));
+        assert_eq!(
+            confirm_view(&call, true, corrected),
+            Some(ConfirmView::Pending {
+                remaining_ms: Some(2_500)
+            })
+        );
+        assert_eq!(
+            confirm_view(&call, true, local_now),
+            Some(ConfirmView::Expired)
+        );
+    }
+
+    #[test]
+    fn units_and_countdown_use_the_translator() {
+        assert_eq!(format_countdown(0, &fake_t), "<assistantUnitSeconds>{n=0}");
+        assert_eq!(
+            format_countdown(59, &fake_t),
+            "<assistantUnitSeconds>{n=59}"
+        );
+        assert_eq!(format_countdown(-3, &fake_t), "<assistantUnitSeconds>{n=0}");
+        // 一分钟以上用 M:SS，不依赖语言。
+        assert_eq!(format_countdown(60, &fake_t), "1:00");
+        assert_eq!(format_countdown(125, &fake_t), "2:05");
+        assert_eq!(
+            format_duration(-5, &fake_t),
+            "<assistantUnitMilliseconds>{n=0}"
+        );
+        assert_eq!(
+            format_duration(999, &fake_t),
+            "<assistantUnitMilliseconds>{n=999}"
+        );
+        assert_eq!(
+            format_duration(1_000, &fake_t),
+            "<assistantUnitSeconds>{n=1.0}"
+        );
+        assert_eq!(
+            format_duration(12_345, &fake_t),
+            "<assistantUnitSeconds>{n=12.3}"
+        );
+    }
+
+    #[test]
+    fn pending_counts_use_the_agent_clock() {
+        let item = || AssistantRunItemDto::Tool {
+            call: pending_call(Some(1_000_500)),
+        };
+        let state = AssistantStateDto {
+            runs: vec![run(
+                "a",
+                Some("r1"),
+                AssistantRunStatus::Running,
+                vec![item()],
+            )],
+            now_unix_ms: 1_000_000,
+            ..AssistantStateDto::default()
+        };
+        let local_now = 1_003_000;
+        let offset = clock_offset_ms(local_now, state.now_unix_ms);
+        assert_eq!(
+            pending_confirmations(&state, agent_now_ms(local_now, offset)),
+            1
+        );
+        assert_eq!(pending_confirmations(&state, local_now), 0);
+    }
+
+    fn failed_turn(question: &str) -> Turn {
+        let mut turn = Turn::new("k".to_owned());
+        turn.question = question.to_owned();
+        turn.live = Some(Live {
+            status: AssistantRunStatus::Failed,
+            error: None,
+            reason: None,
+            observing: false,
+        });
+        turn
+    }
+
+    #[test]
+    fn retry_needs_a_failed_last_turn_with_a_question() {
+        let mut turn = failed_turn("  hello  ");
+        turn.user_message_id = Some("m1".to_owned());
+        assert_eq!(
+            retry_plan(&turn, true, 0),
+            Some(RetryPlan::Replace {
+                user_message_id: "m1".to_owned(),
+                text: "hello".to_owned(),
+                keep_images: false,
+            })
+        );
+        assert_eq!(retry_plan(&turn, false, 0), None);
+        assert_eq!(retry_plan(&failed_turn("   "), true, 0), None);
+
+        turn.live = Some(Live {
+            status: AssistantRunStatus::Canceled,
+            error: None,
+            reason: None,
+            observing: false,
+        });
+        assert_eq!(retry_plan(&turn, true, 0), None);
+        turn.live = None;
+        assert_eq!(retry_plan(&turn, true, 0), None);
+    }
+
+    #[test]
+    fn persisted_retry_keeps_old_images() {
+        let mut turn = failed_turn("q");
+        turn.user_message_id = Some("m1".to_owned());
+        turn.image_count = 2;
+        assert_eq!(
+            retry_plan(&turn, true, 0),
+            Some(RetryPlan::Replace {
+                user_message_id: "m1".to_owned(),
+                text: "q".to_owned(),
+                keep_images: true,
+            })
+        );
+    }
+
+    #[test]
+    fn unpersisted_retry_resends_only_with_matching_local_images() {
+        let mut turn = failed_turn("q");
+        assert_eq!(
+            retry_plan(&turn, true, 0),
+            Some(RetryPlan::Resend {
+                text: "q".to_owned(),
+                with_images: false,
+            })
+        );
+        turn.image_count = 2;
+        assert_eq!(retry_plan(&turn, true, 0), None);
+        assert_eq!(retry_plan(&turn, true, 1), None);
+        assert_eq!(
+            retry_plan(&turn, true, 2),
+            Some(RetryPlan::Resend {
+                text: "q".to_owned(),
+                with_images: true,
+            })
+        );
+    }
+
+    #[test]
+    fn known_run_id_without_user_message_waits_for_history_instead_of_resending() {
+        let mut turn = failed_turn("q");
+        turn.run_id = Some("r1".to_owned());
+        // 云端已保存这条提问：重发会重复提问并多占一次会话上限。
+        assert_eq!(retry_plan(&turn, true, 0), None);
+        turn.image_count = 1;
+        assert_eq!(retry_plan(&turn, true, 1), None);
+        assert!(turn.awaiting_history());
+
+        // 历史读到后变成替换。
+        turn.user_message_id = Some("m1".to_owned());
+        assert!(!turn.awaiting_history());
+        assert_eq!(
+            retry_plan(&turn, true, 0),
+            Some(RetryPlan::Replace {
+                user_message_id: "m1".to_owned(),
+                text: "q".to_owned(),
+                keep_images: true,
+            })
+        );
+    }
+
+    #[test]
+    fn live_runs_carry_their_run_id_into_the_retry_decision() {
+        let no_id = [run("s1", None, AssistantRunStatus::Failed, Vec::new())];
+        let turns = build_timeline("s1", &[], &[], &no_id, &none());
+        assert_eq!(turns[0].run_id, None);
+        assert!(!turns[0].awaiting_history());
+        assert_eq!(
+            retry_plan(&turns[0], true, 0),
+            Some(RetryPlan::Resend {
+                text: "live question".to_owned(),
+                with_images: false,
+            })
+        );
+
+        let with_id = [run(
+            "s1",
+            Some("r1"),
+            AssistantRunStatus::Failed,
+            Vec::new(),
+        )];
+        let turns = build_timeline("s1", &[], &[], &with_id, &none());
+        assert_eq!(turns[0].run_id.as_deref(), Some("r1"));
+        assert!(turns[0].awaiting_history());
+        assert_eq!(retry_plan(&turns[0], true, 0), None);
+
+        // 执行中 / 已停止的轮次不需要等历史。
+        let canceled = [run(
+            "s1",
+            Some("r1"),
+            AssistantRunStatus::Canceled,
+            Vec::new(),
+        )];
+        let turns = build_timeline("s1", &[], &[], &canceled, &none());
+        assert!(!turns[0].awaiting_history());
+    }
+
+    #[test]
+    fn rating_comment_is_trimmed_and_capped_by_characters() {
+        assert_eq!(rating_comment("   "), None);
+        assert_eq!(
+            rating_comment("  needs sources "),
+            Some("needs sources".to_owned())
+        );
+        let exact = "字".repeat(MAX_RATING_COMMENT_CHARS);
+        assert_eq!(rating_comment(&exact), Some(exact.clone()));
+        assert_eq!(rating_comment(&format!("{exact}字")), None);
+    }
+
+    #[test]
+    fn scroll_to_bottom_shows_only_beyond_one_screen() {
+        // 偏移向下滚时为负：offset = -max 即在底部。
+        assert!(!show_scroll_to_bottom(1_000., -1_000., 600.));
+        assert!(!show_scroll_to_bottom(1_000., -500., 600.));
+        assert!(show_scroll_to_bottom(1_000., -300., 600.));
+        assert!(show_scroll_to_bottom(1_000., 0., 600.));
+        // 还没排版出视口高度时不显示。
+        assert!(!show_scroll_to_bottom(1_000., 0., 0.));
+        assert_eq!(distance_from_bottom(100., -250.), 0.);
+    }
+
+    #[test]
+    fn config_response_never_overwrites_pushed_state() {
+        let current = AssistantStateDto {
+            runs: vec![run(
+                "a",
+                Some("r1"),
+                AssistantRunStatus::Running,
+                Vec::new(),
+            )],
+            config: Some(AssistantConfigDto {
+                used_today: 5,
+                ..AssistantConfigDto::default()
+            }),
+            ..AssistantStateDto::default()
+        };
+        let response = AssistantStateDto {
+            config: Some(AssistantConfigDto {
+                used_today: 7,
+                ..AssistantConfigDto::default()
+            }),
+            now_unix_ms: 42,
+            ..AssistantStateDto::default()
+        };
+
+        // 没有推送改写过配置:采用响应的配置,执行仍是当前的。
+        let fresh = merge_config_response(&current, response.clone(), false);
+        assert_eq!(fresh.runs.len(), 1);
+        assert_eq!(
+            fresh.config.as_ref().map(|config| config.used_today),
+            Some(7)
+        );
+
+        // 请求期间推送过配置:响应整份丢弃,只取最新的 agent 时钟。
+        let stale = merge_config_response(&current, response.clone(), true);
+        assert_eq!(stale.runs.len(), 1);
+        assert_eq!(
+            stale.config.as_ref().map(|config| config.used_today),
+            Some(5)
+        );
+        assert_eq!(stale.now_unix_ms, 42);
+
+        // 当前还没有配置时,即使过期也采用响应的。
+        let empty = AssistantStateDto::default();
+        let adopted = merge_config_response(&empty, response, true);
+        assert_eq!(
+            adopted.config.as_ref().map(|config| config.used_today),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn finished_run_keeps_live_content_while_history_is_mid_run() {
+        // 历史是执行中途读到的:还没有最终回答。
+        let history = [
+            message("m1", Some("r1"), 1, "user", "q"),
+            tool_message("m2", "r1", 2, "tool_call", "c1", "net_measure", false),
+        ];
+        let runs = [run(
+            "s1",
+            Some("r1"),
+            AssistantRunStatus::Completed,
+            vec![text("final answer")],
+        )];
+        let turns = build_timeline("s1", &history, &[], &runs, &none());
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].answer.as_deref(), Some("final answer"));
+        assert_eq!(turns[0].user_message_id.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn failed_run_keeps_its_failure_over_persisted_history() {
+        let history = [
+            message("m1", Some("r1"), 1, "user", "q"),
+            message("m2", Some("r1"), 2, "assistant", "partial"),
+        ];
+        let runs = [run(
+            "s1",
+            Some("r1"),
+            AssistantRunStatus::Failed,
+            Vec::new(),
+        )];
+        let turns = build_timeline("s1", &history, &[], &runs, &none());
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].answer.as_deref(), Some("partial"));
+        assert_eq!(
+            turns[0].live.as_ref().map(|live| live.status),
+            Some(AssistantRunStatus::Failed)
+        );
+        assert_eq!(
+            retry_plan(&turns[0], true, 0),
+            Some(RetryPlan::Replace {
+                user_message_id: "m1".to_owned(),
+                text: "q".to_owned(),
+                keep_images: false,
+            })
+        );
+    }
+
+    #[test]
+    fn new_image_count_excludes_kept_attachments() {
+        let mut turn = Turn::new("k".to_owned());
+        turn.image_count = 3;
+        turn.image_ids = vec!["a".to_owned(), "b".to_owned()];
+        assert_eq!(turn.new_image_count(), 1);
+        turn.image_ids.clear();
+        assert_eq!(turn.new_image_count(), 3);
     }
 }

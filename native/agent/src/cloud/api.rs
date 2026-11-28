@@ -341,6 +341,13 @@ impl CloudApi {
             .await
     }
 
+    /// `GET /api/v1/ai/status`（免鉴权）：未登录时的 AI 助手入口可见性。
+    pub(crate) async fn ai_status<R: serde::de::DeserializeOwned>(&self) -> Result<R, CloudError> {
+        self.client
+            .public(Method::GET, "/api/v1/ai/status", None::<&Value>)
+            .await
+    }
+
     /// `POST /api/v1/ai{suffix}`：提问这类「POST 即返回 SSE」的端点；调用方负责读取响应流。
     pub(crate) async fn ai_stream<P: Serialize + ?Sized>(
         &self,
@@ -354,6 +361,17 @@ impl CloudApi {
                 Some(body),
                 self.request_epoch(),
             )
+            .await
+    }
+
+    /// `GET /api/v1/ai{suffix}`：提问执行的事件续读（SSE）与提问附图（二进制）这类 GET 流式响应；
+    /// 调用方负责读取响应体。
+    pub(crate) async fn ai_get_stream(
+        &self,
+        suffix: &str,
+    ) -> Result<reqwest::Response, CloudError> {
+        self.client
+            .authenticated_stream_epoch(&format!("/api/v1/ai{suffix}"), self.request_epoch())
             .await
     }
 

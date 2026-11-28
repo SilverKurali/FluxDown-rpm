@@ -1,8 +1,9 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
 import { Bot, Sparkles } from "lucide-react";
 import type { Lang } from "@/i18n/config";
 import { assistant } from "@/i18n/messages/assistant";
 import { Spinner } from "@/components/account/dashboard/ui";
+import { isAiEntryVisible, subscribeAiEntry } from "@/lib/account/ai-entry";
 import {
   applyDock, applyDockWidth, clampDockWidth, clampPos, readDockWidth, readMode, readOpen, readPos,
   writeDockWidth, writeMode, writeOpen, writePos, DOCK_WIDTH_DEFAULT, type Point, type WidgetMode,
@@ -53,9 +54,12 @@ const WidgetPanel = lazy(() => import("./WidgetPanel"));
  * （拖左缘调宽，双击复位；页面让出同样宽度）。形态、位置与宽度跨访问记忆；展开状态在本标签页内
  * 跨页面保留（登录回跳后自动重新展开）。
  */
-export default function AssistantWidget({ lang }: { lang: Lang }) {
+function Widget({ lang }: { lang: Lang }) {
   const t = assistant[lang];
   const [open, setOpen] = useState(false);
+  /** 展开过一次后面板常驻（收起只隐藏不卸载）：进行中的回答不会因为关窗被掐断。 */
+  const [everOpen, setEverOpen] = useState(false);
+  if (open && !everOpen) setEverOpen(true);
   const [mode, setMode] = useState<WidgetMode>("float");
   const launcherRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -209,7 +213,7 @@ export default function AssistantWidget({ lang }: { lang: Lang }) {
           </span>
         </button>
       )}
-      {open && (
+      {everOpen && (
         <div
           ref={panelRef}
           role="dialog"
@@ -218,7 +222,10 @@ export default function AssistantWidget({ lang }: { lang: Lang }) {
           tabIndex={-1}
           data-mode={mode}
           data-positioned={pos ? "" : undefined}
-          style={pos ? ({ "--ai-x": `${pos.x}px`, "--ai-y": `${pos.y}px` } as CSSProperties) : undefined}
+          style={{
+            ...(pos ? ({ "--ai-x": `${pos.x}px`, "--ai-y": `${pos.y}px` } as CSSProperties) : null),
+            ...(open ? null : { display: "none" }),
+          }}
           className="ai-widget"
           data-ai-root=""
           onPointerDown={onPanelPointerDown}
@@ -254,4 +261,23 @@ export default function AssistantWidget({ lang }: { lang: Lang }) {
       )}
     </>
   );
+}
+
+/**
+ * 入口显隐门：是否挂出悬浮助手由 FluxCloud 的判定决定（`<html data-ai-visible>`，来源见 `lib/account/ai-entry.ts`）。
+ * 服务端渲染与水合首遍一律不渲染，水合后按标记挂载 / 卸载；不可见时撤掉首帧预设的停靠让位，页面不留空。
+ */
+export default function AssistantWidget({ lang }: { lang: Lang }) {
+  const visible = useSyncExternalStore(subscribeAiEntry, isAiEntryVisible, () => false);
+
+  // 以标记本身为准而不是上面的快照（水合首遍的快照恒为 false，不能据此撤掉已放行的预设）
+  useEffect(() => {
+    const release = () => {
+      if (!isAiEntryVisible()) applyDock(false);
+    };
+    release();
+    return subscribeAiEntry(release);
+  }, []);
+
+  return visible ? <Widget lang={lang} /> : null;
 }

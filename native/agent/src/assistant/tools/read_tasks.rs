@@ -13,15 +13,17 @@ use std::collections::{BTreeMap, HashMap};
 
 use fluxdown_api::service::LiveSpeed;
 use fluxdown_protocol::{
-    BtDhtDto, BtPeerDto, BtPortStatusDto, BtStatusDto, BtTrackerDto, DaemonBtStatusParams,
-    DaemonSnapshot, QueueDto, TaskActivityPage, TaskActivityQuery, TaskDto, TaskRuntimeDto,
-    TaskSpeedHistoryDto, TaskSpeedHistoryQuery, method,
+    BT_FILE_PRIORITY_HIGH, BT_FILE_PRIORITY_MAXIMUM, BT_FILE_PRIORITY_NORMAL,
+    BT_FILE_PRIORITY_SKIP, BtDhtDto, BtFilesDto, BtPeerDto, BtPortStatusDto, BtStatusDto,
+    BtTrackerDto, DaemonBtStatusParams, DaemonSnapshot, QueueDto, TaskActivityPage,
+    TaskActivityQuery, TaskDto, TaskRuntimeDto, TaskSpeedHistoryDto, TaskSpeedHistoryQuery, method,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::output::{
-    display_path, display_url, iso_millis, iso_secs, origin_only, percent, truncate_chars,
+    display_path, display_url, fit_items, iso_millis, iso_secs, items_budget, origin_only, percent,
+    truncate_chars,
 };
 use super::read::{config_json, short_text, text_or_null};
 use super::tasks::{check_max, invalid};
@@ -299,8 +301,8 @@ fn listing_json(
     query: Option<&str>,
     limit: usize,
     speeds: Option<&HashMap<String, LiveSpeed>>,
+    output_limit: usize,
 ) -> Value {
-    let returned = listing.rows.len();
     let tasks: Vec<Value> = listing
         .rows
         .into_iter()
@@ -316,16 +318,31 @@ fn listing_json(
             row.value
         })
         .collect();
-    json!({
+    let mut result = json!({
         "filter": { "status": status.as_str(), "query": query, "limit": limit },
         "matched": listing.matched,
-        "returned": returned,
+        "returned": 0,
         "statusCounts": listing.status_counts,
-        "tasks": tasks,
-    })
+        "tasks": [],
+    });
+    // 按条目数预算裁剪(最新在前,丢弃的是更旧的任务):输出始终是完整、合法的 JSON。
+    let (tasks, omitted) = fit_items(tasks, items_budget(output_limit, &result));
+    result["returned"] = json!(tasks.len());
+    result["tasks"] = Value::Array(tasks);
+    if omitted > 0 {
+        result["omittedForSize"] = json!(omitted);
+        result["note"] = json!(
+            "some matching tasks were left out to fit the output size limit; narrow the query or status filter, or lower limit"
+        );
+    }
+    result
 }
 
-pub(super) async fn list_tasks(ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+pub(super) async fn list_tasks(
+    ctx: &ToolContext,
+    args: Value,
+    output_limit: usize,
+) -> Result<Value, ToolError> {
     let ListArgs {
         status,
         query,
@@ -357,6 +374,7 @@ pub(super) async fn list_tasks(ctx: &ToolContext, args: Value) -> Result<Value, 
         query.as_deref(),
         limit,
         speeds.as_ref(),
+        output_limit,
     ))
 }
 
@@ -613,6 +631,68 @@ pub(super) async fn get_task(ctx: &ToolContext, args: Value) -> Result<Value, To
 struct BtArgs {
     #[serde(default)]
     task_id: Option<String>,
+    /// 版本 2:BT 文件列表的起点 / 条数。
+    #[serde(default)]
+    files_offset: Option<u32>,
+    #[serde(default)]
+    files_limit: Option<u32>,
+}
+
+/// BT 文件列表默认 / 最多返回的条数(云端 Schema `filesLimit`)。
+const DEFAULT_FILES_LIMIT: usize = 100;
+const MAX_FILES_LIMIT: usize = 500;
+const MAX_FILE_PATH_CHARS: usize = 200;
+
+/// BT 文件优先级的展示名;界面只用四档,其余档位原样给数字。
+pub(super) fn file_priority_label(priority: u8) -> String {
+    match priority {
+        BT_FILE_PRIORITY_SKIP => "skip".to_owned(),
+        BT_FILE_PRIORITY_NORMAL => "normal".to_owned(),
+        BT_FILE_PRIORITY_HIGH => "high".to_owned(),
+        BT_FILE_PRIORITY_MAXIMUM => "maximum".to_owned(),
+        other => other.to_string(),
+    }
+}
+
+/// 文件表外壳(`editable` / `total` / `offset` / `listed` / 裁剪提示)预留的字节数。
+const FILES_SKELETON_BYTES: usize = 320;
+
+/// BT 任务的文件表(按 `index` 升序分页):`setFilePriorities` 要用这里的 `index`。
+fn files_json(files: &BtFilesDto, offset: usize, limit: usize, budget: usize) -> Value {
+    let mut sorted: Vec<_> = files.files.iter().collect();
+    sorted.sort_by_key(|file| file.index);
+    let items: Vec<Value> = sorted
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|file| {
+            json!({
+                "index": file.index,
+                "path": truncate_chars(&file.path, MAX_FILE_PATH_CHARS),
+                "sizeBytes": file.size,
+                "downloadedBytes": file.downloaded,
+                "priority": file_priority_label(file.priority),
+            })
+        })
+        .collect();
+    // 超出输出预算的尾部条目整条丢弃(不会切坏 JSON),并告诉模型从哪里继续翻页。
+    let (items, omitted) = fit_items(items, budget);
+    let kept = items.len();
+    let mut result = json!({
+        "editable": files.editable,
+        "total": sorted.len(),
+        "offset": offset,
+        "listed": kept,
+        "items": items,
+    });
+    if omitted > 0 {
+        result["omittedForSize"] = json!(omitted);
+        result["nextOffset"] = json!(offset + kept);
+        result["note"] = json!(
+            "some files were left out to fit the output size limit; request the next page with filesOffset = nextOffset (fd_get_bt_status version 2)"
+        );
+    }
+    result
 }
 
 /// BT 相关的 daemon 设置(平铺键)。
@@ -767,8 +847,36 @@ fn bt_task_json(facts: Option<&TaskFacts>, status: &BtStatusDto) -> Result<Value
     }))
 }
 
-pub(super) async fn bt_status(ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
-    let BtArgs { task_id } = parse_args(args)?;
+/// `paging` = 工具版本 2:接受 `filesOffset` / `filesLimit`;版本 1 只返回默认的前 100 个文件。
+pub(super) async fn bt_status(
+    ctx: &ToolContext,
+    args: Value,
+    paging: bool,
+    output_limit: usize,
+) -> Result<Value, ToolError> {
+    let BtArgs {
+        task_id,
+        files_offset,
+        files_limit,
+    } = parse_args(args)?;
+    if !paging && (files_offset.is_some() || files_limit.is_some()) {
+        return Err(invalid(
+            "filesOffset / filesLimit need fd_get_bt_status version 2",
+        ));
+    }
+    if task_id.is_none() && (files_offset.is_some() || files_limit.is_some()) {
+        return Err(invalid("filesOffset / filesLimit need a taskId"));
+    }
+    let files_limit = match files_limit {
+        None => DEFAULT_FILES_LIMIT,
+        Some(limit) if (1..=MAX_FILES_LIMIT as u32).contains(&limit) => limit as usize,
+        Some(_) => {
+            return Err(invalid(format!(
+                "filesLimit must be between 1 and {MAX_FILES_LIMIT}"
+            )));
+        }
+    };
+    let files_offset = files_offset.unwrap_or(0) as usize;
     if let Some(task_id) = &task_id {
         check_task_id(task_id)?;
     }
@@ -796,11 +904,30 @@ pub(super) async fn bt_status(ctx: &ToolContext, args: Value) -> Result<Value, T
             )
             .await?;
         let facts = task_facts(ctx, &task_id);
+        let files = ctx
+            .call_as::<BtFilesDto>(
+                method::DAEMON_TASK_BT_FILES,
+                to_json("bt files params", &params)?,
+            )
+            .await;
         if let Some(object) = result.as_object_mut() {
             object.insert(
                 "taskStatus".to_owned(),
                 bt_task_json(facts.as_ref(), &status)?,
             );
+        }
+        // 文件表是唯一可能很长的部分:按「其余内容用掉之后剩下的字节」裁剪条目,输出始终是合法 JSON。
+        let files = match files {
+            Ok(files) => files_json(
+                &files,
+                files_offset,
+                files_limit,
+                items_budget(output_limit, &result).saturating_sub(FILES_SKELETON_BYTES),
+            ),
+            Err(error) => soft_error(&error),
+        };
+        if let Some(object) = result.as_object_mut() {
+            object.insert("files".to_owned(), files);
         }
     }
     Ok(result)
@@ -908,6 +1035,73 @@ mod tests {
         let text = listing.rows[0].value.to_string();
         assert!(text.contains("host.example"));
         assert!(!text.contains("token") && !text.contains("u:p"), "{text}");
+    }
+
+    #[test]
+    fn oversized_listing_drops_whole_old_rows_and_stays_valid_json() {
+        let tasks = (0..100)
+            .map(|index| {
+                task(
+                    &format!("t{index:03}"),
+                    &format!("{}-{index}.bin", "n".repeat(180)),
+                    "https://host.example/f",
+                    STATUS_PAUSED,
+                    1_000 + i64::from(index),
+                )
+            })
+            .collect();
+        let daemon = snapshot(tasks);
+        for output_limit in [4_000_usize, 24_000] {
+            let listing = collect_listing(&daemon, StatusFilter::All, None, 100);
+            let value = listing_json(listing, StatusFilter::All, None, 100, None, output_limit);
+            let text = value.to_string();
+            assert!(
+                text.len() <= output_limit,
+                "{} > {output_limit}",
+                text.len()
+            );
+            let returned = value["returned"].as_u64().expect("returned");
+            let omitted = value["omittedForSize"].as_u64().expect("omitted");
+            assert!(returned > 0 && omitted > 0);
+            assert_eq!(returned + omitted, 100);
+            assert_eq!(value["matched"], 100);
+            let tasks = value["tasks"].as_array().expect("tasks");
+            assert_eq!(tasks.len() as u64, returned);
+            // 最新的任务在前,被丢弃的是更旧的。
+            assert_eq!(tasks[0]["taskId"], "t099");
+        }
+        let listing = collect_listing(&daemon, StatusFilter::All, None, 3);
+        let small = listing_json(listing, StatusFilter::All, None, 3, None, 24_000);
+        assert!(small.get("omittedForSize").is_none());
+        assert_eq!(small["returned"], 3);
+    }
+
+    #[test]
+    fn oversized_bt_file_table_reports_where_to_continue() {
+        let files = BtFilesDto {
+            editable: true,
+            files: (0..400)
+                .map(|index| fluxdown_protocol::BtTaskFileDto {
+                    index,
+                    path: format!("dir/{}/file-{index}.bin", "p".repeat(120)),
+                    size: 1_000,
+                    downloaded: 10,
+                    priority: BT_FILE_PRIORITY_NORMAL,
+                })
+                .collect(),
+        };
+        let value = files_json(&files, 50, 300, 6_000);
+        let text = value.to_string();
+        assert!(text.len() <= 6_000 + FILES_SKELETON_BYTES, "{}", text.len());
+        let listed = value["listed"].as_u64().expect("listed");
+        assert!(listed > 0 && listed < 300, "{listed}");
+        assert_eq!(value["total"], 400);
+        assert_eq!(value["omittedForSize"].as_u64(), Some(300 - listed));
+        assert_eq!(value["nextOffset"].as_u64(), Some(50 + listed));
+        assert_eq!(value["items"][0]["index"], 50);
+        let roomy = files_json(&files, 0, 5, 24_000);
+        assert!(roomy.get("omittedForSize").is_none());
+        assert_eq!(roomy["listed"], 5);
     }
 
     #[test]

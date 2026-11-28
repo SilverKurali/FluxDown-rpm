@@ -11,6 +11,13 @@ pub const SYSTEM_TASK_PAGE: &str = "system.taskPage";
 ///
 /// 允许作为连接首帧（握手前）调用：协议版本不兼容的新旧进程替换只能靠它完成。
 pub const SYSTEM_SHUTDOWN: &str = "system.shutdown";
+/// 中止本连接上一条仍在途、且属于 [`CANCELLABLE_DAEMON_METHODS`] 的调用
+/// （[`crate::CancelRequestParams`] → `{ "cancelled": bool }`）。daemon 链路专用。
+///
+/// 调用方放弃等待（AI 工具被停止 / 超时）时由 agent 发出，服务端丢弃该调用的 future，被中止的
+/// 请求以 `cancelled` 错误结束。目标已完成、不存在或不可中止时 `cancelled=false`。旧 daemon
+/// 不认识该方法，按未知方法回错，调用方忽略即可。
+pub const SYSTEM_CANCEL: &str = "system.cancel";
 
 pub const DAEMON_TASK_LIST: &str = "daemon.task.list";
 pub const DAEMON_TASK_GET: &str = "daemon.task.get";
@@ -429,10 +436,16 @@ pub const AGENT_ASSISTANT_CANCEL: &str = "agent.assistant.cancel";
 pub const AGENT_ASSISTANT_CONFIRM: &str = "agent.assistant.confirm";
 /// `AssistantRateParams` → `{ "ok": true }`。
 pub const AGENT_ASSISTANT_RATE: &str = "agent.assistant.rate";
-/// `AssistantIssueParams` → `AssistantIssueDto`：确认提交云端起草的问题单。
+/// `AssistantIssueParams` → `AssistantIssueDto`：确认提交云端起草的问题单（`failed` 的问题单可再次确认重试）。
 pub const AGENT_ASSISTANT_CONFIRM_ISSUE: &str = "agent.assistant.confirmIssue";
 /// `AssistantIssueParams` → `{ "ok": true }`：放弃云端起草的问题单。
 pub const AGENT_ASSISTANT_DISCARD_ISSUE: &str = "agent.assistant.discardIssue";
+/// `AssistantRenameParams` → `AssistantSessionDto`：给会话改名。
+pub const AGENT_ASSISTANT_RENAME_SESSION: &str = "agent.assistant.renameSession";
+/// `AssistantExportParams` → `AssistantExportResult`：导出会话（云端生成 Markdown / JSON）。
+pub const AGENT_ASSISTANT_EXPORT_SESSION: &str = "agent.assistant.exportSession";
+/// `AssistantAttachmentParams` → `AssistantAttachmentResult`：读取本人会话里的提问图片。
+pub const AGENT_ASSISTANT_ATTACHMENT: &str = "agent.assistant.attachment";
 
 pub const AGENT_PLATFORM_OPEN_TASK: &str = "agent.platform.openTask";
 pub const AGENT_PLATFORM_REVEAL_TASK: &str = "agent.platform.revealTask";
@@ -783,6 +796,9 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_ASSISTANT_RATE,
     AGENT_ASSISTANT_CONFIRM_ISSUE,
     AGENT_ASSISTANT_DISCARD_ISSUE,
+    AGENT_ASSISTANT_RENAME_SESSION,
+    AGENT_ASSISTANT_EXPORT_SESSION,
+    AGENT_ASSISTANT_ATTACHMENT,
     AGENT_PLATFORM_OPEN_TASK,
     AGENT_PLATFORM_REVEAL_TASK,
     AGENT_PLATFORM_COPY_TASK_FILES,
@@ -870,6 +886,21 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
 #[must_use]
 pub fn is_slow_daemon_method(method_name: &str) -> bool {
     SLOW_DAEMON_METHODS.contains(&method_name)
+}
+
+/// 可经 [`SYSTEM_CANCEL`] 中止的慢方法：只读探测，中途丢弃不留半成品状态。写类慢方法
+/// （安装、移动存储、编辑等）不在此列，调用方放弃等待后仍在 daemon 跑完。
+pub const CANCELLABLE_DAEMON_METHODS: &[&str] = &[
+    DAEMON_NET_MEASURE_ROUTES,
+    DAEMON_LINK_PROBE,
+    DAEMON_CONFIG_PROXY_TEST,
+    DAEMON_DIAGNOSTICS_PROBE,
+];
+
+/// 是否属于 [`CANCELLABLE_DAEMON_METHODS`]。
+#[must_use]
+pub fn is_cancellable_daemon_method(method_name: &str) -> bool {
+    CANCELLABLE_DAEMON_METHODS.contains(&method_name)
 }
 
 /// 规范DAEMON_CAPABILITIES。

@@ -445,11 +445,11 @@ struct DownloadsListScreen: View {
                 #endif
                 Button(L("copyUrl"), systemImage: FluxSymbol.copy) { copySelectedLinks() }
                     .disabled(model.selection.isEmpty)
-                Button(L("exportTaskInfoTxt"), systemImage: "square.and.arrow.down") {
+                Button(L("exportTaskInfoTxt"), systemImage: "doc.text") {
                     let rows = TaskInfoRow.selected(
                         local: model.selectedTasks(), remote: model.selectedRemoteTasks(), visibleIds: model.list.visibleIds
                     )
-                    if !rows.isEmpty { taskInfoExport = TaskInfoDocument(rows) }
+                    if !rows.isEmpty { taskInfoExport = TaskInfoDocument(rows, labels: .localized) }
                 }
                 .disabled(!caps.canExport)
             }
@@ -618,18 +618,28 @@ nonisolated struct TaskInfoRow {
     }
 }
 
+nonisolated struct TaskInfoLabels {
+    let name: String
+    let url: String
+    let size: String
+
+    @MainActor static var localized: Self {
+        Self(name: L("taskInfoColumnName"), url: L("taskInfoColumnUrl"), size: L("taskInfoColumnSize"))
+    }
+}
+
 nonisolated struct TaskInfoDocument: FileDocument {
     static var readableContentTypes: [UTType] { [.plainText] }
     let data: Data
 
-    init(_ rows: [TaskInfoRow]) {
+    init(_ rows: [TaskInfoRow], labels: TaskInfoLabels) {
         func cell(_ value: String) -> String {
             value.replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\t", with: "\\t")
                 .replacingOccurrences(of: "\r", with: "\\r")
                 .replacingOccurrences(of: "\n", with: "\\n")
         }
-        var text = "Name\tURL\tSize (bytes)"
+        var text = "\(cell(labels.name))\t\(cell(labels.url))\t\(cell(labels.size))"
         for row in rows {
             let url = row.url.lowercased().hasPrefix("torrent-file://") ? "" : row.url
             let size = row.size.map { String($0) } ?? ""

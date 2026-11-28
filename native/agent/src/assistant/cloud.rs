@@ -7,13 +7,15 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use base64::Engine as _;
 use fluxdown_protocol::{
-    ASSISTANT_CLIENT_TOOL_PROTOCOL, ApplicationErrorCode, AssistantClearedSessions,
-    AssistantConfigDto, AssistantIssueDto, AssistantSessionDetail, AssistantSessionDto,
-    AssistantSessionPage, AssistantToolEffect, ErrorReason, RpcErrorData,
+    ASSISTANT_CLIENT_TOOL_PROTOCOL, ApplicationErrorCode, AssistantAttachmentResult,
+    AssistantClearedSessions, AssistantConfigDto, AssistantExportFormat, AssistantExportResult,
+    AssistantIssueDto, AssistantSessionDetail, AssistantSessionDto, AssistantSessionPage,
+    AssistantToolEffect, ErrorReason, RpcErrorData,
 };
 use reqwest::Method;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::cloud::{CloudApi, CloudError, RequestEpoch, encode_path_segment};
@@ -26,6 +28,12 @@ const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// 提问响应里云端执行 ID 的头。
 const RUN_ID_HEADER: &str = "x-ai-run-id";
+/// 单张提问图片读取上限（云端上传上限 5 MiB，留出余量）。
+const MAX_ATTACHMENT_BYTES: usize = 6 * 1024 * 1024;
+/// 读完一张提问图片（响应头之后的正文）的时限。
+const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(30);
+/// 云端接受的图片类型（`data:` URL 只放行这些）。
+const ATTACHMENT_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 // ------------------------------------------------------------------ 错误
 
@@ -64,6 +72,18 @@ impl AssistantError {
         Self::with(ApplicationErrorCode::Unavailable, false, message)
     }
 
+    /// 本机自身的失败（云端响应不符合约定 / 超出本机上限）：重试没有意义。
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
+        Self::with(ApplicationErrorCode::Internal, false, message)
+    }
+
+    /// 附加细分失败原因，UI 据此给出本地化文案。
+    #[must_use]
+    pub(crate) fn with_reason(mut self, reason: ErrorReason) -> Self {
+        self.data.reason = Some(reason);
+        self
+    }
+
     pub(crate) fn reason(&self) -> Option<ErrorReason> {
         self.data.reason
     }
@@ -80,18 +100,23 @@ impl From<CloudError> for AssistantError {
 
 /// 云端错误 → RPC 错误详情。
 ///
-/// AI 专属错误码按语义落到现有 `ApplicationErrorCode`（协议没有 AI 专属 `ErrorReason`）：
+/// AI 专属错误码按语义落到现有 `ApplicationErrorCode`，并带上细分 `reason` 供 UI 本地化：
 /// - `ai_unavailable`（503，未开放 / 当日额度耗尽）：`Unavailable`，立即重试无意义；
 /// - `ai_disabled`（403，套餐不含 AI 助手）：`Unsupported`；
-/// - `ai_quota_exceeded`（403，当日提问次数用完）：`Conflict`（与设备数 / 渠道数上限同类）；
-/// - `rate_limited`（429）与 401 等沿用通用映射（带 `reason`，`RateLimited` 可重试）；
+/// - `ai_quota_exceeded`（403，当日提问次数用完）：`Conflict` + [`ErrorReason::AssistantQuotaExceeded`]
+///   （与每分钟限频区分开：后者是 429 `rate_limited`，沿用通用映射的 [`ErrorReason::RateLimited`]）；
+/// - `ai_session_limit`（403，本会话提问次数已达上限）：`Conflict` + [`ErrorReason::AssistantSessionLimit`]；
+/// - 401 等沿用通用映射（带 `reason`，`RateLimited` 可重试）；
 /// - 其余未识别的 409（如该会话已有进行中的执行）：`Conflict`。
 pub(crate) fn rpc_error(error: &CloudError) -> RpcErrorData {
     let base = error.to_rpc_error();
     match (error.status, error.code.as_deref()) {
         (_, Some("ai_unavailable")) => RpcErrorData::new(ApplicationErrorCode::Unavailable, false),
         (_, Some("ai_disabled")) => RpcErrorData::new(ApplicationErrorCode::Unsupported, false),
-        (_, Some("ai_quota_exceeded")) => RpcErrorData::new(ApplicationErrorCode::Conflict, false),
+        (_, Some("ai_quota_exceeded")) => RpcErrorData::new(ApplicationErrorCode::Conflict, false)
+            .with_reason(ErrorReason::AssistantQuotaExceeded),
+        (_, Some("ai_session_limit")) => RpcErrorData::new(ApplicationErrorCode::Conflict, false)
+            .with_reason(ErrorReason::AssistantSessionLimit),
         (Some(409), _) if base.reason.is_none() => {
             RpcErrorData::new(ApplicationErrorCode::Conflict, false)
         }
@@ -108,6 +133,9 @@ pub(crate) struct ConfigBody {
     available: bool,
     #[serde(default)]
     reason: Option<String>,
+    /// 本账号可见 AI 助手入口（与套餐无关）。
+    #[serde(default)]
+    visible: bool,
     #[serde(default)]
     client_tool_protocol: u32,
     #[serde(default)]
@@ -124,6 +152,8 @@ pub(crate) struct ConfigBody {
     daily_limit: u32,
     #[serde(default)]
     used_today: u64,
+    #[serde(default)]
+    session_limit: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,7 +162,17 @@ struct CloudToolRef {
     version: u32,
 }
 
+/// `GET /ai/status`（免鉴权）的响应：未登录时的入口可见性。
+#[derive(Debug, Deserialize)]
+pub(crate) struct StatusBody {
+    pub(crate) visible: bool,
+}
+
 impl ConfigBody {
+    pub(crate) const fn visible(&self) -> bool {
+        self.visible
+    }
+
     /// `declared` 是本机实现的 `(name, version)`；云端工具协议一致且至少一个本机工具在云端目录里，
     /// 才算 `tools_enabled`。
     pub(crate) fn into_dto(self, declared: &[(&'static str, u32)]) -> AssistantConfigDto {
@@ -152,6 +192,7 @@ impl ConfigBody {
             max_image_bytes: self.max_image_bytes,
             daily_limit: self.daily_limit,
             used_today: self.used_today,
+            session_limit: self.session_limit,
             tools_enabled,
         }
     }
@@ -183,10 +224,14 @@ pub(crate) enum RunEvent {
         name: String,
         version: u32,
         arguments: Value,
+        #[serde(deserialize_with = "effect_or_write")]
         effect: AssistantToolEffect,
         #[serde(default)]
         confirm_timeout_secs: Option<u32>,
         timeout_secs: u32,
+        /// 本次生效的输出上限(云端 `limits.maxToolOutputChars`;旧云端不带)。
+        #[serde(default)]
+        max_output_chars: Option<u32>,
     },
     ToolFinished {
         call_id: String,
@@ -213,6 +258,13 @@ pub(crate) enum RunEvent {
     Error {
         status: String,
         message: String,
+        /// 云端失败原因：`timeout` / `maxTurns` / `noAnswer` / `canceled` / `contextOverflow` /
+        /// `imageUnsupported` / `unavailable` / `error`（旧云端不带）。
+        #[serde(default)]
+        reason: Option<String>,
+        /// 中断前已推送的文本被落库为 `interrupted` 的回答消息时的 ID（可评价）。
+        #[serde(default)]
+        message_id: Option<String>,
     },
     /// `triage` / `routed` / `reasoning`（只推给后台测试）与云端后续新增的事件：本机不展示。
     #[serde(other)]
@@ -221,6 +273,37 @@ pub(crate) enum RunEvent {
 
 pub(crate) fn parse_event(payload: &[u8]) -> Result<RunEvent, serde_json::Error> {
     serde_json::from_slice(payload)
+}
+
+/// 云端 `effect` 的线上取值;云端日后新增的未知取值按最严的 `write` 处理(宁可多确认)。
+fn effect_or_write<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<AssistantToolEffect, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    enum Wire {
+        Read,
+        Network,
+        Write,
+        #[serde(other)]
+        Unknown,
+    }
+    Ok(match Wire::deserialize(deserializer)? {
+        Wire::Read => AssistantToolEffect::Read,
+        Wire::Network => AssistantToolEffect::Network,
+        Wire::Write | Wire::Unknown => AssistantToolEffect::Write,
+    })
+}
+
+/// 解析失败的帧若是 `clientToolCall` 且带 `requestId`,返回它:云端在等这次调用的结果,本机至少要回传一个
+/// 失败结果,而不是让它等满确认 / 执行时限。
+pub(crate) fn unreadable_call_id(payload: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(payload).ok()?;
+    if value.get("type")?.as_str()? != "clientToolCall" {
+        return None;
+    }
+    let id = value.get("requestId")?.as_str()?.trim();
+    (!id.is_empty()).then(|| id.to_owned())
 }
 
 // ------------------------------------------------------------------ SSE
@@ -236,14 +319,37 @@ pub(crate) enum StreamError {
     TooLong,
 }
 
-/// 增量 SSE 解析器：按行累积，空行分发一个事件，只认 `data:` 行（多行以 `\n` 合并），
-/// 注释 / `event:` / `id:` / `retry:` 一律忽略。单行与单事件都有上限。
+impl StreamError {
+    /// 读取失败后能否靠续读恢复：流损坏（单行 / 单事件超限）续读只会重放同一帧。
+    pub(crate) const fn is_resumable(&self) -> bool {
+        !matches!(self, Self::TooLong)
+    }
+
+    /// 无法续读时 `AssistantRunDto.error_reason` 的本机取值。
+    pub(crate) const fn local_reason(&self) -> &'static str {
+        match self {
+            Self::Idle | Self::Read(_) => "network",
+            Self::TooLong => "streamLost",
+        }
+    }
+}
+
+/// 一个 SSE 事件：`data` 是 JSON 载荷，`id` 是云端的事件序号（每次执行内从 1 递增；旧云端不带）。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SseEvent {
+    pub(crate) id: Option<u64>,
+    pub(crate) data: Vec<u8>,
+}
+
+/// 增量 SSE 解析器：按行累积，空行分发一个事件，认 `data:`（多行以 `\n` 合并）与 `id:` 行，
+/// 注释 / `event:` / `retry:` 一律忽略。单行与单事件都有上限。
 #[derive(Default)]
 pub(crate) struct SseParser {
     line: Vec<u8>,
     data: Vec<u8>,
     has_data: bool,
-    ready: VecDeque<Vec<u8>>,
+    id: Option<u64>,
+    ready: VecDeque<SseEvent>,
 }
 
 impl SseParser {
@@ -261,8 +367,13 @@ impl SseParser {
             let line = line.strip_suffix(b"\r").unwrap_or(line);
             if line.is_empty() {
                 if self.has_data {
-                    self.ready.push_back(std::mem::take(&mut self.data));
+                    self.ready.push_back(SseEvent {
+                        id: self.id.take(),
+                        data: std::mem::take(&mut self.data),
+                    });
                     self.has_data = false;
+                } else {
+                    self.id = None;
                 }
             } else if let Some(rest) = line.strip_prefix(b"data:") {
                 let rest = rest.strip_prefix(b" ").unwrap_or(rest);
@@ -281,18 +392,23 @@ impl SseParser {
                 }
                 self.data.extend_from_slice(rest);
                 self.has_data = true;
+            } else if let Some(rest) = line.strip_prefix(b"id:") {
+                let rest = rest.strip_prefix(b" ").unwrap_or(rest);
+                self.id = std::str::from_utf8(rest)
+                    .ok()
+                    .and_then(|text| text.trim().parse().ok());
             }
             self.line.clear();
         }
         Ok(())
     }
 
-    pub(crate) fn pop(&mut self) -> Option<Vec<u8>> {
+    pub(crate) fn pop(&mut self) -> Option<SseEvent> {
         self.ready.pop_front()
     }
 }
 
-/// 提问响应的事件流：读 body、喂解析器、带空闲看门狗。
+/// 提问响应 / 续读响应的事件流：读 body、喂解析器、带空闲看门狗。
 pub(crate) struct EventStream {
     response: reqwest::Response,
     parser: SseParser,
@@ -306,12 +422,12 @@ impl EventStream {
         }
     }
 
-    /// 下一个事件的 JSON 载荷；流被云端正常关闭返回 `Ok(None)`。可在 `select!` 中取消重试：
+    /// 下一个事件；流被云端正常关闭返回 `Ok(None)`。可在 `select!` 中取消重试：
     /// 已读入的半行留在解析器里，不丢数据。
-    pub(crate) async fn next_data(&mut self) -> Result<Option<Vec<u8>>, StreamError> {
+    pub(crate) async fn next_event(&mut self) -> Result<Option<SseEvent>, StreamError> {
         loop {
-            if let Some(data) = self.parser.pop() {
-                return Ok(Some(data));
+            if let Some(event) = self.parser.pop() {
+                return Ok(Some(event));
             }
             let chunk = tokio::time::timeout(SSE_IDLE_TIMEOUT, self.response.chunk())
                 .await
@@ -334,6 +450,29 @@ fn error_chain(error: &reqwest::Error) -> String {
         source = cause.source();
     }
     message
+}
+
+fn attachment_too_large() -> AssistantError {
+    AssistantError::internal(format!(
+        "The attachment exceeds the {} MiB limit.",
+        MAX_ATTACHMENT_BYTES / (1024 * 1024)
+    ))
+}
+
+/// 读完响应正文，累计超过 [`MAX_ATTACHMENT_BYTES`] 即中止。
+async fn read_capped(mut response: reqwest::Response) -> Result<Vec<u8>, AssistantError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| CloudError::network(error_chain(&error)))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_ATTACHMENT_BYTES {
+            return Err(attachment_too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// 提问成功后的响应：云端执行 ID（响应头）与事件流。
@@ -373,12 +512,39 @@ struct ToolRef<'a> {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AskBody<'a> {
     text: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     images: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     locale: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replace_from: Option<&'a str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    keep_images: bool,
+    /// 本次提问时本机实现的客户端工具(形状同建会话的 `client.clientTools`):云端用它代替会话存的声明,
+    /// 跨渠道续聊的会话因此总是按当前客户端的能力出工具。
+    client_tools: Vec<ToolRef<'a>>,
+    client_tool_protocol: u32,
+}
+
+/// 一次提问的内容(`POST /sessions/{id}/messages` 的请求体)。
+pub(crate) struct AskRequest<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) images: &'a [String],
+    pub(crate) locale: Option<&'a str>,
+    /// 重新生成 / 编辑重发:被替换的 user 消息 ID。
+    pub(crate) replace_from: Option<&'a str>,
+    /// 沿用被替换提问的附图。
+    pub(crate) keep_images: bool,
+    /// 本机实现的 `(name, version)`。
+    pub(crate) client_tools: &'a [(&'static str, u32)],
+}
+
+#[derive(Serialize)]
+struct RenameBody<'a> {
+    title: &'a str,
 }
 
 #[derive(Serialize)]
@@ -446,6 +612,11 @@ impl AiCloud {
             .await
     }
 
+    /// 免鉴权的入口可见性（未登录时用）。
+    pub(crate) async fn status(&self) -> Result<StatusBody, CloudError> {
+        self.api.ai_status().await
+    }
+
     /// 建会话并声明本机实现的客户端工具（云端只对声明了且协议一致的会话下发工具）。
     pub(crate) async fn create_session(
         &self,
@@ -463,13 +634,7 @@ impl AiCloud {
                 app_version: fluxdown_protocol::APP_VERSION,
                 platform: Some(platform.as_str()).filter(|platform| !platform.is_empty()),
                 locale,
-                client_tools: tools
-                    .iter()
-                    .map(|(name, version)| ToolRef {
-                        name,
-                        version: *version,
-                    })
-                    .collect(),
+                client_tools: tool_refs(tools),
                 client_tool_protocol: ASSISTANT_CLIENT_TOOL_PROTOCOL,
             },
         };
@@ -482,6 +647,7 @@ impl AiCloud {
         &self,
         limit: Option<u32>,
         offset: Option<u32>,
+        search: Option<&str>,
     ) -> Result<AssistantSessionPage, CloudError> {
         let mut query = Vec::new();
         if let Some(limit) = limit {
@@ -490,12 +656,98 @@ impl AiCloud {
         if let Some(offset) = offset {
             query.push(format!("offset={offset}"));
         }
+        if let Some(search) = search {
+            query.push(format!("q={}", encode_path_segment(search)));
+        }
         let suffix = if query.is_empty() {
             "/sessions".to_owned()
         } else {
             format!("/sessions?{}", query.join("&"))
         };
         self.api.ai_call(Method::GET, &suffix, None::<&Value>).await
+    }
+
+    /// 给会话改名（云端校验 trim 后 1–80 字符）。
+    pub(crate) async fn rename_session(
+        &self,
+        id: &str,
+        title: &str,
+    ) -> Result<AssistantSessionDto, CloudError> {
+        self.api
+            .ai_call(
+                Method::PATCH,
+                &format!("/sessions/{}", encode_path_segment(id)),
+                Some(&RenameBody { title }),
+            )
+            .await
+    }
+
+    /// 导出会话（云端生成文件名 / MIME / 内容，UI 只负责保存）。
+    pub(crate) async fn export_session(
+        &self,
+        id: &str,
+        format: AssistantExportFormat,
+    ) -> Result<AssistantExportResult, CloudError> {
+        let format = match format {
+            AssistantExportFormat::Markdown => "markdown",
+            AssistantExportFormat::Json => "json",
+        };
+        self.api
+            .ai_call(
+                Method::GET,
+                &format!(
+                    "/sessions/{}/export?format={format}",
+                    encode_path_segment(id)
+                ),
+                None::<&Value>,
+            )
+            .await
+    }
+
+    /// 读取本人会话里的一张提问图片并编码成 `data:` URL：MIME 取自响应头（只放行云端接受的四种
+    /// 图片类型），正文超过 [`MAX_ATTACHMENT_BYTES`] 即拒绝。
+    pub(crate) async fn attachment(
+        &self,
+        id: &str,
+    ) -> Result<AssistantAttachmentResult, AssistantError> {
+        let response = self
+            .api
+            .ai_get_stream(&format!("/attachments/{}", encode_path_segment(id)))
+            .await?;
+        let mime = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if !ATTACHMENT_MIMES.contains(&mime.as_str()) {
+            return Err(AssistantError::internal(format!(
+                "FluxCloud returned an unsupported attachment type: {mime:?}."
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_ATTACHMENT_BYTES as u64)
+        {
+            return Err(attachment_too_large());
+        }
+        let body = tokio::time::timeout(ATTACHMENT_TIMEOUT, read_capped(response))
+            .await
+            .map_err(|_| {
+                CloudError::network("FluxCloud attachment download timed out".to_owned())
+            })??;
+        if body.is_empty() {
+            return Err(AssistantError::internal(
+                "FluxCloud returned an empty attachment.",
+            ));
+        }
+        let mut data_url = String::with_capacity(mime.len() + body.len().div_ceil(3) * 4 + 16);
+        data_url.push_str("data:");
+        data_url.push_str(&mime);
+        data_url.push_str(";base64,");
+        base64::engine::general_purpose::STANDARD.encode_string(&body, &mut data_url);
+        Ok(AssistantAttachmentResult { data_url })
     }
 
     pub(crate) async fn session(&self, id: &str) -> Result<AssistantSessionDetail, CloudError> {
@@ -550,14 +802,16 @@ impl AiCloud {
     pub(crate) async fn ask(
         &self,
         session_id: &str,
-        text: &str,
-        images: &[String],
-        locale: Option<&str>,
+        request: &AskRequest<'_>,
     ) -> Result<AskStream, CloudError> {
         let body = AskBody {
-            text,
-            images: (!images.is_empty()).then_some(images),
-            locale,
+            text: request.text,
+            images: (!request.images.is_empty()).then_some(request.images),
+            locale: request.locale,
+            replace_from: request.replace_from,
+            keep_images: request.keep_images,
+            client_tools: tool_refs(request.client_tools),
+            client_tool_protocol: ASSISTANT_CLIENT_TOOL_PROTOCOL,
         };
         let response = self
             .api
@@ -575,6 +829,19 @@ impl AiCloud {
             run_id,
             events: EventStream::new(response),
         })
+    }
+
+    /// 续读执行事件（`GET /runs/{id}/events?after=<seq>`）：先补发 `after` 之后的事件，再跟随实时。
+    /// 云端不再保留这次执行（宽限期已过 / 日志过期或超限）返回 410。
+    pub(crate) async fn events(&self, run_id: &str, after: u64) -> Result<EventStream, CloudError> {
+        let response = self
+            .api
+            .ai_get_stream(&format!(
+                "/runs/{}/events?after={after}",
+                encode_path_segment(run_id)
+            ))
+            .await?;
+        Ok(EventStream::new(response))
     }
 
     pub(crate) async fn cancel(&self, session_id: &str) -> Result<(), CloudError> {
@@ -652,4 +919,14 @@ impl AiCloud {
             )
             .await
     }
+}
+
+fn tool_refs<'a>(tools: &'a [(&'static str, u32)]) -> Vec<ToolRef<'a>> {
+    tools
+        .iter()
+        .map(|(name, version)| ToolRef {
+            name,
+            version: *version,
+        })
+        .collect()
 }

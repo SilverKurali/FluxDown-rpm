@@ -93,6 +93,9 @@ pub struct AssistantConfigDto {
     /// `0` = 不限。
     pub daily_limit: u32,
     pub used_today: u64,
+    /// 单个会话最多提问次数（套餐能力，重新生成 / 编辑重发也计）；`0` = 不限。
+    #[serde(default)]
+    pub session_limit: u32,
     /// 云端工具协议与本机一致、本机工具会被声明。
     pub tools_enabled: bool,
 }
@@ -167,12 +170,66 @@ pub struct AssistantToolCallDto {
     pub arguments: Option<Value>,
     #[serde(default)]
     pub confirmation: Option<AssistantConfirmationState>,
+    /// 确认截止时刻（agent 主机时钟）。跨机 UI 用 [`AssistantStateDto::now_unix_ms`] 换算时钟偏差。
     #[serde(default)]
     pub confirm_deadline_unix_ms: Option<i64>,
     /// 本机执行结果摘要（客户端工具，截断后的文本）。
     #[serde(default)]
     pub output_preview: Option<String>,
+    /// 待确认调用的可读预览（agent 用本机数据生成：任务名、设置旧值 → 新值等）；无法生成时为 `None`，
+    /// UI 回退显示原始参数。
+    #[serde(default)]
+    pub preview: Option<AssistantToolPreviewDto>,
+    /// 不可撤销的破坏性动作（删除任务 / 删除文件等）：确认卡片用危险样式。
+    #[serde(default)]
+    pub destructive: bool,
+    /// 已批准的写操作在执行中被用户停止：本机请求可能已生效，结果未知（`status` 为 `Failed`）。
+    #[serde(default)]
+    pub interrupted: bool,
 }
+
+/// 确认卡片的可读预览。各字段按需出现，UI 按 `action` 本地化动作名、逐项渲染其余字段。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantToolPreviewDto {
+    /// 动作标识（camelCase，与工具参数里的 `action` 同名，如 `delete` / `pause` / `create` /
+    /// `updateSettings` / `changeUrl`）；UI 映射到 `assistantPreviewAction<Action>` 文案，未知值回退原文。
+    pub action: String,
+    /// 受影响任务的显示名（至多 [`ASSISTANT_PREVIEW_MAX_ITEMS`] 条）。
+    #[serde(default)]
+    pub tasks: Vec<String>,
+    /// 超出 `tasks` 上限、未列出的任务数。
+    #[serde(default)]
+    pub more_tasks: u32,
+    /// 同时删除已下载的文件。
+    #[serde(default)]
+    pub delete_files: bool,
+    /// 设置变更（旧值 → 新值）。
+    #[serde(default)]
+    pub settings: Vec<AssistantSettingChangeDto>,
+    /// 将要访问 / 新建的地址（至多 [`ASSISTANT_PREVIEW_MAX_ITEMS`] 条，已脱敏）。
+    #[serde(default)]
+    pub urls: Vec<String>,
+    /// 其余原样显示的补充文本（如目标队列名、保存目录）。
+    #[serde(default)]
+    pub details: Vec<String>,
+}
+
+/// 预览里一项设置的变更。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantSettingChangeDto {
+    /// 规范设置键（UI 有本地化名时显示名称，否则显示键）。
+    pub key: String,
+    #[serde(default)]
+    pub from: Option<String>,
+    pub to: String,
+}
+
+/// 预览列表（任务名 / 地址）的条数上限。
+pub const ASSISTANT_PREVIEW_MAX_ITEMS: usize = 20;
 
 /// 云端起草、待用户确认提交的问题单。
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -233,13 +290,30 @@ pub struct AssistantRunDto {
     pub run_id: Option<String>,
     pub status: AssistantRunStatus,
     pub question: String,
+    /// 提问附带的图片张数（执行中提问气泡据此显示占位 / 本地缩略图）。
+    #[serde(default)]
+    pub image_count: u32,
+    /// 沿用的旧图（`keepImages` 重新生成 / 编辑重发）的附件 ID，经 `agent.assistant.attachment` 取图；
+    /// 与 `image_count`（本次新附的张数）分开计。
+    #[serde(default)]
+    pub image_ids: Vec<String>,
+    /// 旁观执行：由其他设备或本机重启前发起、本机只接回事件流显示进度。本机不执行它的客户端工具，
+    /// 也不能确认 / 拒绝其中的待确认调用；UI 显示 `assistantRunObserving` 提示并隐藏确认按钮。
+    #[serde(default)]
+    pub observing: bool,
     pub started_at_unix_ms: i64,
     #[serde(default)]
     pub items: Vec<AssistantRunItemDto>,
     #[serde(default)]
     pub message_id: Option<String>,
+    /// 失败原文（详情用）；UI 优先按 `error_reason` 本地化。
     #[serde(default)]
     pub error: Option<String>,
+    /// 失败原因（camelCase）。云端：`timeout` / `maxTurns` / `noAnswer` / `canceled` /
+    /// `contextOverflow` / `imageUnsupported` / `unavailable` / `error`；本机：`streamLost`（事件流
+    /// 断开且续读失败）/ `network`。未知值按 `error` 处理。
+    #[serde(default)]
+    pub error_reason: Option<String>,
     #[serde(default)]
     pub input_tokens: u64,
     #[serde(default)]
@@ -251,6 +325,11 @@ pub struct AssistantRunDto {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantStateDto {
+    /// 云端开放了 AI 助手入口（FluxCloud 判定：`mode = enabled`，或 `internal` 且为内部账号；与套餐无关）。
+    /// 已登录取 `GET /ai/config` 的 `visible`，未登录取免鉴权 `GET /ai/status`；拉取失败保留上次值，
+    /// 初始为 `false`。为 `false` 时各 UI 隐藏全部助手入口。
+    #[serde(default)]
+    pub visible: bool,
     /// 最近一次成功拉取的云端配置；未登录或从未拉取成功为 `None`。
     #[serde(default)]
     pub config: Option<AssistantConfigDto>,
@@ -263,6 +342,10 @@ pub struct AssistantStateDto {
     /// 进行中与最近结束的执行（新的在后，至多 [`ASSISTANT_MAX_RUNS`] 条）。
     #[serde(default)]
     pub runs: Vec<AssistantRunDto>,
+    /// 生成本投影时 agent 主机的时钟（Unix 毫秒）。UI 以「本地收到时刻 − 该值」作时钟偏差，换算
+    /// `confirm_deadline_unix_ms`；旧 agent 缺省为 `0`，UI 视为无偏差。
+    #[serde(default)]
+    pub now_unix_ms: i64,
 }
 
 /// 云端会话摘要。
@@ -281,11 +364,16 @@ pub struct AssistantSessionDto {
     /// 云端正在回答中。
     #[serde(default)]
     pub active: bool,
+    /// 云端进行中执行的 ID（`active` 时；旧云端不带）。agent 用它接回本机未跟踪的执行（旁观）。
+    #[serde(default)]
+    pub active_run_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
-/// 云端会话中的一条消息（`role`：`user` / `assistant` / `tool_call` / `tool_result`）。
+/// 云端会话中的一条消息（`role`：`user` / `assistant` / `assistant_step` / `tool_call` / `tool_result`）。
+/// `assistant_step` 是工具调用之前的中间说明文字，UI 归入「过程」，不可评价。被「重新生成 / 编辑重发」
+/// 替换的消息云端不再返回。
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
@@ -308,6 +396,9 @@ pub struct AssistantMessageDto {
     pub duration_ms: Option<i64>,
     #[serde(default)]
     pub images: Vec<String>,
+    /// 回答未完成就中断（取消 / 超时 / 失败），内容是中断前已输出的部分；只有 `assistant` 消息可能为真。
+    #[serde(default)]
+    pub interrupted: bool,
     /// 用户对该条回答的评价（`up` / `down`）；只有 `assistant` 消息可能非空。
     #[serde(default)]
     pub rating: Option<String>,
@@ -334,6 +425,9 @@ pub struct AssistantSessionDetail {
     pub messages: Vec<AssistantMessageDto>,
     #[serde(default)]
     pub issues: Vec<AssistantIssueDto>,
+    /// 本会话已计入 [`AssistantConfigDto::session_limit`] 的提问次数（含已被替换的提问）。
+    #[serde(default)]
+    pub questions_used: u64,
 }
 
 /// `agent.assistant.clearSessions` 的结果。
@@ -354,6 +448,71 @@ pub struct AssistantSessionsParams {
     pub limit: Option<u32>,
     #[serde(default)]
     pub offset: Option<u32>,
+    /// 按标题 / 消息内容搜索（不区分大小写）；空白视为不搜索。
+    #[serde(default)]
+    pub query: Option<String>,
+}
+
+/// `agent.assistant.renameSession` 参数。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantRenameParams {
+    pub session_id: String,
+    /// 新标题（去首尾空白后 1–[`ASSISTANT_MAX_TITLE_CHARS`] 字符）。
+    pub title: String,
+}
+
+/// 会话标题的字符数上限（与 FluxCloud 一致）。
+pub const ASSISTANT_MAX_TITLE_CHARS: usize = 80;
+
+/// 会话导出格式。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum AssistantExportFormat {
+    #[default]
+    Markdown,
+    Json,
+}
+
+/// `agent.assistant.exportSession` 参数。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantExportParams {
+    pub session_id: String,
+    #[serde(default)]
+    pub format: AssistantExportFormat,
+}
+
+/// `agent.assistant.exportSession` 的结果：由云端生成，UI 只负责保存 / 下载。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantExportResult {
+    /// 建议文件名（已去除路径分隔符等不安全字符，含扩展名）。
+    pub file_name: String,
+    /// `text/markdown` / `application/json`。
+    pub mime: String,
+    pub content: String,
+}
+
+/// `agent.assistant.attachment` 参数：[`AssistantMessageDto::images`] 里的附件 ID。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantAttachmentParams {
+    pub attachment_id: String,
+}
+
+/// `agent.assistant.attachment` 的结果。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantAttachmentResult {
+    /// `data:image/(png|jpeg|gif|webp);base64,...`。
+    pub data_url: String,
 }
 
 /// 只带会话 ID 的参数（`session` / `deleteSession` / `cancel`）。
@@ -385,6 +544,14 @@ pub struct AssistantAskParams {
     /// 界面语言（BCP 47），新建会话时随客户端信息上报。
     #[serde(default)]
     pub locale: Option<String>,
+    /// 重新生成 / 编辑后重发：该会话里一条 `user` 消息的 ID。云端把它及之后的消息标为已替换（对用户与
+    /// 模型都不再可见），再以本次 `text` 作答。须同时带 `session_id`。
+    #[serde(default)]
+    pub replace_from: Option<String>,
+    /// 与 `replace_from` 连用：沿用被替换提问的附图（此时 `images` 必须为空；`text` 里的占位符
+    /// 仍按原附图编号）。
+    #[serde(default)]
+    pub keep_images: bool,
 }
 
 /// `agent.assistant.ask` 的结果：执行随后经 `AssistantChanged` 推送。

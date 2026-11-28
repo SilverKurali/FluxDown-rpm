@@ -196,6 +196,12 @@ pub enum ErrorReason {
     ReferralPlanExcluded,
     /// 推介：自定义推荐码已被占用。
     ReferralCodeTaken,
+    /// AI 助手：本日提问次数已用完（套餐每日上限）。每分钟限频仍是 [`ErrorReason::RateLimited`]。
+    AssistantQuotaExceeded,
+    /// AI 助手：工具确认窗口已过期，该调用未执行。
+    AssistantConfirmExpired,
+    /// AI 助手：本会话提问次数已达套餐上限，须开始新对话。
+    AssistantSessionLimit,
     /// 对端发送了本端不认识的原因。
     #[serde(other)]
     Unknown,

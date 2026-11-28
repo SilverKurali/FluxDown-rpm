@@ -60,7 +60,7 @@ const signedIn = () => new Jar({ [ACCESS_COOKIE]: "at-0", [REFRESH_COOKIE]: "rt-
 
 function call(
   path: string,
-  { method = "GET", body, signal, headers = {} }: { method?: string; body?: unknown; signal?: AbortSignal; headers?: Record<string, string> } = {},
+  { method = "GET", body, signal, headers = {}, jar = signedIn() }: { method?: string; body?: unknown; signal?: AbortSignal; headers?: Record<string, string>; jar?: Jar } = {},
 ) {
   const request = new Request(`https://site.example/api/account/${path}`, {
     method,
@@ -73,7 +73,7 @@ function call(
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
   });
-  return handleAccountRequest(request, path.split("?")[0] ?? path, signedIn(), "203.0.113.7");
+  return handleAccountRequest(request, path.split("?")[0] ?? path, jar, "203.0.113.7");
 }
 
 /** 把若干文本块依次作为上游 SSE 正文返回（块边界可以切在帧中间）。 */
@@ -141,7 +141,7 @@ test("ask: forwards only whitelisted events and fields, even when frames are spl
   expect(seen).toHaveLength(1);
   expect(seen[0]?.url).toBe(`http://cloud.test/api/v1/ai/sessions/${SESSION_ID}/messages`);
   expect(seen[0]?.headers.authorization).toBe("Bearer at-0");
-  expect(seen[0]?.body).toEqual({ text: "hi", images: [PNG_URL] });
+  expect(seen[0]?.body).toEqual({ text: "hi", images: [PNG_URL], clientTools: [] });
 });
 
 test("ask: refusals before the stream starts pass through as JSON errors", async () => {
@@ -186,7 +186,7 @@ test("ask: forwards the current site locale; malformed locales never reach FluxC
   reply = () => sse([]);
   const ask = (locale: unknown) => call(`ai/sessions/${SESSION_ID}/messages`, { method: "POST", body: { text: "hi", locale } });
   expect((await ask("pt-BR")).status).toBe(200);
-  expect(seen[0]?.body).toEqual({ text: "hi", locale: "pt-BR" });
+  expect(seen[0]?.body).toEqual({ text: "hi", locale: "pt-BR", clientTools: [] });
   for (const bad of ["english", "en US", 42, "en-"]) expect((await ask(bad)).status).toBe(400);
   expect(seen).toHaveLength(1);
 });
@@ -207,6 +207,86 @@ test("attachments: plain <img> GETs are proxied with a locked-down image respons
   expect((await call("ai/attachments/a1")).status).toBe(502);
   expect((await call("ai/attachments/a1", { headers: { "X-Fluxdown-Account": "", "Sec-Fetch-Site": "cross-site" } })).status).toBe(403);
   expect(seen).toHaveLength(2);
+});
+
+test("config: carries the entry visibility next to availability; internals stay out", async () => {
+  reply = () =>
+    Response.json({
+      available: false, reason: "plan_disabled", visible: true, maxMessageChars: 0, dailyLimit: 0, usedToday: 0,
+      imagesSupported: false, maxImages: 0, maxImageBytes: 0, provider: "secret",
+    });
+  const res = await call("ai/config");
+  expect(await res.json()).toEqual({
+    available: false, reason: "plan_disabled", visible: true, maxMessageChars: 0, dailyLimit: 0, usedToday: 0,
+    imagesSupported: false, maxImages: 0, maxImageBytes: 0,
+  });
+});
+
+test("config: carries the per-session question limit", async () => {
+  reply = () =>
+    Response.json({
+      available: true, reason: null, visible: true, maxMessageChars: 2000, sessionLimit: 10, dailyLimit: 20, usedToday: 1,
+      imagesSupported: false, maxImages: 0, maxImageBytes: 0,
+    });
+  const res = await call("ai/config");
+  expect(((await res.json()) as Record<string, unknown>).sessionLimit).toBe(10);
+});
+
+test("status: a signed-in visitor gets the verdict for their own account from ai/config (plan limits don't hide the entry)", async () => {
+  reply = () => Response.json({ available: false, reason: "plan_disabled", visible: true, usedToday: 3 });
+  const res = await call("ai/status");
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ visible: true });
+  expect(seen).toHaveLength(1);
+  expect(seen[0]?.url).toBe("http://cloud.test/api/v1/ai/config");
+  expect(seen[0]?.headers.authorization).toBe("Bearer at-0");
+
+  reply = () => Response.json({ available: false, reason: "internal_only", visible: false });
+  expect(await (await call("ai/status")).json()).toEqual({ visible: false });
+});
+
+test("status: without a session the public ai/status answers, with no credentials sent", async () => {
+  reply = () => Response.json({ visible: true });
+  const res = await call("ai/status", { jar: new Jar() });
+  expect(await res.json()).toEqual({ visible: true });
+  expect(seen).toHaveLength(1);
+  expect(seen[0]?.url).toBe("http://cloud.test/api/v1/ai/status");
+  expect(seen[0]?.headers.authorization).toBeUndefined();
+});
+
+test("status: a dead session (401) falls back to the public verdict and the session is cleared", async () => {
+  reply = (c) =>
+    c.url.endsWith("/ai/config") ? Response.json({ code: "unauthorized" }, { status: 401 }) : Response.json({ visible: false });
+  const jar = new Jar({ [ACCESS_COOKIE]: "at-0" });
+  const res = await call("ai/status", { jar });
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ visible: false });
+  expect(seen.map((s) => s.url)).toEqual(["http://cloud.test/api/v1/ai/config", "http://cloud.test/api/v1/ai/status"]);
+  expect(seen[1]?.headers.authorization).toBeUndefined();
+  expect(jar.get(ACCESS_COOKIE)).toBeUndefined();
+});
+
+test("status: other upstream failures and malformed bodies surface as failures, never as a guessed verdict", async () => {
+  reply = () => Response.json({ code: "internal_error" }, { status: 500 });
+  const signed = await call("ai/status");
+  expect(signed.status).toBe(500);
+  expect(seen).toHaveLength(1);
+
+  reply = () => Response.json({ code: "internal_error" }, { status: 503 });
+  expect((await call("ai/status", { jar: new Jar() })).status).toBe(503);
+
+  // 上游还没带 visible（FluxCloud 未升级）/ 类型不对：502，客户端保留上次已知值
+  reply = () => Response.json({ available: true });
+  expect((await call("ai/status")).status).toBe(502);
+  reply = () => Response.json({ visible: "yes" });
+  expect((await call("ai/status", { jar: new Jar() })).status).toBe(502);
+});
+
+test("status: GET only, behind the same CSRF gate as the rest of the account BFF", async () => {
+  reply = () => Response.json({ visible: true });
+  expect((await call("ai/status", { headers: { "X-Fluxdown-Account": "" } })).status).toBe(403);
+  expect((await call("ai/status", { method: "POST", body: {} })).status).toBe(405);
+  expect(seen).toHaveLength(0);
 });
 
 test("sessions: created as website channel without client tools; kind is validated", async () => {
@@ -242,6 +322,42 @@ test("sessions: list clamps paging and detail drops tool messages but keeps imag
     { id: "m1", runId: "r1", seq: 1, role: "user", content: "Q", createdAt: "t", images: ["a1", "a2"] },
     { id: "m4", runId: "r1", seq: 4, role: "assistant", content: "A", createdAt: "t", images: [] },
   ]);
+});
+
+test("sessions: detail forwards questionsUsed only when it is a non-negative integer", async () => {
+  const upstream = (extra: Record<string, unknown>) =>
+    Response.json({
+      session: { id: SESSION_ID, channel: "website", kind: "ask", title: "Q", messageCount: 0, rating: null, active: false, createdAt: "t", updatedAt: "t" },
+      messages: [],
+      issues: [],
+      ...extra,
+    });
+  reply = () => upstream({ questionsUsed: 7 });
+  expect(((await (await call(`ai/sessions/${SESSION_ID}`)).json()) as Record<string, unknown>).questionsUsed).toBe(7);
+  reply = () => upstream({});
+  expect(await (await call(`ai/sessions/${SESSION_ID}`)).json()).not.toHaveProperty("questionsUsed");
+  for (const bad of [-1, 1.5, "3", null]) {
+    reply = () => upstream({ questionsUsed: bad });
+    expect(await (await call(`ai/sessions/${SESSION_ID}`)).json()).not.toHaveProperty("questionsUsed");
+  }
+});
+
+test("sessions: activeRunId is forwarded on detail and list; unknown session fields stay dropped", async () => {
+  const session = { id: SESSION_ID, channel: "desktop", kind: "ask", title: "Q", messageCount: 1, rating: null, active: true, activeRunId: "run-9", createdAt: "t", updatedAt: "t", userId: "u1" };
+  reply = () => Response.json({ session, messages: [], issues: [] });
+  const detail = (await (await call(`ai/sessions/${SESSION_ID}`)).json()) as { session: Record<string, unknown> };
+  expect(detail.session.activeRunId).toBe("run-9");
+  expect(detail.session).not.toHaveProperty("userId");
+  reply = () => Response.json({ total: 1, items: [session] });
+  const list = (await (await call("ai/sessions")).json()) as { items: Record<string, unknown>[] };
+  expect(list.items[0]?.activeRunId).toBe("run-9");
+});
+
+test("ask: the per-session question limit refusal passes through as ai_session_limit", async () => {
+  reply = () => Response.json({ code: "ai_session_limit", message: "本对话已达提问上限" }, { status: 403 });
+  const res = await call(`ai/sessions/${SESSION_ID}/messages`, { method: "POST", body: { text: "hi" } });
+  expect(res.status).toBe(403);
+  expect(await res.json()).toEqual({ code: "ai_session_limit", message: "本对话已达提问上限" });
 });
 
 test("rating: PUT per answer forwards to the message route; the old per-session route is gone", async () => {
@@ -340,5 +456,106 @@ test("sessions: detail turns a successful offer_membership result into a members
     { id: "m1", runId: "r1", seq: 1, role: "user", content: "Q", createdAt: "t", images: [] },
     { id: "m3", runId: "r1", seq: 3, role: "membership_offer", content: "", createdAt: "t", images: [] },
     { id: "m7", runId: "r1", seq: 7, role: "assistant", content: "A", createdAt: "t", images: [] },
+  ]);
+});
+
+test("sessions: list forwards a trimmed search term; over-long terms never reach FluxCloud", async () => {
+  reply = () => Response.json({ total: 0, items: [] });
+  const res = await call(`ai/sessions?limit=10&q=${encodeURIComponent("  下载 失败 ")}`);
+  expect(res.status).toBe(200);
+  expect(seen[0]?.url).toBe(`http://cloud.test/api/v1/ai/sessions?limit=10&offset=0&q=${encodeURIComponent("下载 失败")}`);
+
+  seen = [];
+  const long = await call(`ai/sessions?q=${"x".repeat(101)}`);
+  expect(long.status).toBe(400);
+  expect(seen).toHaveLength(0);
+});
+
+test("sessions: clear-all, rename and export forward to FluxCloud with validated input", async () => {
+  reply = () => Response.json({ cleared: 3, secret: 1 });
+  const cleared = await call("ai/sessions", { method: "DELETE" });
+  expect(await cleared.json()).toEqual({ cleared: 3 });
+  expect(seen[0]?.method).toBe("DELETE");
+  expect(seen[0]?.url).toBe("http://cloud.test/api/v1/ai/sessions");
+
+  seen = [];
+  reply = () => Response.json({ id: SESSION_ID, channel: "website", kind: "ask", title: "New name", messageCount: 1, rating: null, active: false, createdAt: "t", updatedAt: "t" });
+  const renamed = await call(`ai/sessions/${SESSION_ID}`, { method: "PATCH", body: { title: "  New name  " } });
+  expect(renamed.status).toBe(200);
+  expect(seen[0]?.method).toBe("PATCH");
+  expect(seen[0]?.body).toEqual({ title: "New name" });
+  expect((await call(`ai/sessions/${SESSION_ID}`, { method: "PATCH", body: { title: "   " } })).status).toBe(400);
+  expect((await call(`ai/sessions/${SESSION_ID}`, { method: "PATCH", body: { title: "x".repeat(81) } })).status).toBe(400);
+
+  seen = [];
+  reply = () => Response.json({ fileName: "a.md", mime: "text/markdown", content: "# hi", extra: 1 });
+  const exported = await call(`ai/sessions/${SESSION_ID}/export?format=markdown`);
+  expect(await exported.json()).toEqual({ fileName: "a.md", mime: "text/markdown", content: "# hi" });
+  expect(seen[0]?.url).toBe(`http://cloud.test/api/v1/ai/sessions/${SESSION_ID}/export?format=markdown`);
+  expect((await call(`ai/sessions/${SESSION_ID}/export?format=pdf`)).status).toBe(400);
+});
+
+test("ask: replaceFrom / keepImages are validated and forwarded", async () => {
+  reply = () => sse([frame({ type: "run", runId: "r1", sessionId: SESSION_ID })]);
+  const ok = await call(`ai/sessions/${SESSION_ID}/messages`, { method: "POST", body: { text: "again", replaceFrom: "m1", keepImages: true } });
+  expect(ok.status).toBe(200);
+  await ok.text();
+  expect(seen[0]?.body).toEqual({ text: "again", replaceFrom: "m1", keepImages: true, clientTools: [] });
+
+  seen = [];
+  // keepImages 与新图片互斥，且必须带 replaceFrom
+  const withImages = await call(`ai/sessions/${SESSION_ID}/messages`, { method: "POST", body: { text: "x", replaceFrom: "m1", keepImages: true, images: [PNG_URL] } });
+  expect(withImages.status).toBe(400);
+  const orphan = await call(`ai/sessions/${SESSION_ID}/messages`, { method: "POST", body: { text: "x", keepImages: true } });
+  expect(orphan.status).toBe(400);
+  const badId = await call(`ai/sessions/${SESSION_ID}/messages`, { method: "POST", body: { text: "x", replaceFrom: "../x" } });
+  expect(badId.status).toBe(400);
+  expect(seen).toHaveLength(0);
+});
+
+test("runs: resume proxies events after a sequence number and forwards only integer event ids", async () => {
+  reply = () =>
+    sse([
+      `id: 4\ndata: ${JSON.stringify({ type: "text", delta: "Hel", secret: 1 })}\n\n`,
+      `id: abc\ndata: ${JSON.stringify({ type: "text", delta: "lo" })}\n\n`,
+      `data: ${JSON.stringify({ type: "triage", intent: "usage" })}\n\n`,
+      `id: 6\ndata: ${JSON.stringify({ type: "done", status: "completed", messageId: "m1", text: "Hello", inputTokens: 1 })}\n\n`,
+    ]);
+  const res = await call("ai/runs/r1/events?after=3");
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toContain("text/event-stream");
+  expect(seen[0]?.url).toBe("http://cloud.test/api/v1/ai/runs/r1/events?after=3");
+  expect(seen[0]?.method).toBe("GET");
+  const text = await res.text();
+  expect(text).toContain('id: 4\ndata: {"type":"text","delta":"Hel"}');
+  expect(text).toContain('data: {"type":"text","delta":"lo"}');
+  expect(text).not.toContain("id: abc");
+  expect(text).not.toContain("triage");
+  expect(text).toContain('id: 6\ndata: {"type":"done","status":"completed","messageId":"m1","text":"Hello"}');
+
+  seen = [];
+  reply = () => Response.json({ code: "ai_run_gone", message: "gone" }, { status: 410 });
+  const gone = await call("ai/runs/r1/events");
+  expect(gone.status).toBe(410);
+  expect(seen[0]?.url).toBe("http://cloud.test/api/v1/ai/runs/r1/events?after=0");
+  expect((await call("ai/runs/../x/events")).status).not.toBe(200);
+});
+
+test("sessions: detail keeps assistant_step messages and the interrupted flag", async () => {
+  reply = () =>
+    Response.json({
+      session: { id: SESSION_ID, channel: "website", kind: "ask", title: "Q", messageCount: 3, rating: null, active: false, createdAt: "t", updatedAt: "t" },
+      messages: [
+        { id: "m1", runId: "r1", seq: 1, role: "user", content: "Q", images: [], createdAt: "t" },
+        { id: "m2", runId: "r1", seq: 2, role: "assistant_step", content: "Let me look", images: [], createdAt: "t", secret: 1 },
+        { id: "m3", runId: "r1", seq: 3, role: "assistant", content: "Partial", images: [], interrupted: true, createdAt: "t" },
+      ],
+      issues: [],
+    });
+  const detail = (await (await call(`ai/sessions/${SESSION_ID}`)).json()) as { messages: unknown[] };
+  expect(detail.messages).toEqual([
+    { id: "m1", runId: "r1", seq: 1, role: "user", content: "Q", createdAt: "t", images: [] },
+    { id: "m2", runId: "r1", seq: 2, role: "assistant_step", content: "Let me look", createdAt: "t", images: [] },
+    { id: "m3", runId: "r1", seq: 3, role: "assistant", content: "Partial", interrupted: true, createdAt: "t", images: [] },
   ]);
 });

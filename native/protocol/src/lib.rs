@@ -34,13 +34,16 @@ pub use task_edit::{EditTaskParams, TaskEditCapabilities, TaskEditSnapshot, Task
 pub mod update_prompt;
 pub mod user_agent_presets;
 pub use assistant::{
-    ASSISTANT_CLIENT_TOOL_PROTOCOL, ASSISTANT_MAX_RUNS, AssistantAskParams, AssistantAskResult,
-    AssistantChannel, AssistantClearedSessions, AssistantConfigDto, AssistantConfirmParams,
-    AssistantConfirmationState, AssistantIssueDto, AssistantIssueParams, AssistantMessageDto,
-    AssistantRateParams, AssistantRunDto, AssistantRunItemDto, AssistantRunStatus,
-    AssistantSessionDetail, AssistantSessionDto, AssistantSessionIdParams, AssistantSessionKind,
-    AssistantSessionPage, AssistantSessionsParams, AssistantStateDto, AssistantToolCallDto,
-    AssistantToolEffect, AssistantToolStatus,
+    ASSISTANT_CLIENT_TOOL_PROTOCOL, ASSISTANT_MAX_RUNS, ASSISTANT_MAX_TITLE_CHARS,
+    ASSISTANT_PREVIEW_MAX_ITEMS, AssistantAskParams, AssistantAskResult, AssistantAttachmentParams,
+    AssistantAttachmentResult, AssistantChannel, AssistantClearedSessions, AssistantConfigDto,
+    AssistantConfirmParams, AssistantConfirmationState, AssistantExportFormat,
+    AssistantExportParams, AssistantExportResult, AssistantIssueDto, AssistantIssueParams,
+    AssistantMessageDto, AssistantRateParams, AssistantRenameParams, AssistantRunDto,
+    AssistantRunItemDto, AssistantRunStatus, AssistantSessionDetail, AssistantSessionDto,
+    AssistantSessionIdParams, AssistantSessionKind, AssistantSessionPage, AssistantSessionsParams,
+    AssistantSettingChangeDto, AssistantStateDto, AssistantToolCallDto, AssistantToolEffect,
+    AssistantToolPreviewDto, AssistantToolStatus,
 };
 pub use net_diag::{
     NetAddressScope, NetDnsServerDto, NetInterfaceDto, NetInterfaceKind, NetInterfacesDto,
@@ -185,11 +188,11 @@ pub use plugin_view::{
     normalize_view, plugin_route_id, view_schema,
 };
 pub use rpc::{
-    APP_VERSION, CLOSE_REASON_SERVICE_QUIT, CLOSE_REASON_SERVICE_RESTART, ClientHello,
-    JSONRPC_VERSION, MAX_INBOUND_RPC_MESSAGE_BYTES, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
-    RequestId, RpcFailureResponse, RpcIncoming, RpcNotification, RpcRequest, RpcResponse,
-    RpcSuccessResponse, ServiceHello, ServiceRole, is_older_app_version, negotiate_protocol,
-    validate_first_request,
+    APP_VERSION, CLOSE_REASON_SERVICE_QUIT, CLOSE_REASON_SERVICE_RESTART, CancelRequestParams,
+    ClientHello, JSONRPC_VERSION, MAX_INBOUND_RPC_MESSAGE_BYTES, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION, RequestId, RpcFailureResponse, RpcIncoming, RpcNotification, RpcRequest,
+    RpcResponse, RpcSuccessResponse, ServiceHello, ServiceRole, is_older_app_version,
+    negotiate_protocol, validate_first_request,
 };
 pub use settings::{
     CUSTOM_THEMES_KEY, FILE_ICON_PACK_KEY, MAX_CUSTOM_THEME_ID_LEN, MAX_SYNC_VALUE_BYTES,

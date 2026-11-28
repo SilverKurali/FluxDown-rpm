@@ -23,6 +23,7 @@ import {
   canSend,
   charCount,
   classifySendError,
+  sessionLimitState,
   confirmView,
   currentKind,
   currentRun,
@@ -42,6 +43,25 @@ import {
   toolCount,
   toolState,
   truncateChars,
+  ACTION_FAILURE_KEY,
+  SEND_FAILURE_KEY,
+  agentNowMs,
+  classifyConfirmError,
+  clockSkewMs,
+  previewActionKey,
+  runErrorKey,
+  toolStatusKey,
+  turnTranscript,
+  validTitle,
+  validRatingComment,
+  withoutReplaced,
+  MAX_RATING_COMMENT_CHARS,
+  canResend,
+  filterSessions,
+  retryPlan,
+  awaitsHistory,
+  stepCursor,
+  visibleSessions,
 } from './model'
 import type { IssueOverrides, RatingOverrides, Turn } from './model'
 
@@ -109,7 +129,7 @@ const issue = (id: string, extra: Partial<AssistantIssueDto> = {}): AssistantIss
 const none: IssueOverrides = new Map()
 const noRatings: RatingOverrides = new Map()
 
-const state = (runs: AssistantRunDto[], extra: Partial<AssistantStateDto> = {}): AssistantStateDto => ({ runs, ...extra })
+const state = (runs: AssistantRunDto[], extra: Partial<AssistantStateDto> = {}): AssistantStateDto => ({ visible: true, runs, ...extra })
 
 describe('buildTimeline', () => {
   test('history turns group by user message and attach tool results', () => {
@@ -525,16 +545,16 @@ describe('gate', () => {
     usedToday: 4,
     toolsEnabled: true,
   }
-  const withConfig = (config: AssistantConfigDto | null): AssistantStateDto => ({ config, runs: [] })
+  const withConfig = (config: AssistantConfigDto | null): AssistantStateDto => ({ config, visible: true, runs: [] })
 
   test('reflects account, plan, quota and errors', () => {
     expect(gate(false, withConfig(open), false)).toEqual({ kind: 'signedOut' })
     expect(gate(true, withConfig(null), false)).toEqual({ kind: 'loading' })
     expect(gate(true, withConfig(null), true)).toEqual({ kind: 'serviceError' })
-    expect(gate(true, { runs: [], lastErrorReason: 'cloudUnreachable' }, false)).toEqual({ kind: 'serviceError' })
-    expect(gate(true, { runs: [], lastErrorMessage: 'x' }, false)).toEqual({ kind: 'serviceError' })
+    expect(gate(true, { visible: true, runs: [], lastErrorReason: 'cloudUnreachable' }, false)).toEqual({ kind: 'serviceError' })
+    expect(gate(true, { visible: true, runs: [], lastErrorMessage: 'x' }, false)).toEqual({ kind: 'serviceError' })
     // 拉取进行中的上一次错误不算失败。
-    expect(gate(true, { runs: [], loading: true, lastErrorReason: 'cloudUnreachable' }, false)).toEqual({ kind: 'loading' })
+    expect(gate(true, { visible: true, runs: [], loading: true, lastErrorReason: 'cloudUnreachable' }, false)).toEqual({ kind: 'loading' })
     expect(gate(true, withConfig(open), false)).toEqual({ kind: 'open', quotaExhausted: false })
     expect(gate(true, withConfig({ ...open, usedToday: 5 }), false)).toEqual({ kind: 'open', quotaExhausted: true })
     // 0 = 不限额。
@@ -546,7 +566,7 @@ describe('gate', () => {
   })
 
   test('a missing state field is the same as the empty state', () => {
-    expect(gate(true, { runs: [] }, false)).toEqual({ kind: 'loading' })
+    expect(gate(true, { visible: false, runs: [] }, false)).toEqual({ kind: 'loading' })
   })
 
   test('canSend follows the gate, connection, running state and length limit', () => {
@@ -572,6 +592,36 @@ describe('gate', () => {
   })
 })
 
+describe('sessionLimitState', () => {
+  const limited = { sessionLimit: 10 }
+
+  test('limit 0 or missing means unlimited', () => {
+    expect(sessionLimitState({ sessionLimit: 0 }, 's', 999, false)).toEqual({ kind: 'none' })
+    expect(sessionLimitState({}, 's', 999, false)).toEqual({ kind: 'none' })
+    expect(sessionLimitState(undefined, 's', 999, false)).toEqual({ kind: 'none' })
+    expect(sessionLimitState(null, 's', 999, false)).toEqual({ kind: 'none' })
+  })
+
+  test('a new chat is never limited', () => {
+    expect(sessionLimitState(limited, null, 10, false)).toEqual({ kind: 'none' })
+  })
+
+  test('remaining hint shows for 3, 2 and 1 left only', () => {
+    expect(sessionLimitState(limited, 's', 0, false)).toEqual({ kind: 'none' })
+    expect(sessionLimitState(limited, 's', 6, false)).toEqual({ kind: 'none' })
+    expect(sessionLimitState(limited, 's', 7, false)).toEqual({ kind: 'remaining', count: 3 })
+    expect(sessionLimitState(limited, 's', 8, false)).toEqual({ kind: 'remaining', count: 2 })
+    expect(sessionLimitState(limited, 's', 9, false)).toEqual({ kind: 'remaining', count: 1 })
+    expect(sessionLimitState(limited, 's', 9, true)).toEqual({ kind: 'remaining', count: 1 })
+  })
+
+  test('reached at or above the limit unless a run is active', () => {
+    expect(sessionLimitState(limited, 's', 10, false)).toEqual({ kind: 'reached', limit: 10 })
+    expect(sessionLimitState(limited, 's', 12, false)).toEqual({ kind: 'reached', limit: 10 })
+    expect(sessionLimitState(limited, 's', 10, true)).toEqual({ kind: 'none' })
+  })
+})
+
 describe('classifySendError', () => {
   test('errors are classified', () => {
     const error = (code: ApplicationErrorCode) => ({ code })
@@ -582,7 +632,11 @@ describe('classifySendError', () => {
     expect(classifySendError(error('unsupported'))).toBe('notOpen')
     expect(classifySendError(error('invalidArgument'))).toBe('rejected')
     expect(classifySendError(error('internal'))).toBe('failed')
-    expect(classifySendError({ ...error('unavailable'), reason: 'rateLimited' })).toBe('quotaExceeded')
+    expect(classifySendError({ ...error('unavailable'), reason: 'assistantQuotaExceeded' })).toBe('quotaExceeded')
+    // 会话上限是独立类别：不归到额度 / 忙 / 通用失败。
+    expect(classifySendError({ ...error('conflict'), reason: 'assistantSessionLimit' })).toBe('sessionLimit')
+    expect(classifySendError({ ...error('internal'), reason: 'assistantSessionLimit' })).toBe('sessionLimit')
+    expect(classifySendError({ ...error('unavailable'), reason: 'rateLimited' })).toBe('rateLimited')
     expect(classifySendError({ ...error('internal'), reason: 'cloudUnreachable' })).toBe('unavailable')
     expect(classifySendError({ ...error('internal'), reason: 'sessionExpired' })).toBe('signedOut')
     // 传输层之外的异常（没有错误数据）。
@@ -705,5 +759,361 @@ describe('session helpers', () => {
     expect(findIssue('i1', none, snapshot, history)?.title).toBe('live')
     expect(findIssue('i2', none, snapshot, history)?.title).toBe('history')
     expect(findIssue('missing', none, snapshot, history)).toBeUndefined()
+  })
+})
+
+describe('timeline: v31 additions', () => {
+  test('assistant_step text stays in the process and never becomes the answer', () => {
+    const history = [
+      message('m1', 'r1', 1, 'user', 'q'),
+      message('m2', 'r1', 2, 'assistant_step', 'let me check'),
+      toolMessage('m3', 'r1', 3, 'tool_call', 'c1', 'net_measure', false),
+      toolMessage('m4', 'r1', 4, 'tool_result', 'c1', 'net_measure', false),
+      message('m5', 'r1', 5, 'assistant', 'done'),
+    ]
+    const [turn] = buildTimeline('s1', history, [], [], none, noRatings)
+    expect(turn?.answer).toBe('done')
+    expect(turn?.steps.map((block) => block.type)).toEqual(['text', 'tool'])
+    expect(turn?.answerId).toBe('m5')
+
+    const [onlyStep] = buildTimeline('s1', history.slice(0, 2), [], [], none, noRatings)
+    expect(onlyStep?.answer).toBeNull()
+    expect(onlyStep?.steps).toHaveLength(1)
+  })
+
+  test('history images are attachment ids and the question id is kept for resend', () => {
+    const user = { ...message('m1', 'r1', 1, 'user', 'see'), images: ['att-1', 'att-2'] }
+    const [turn] = buildTimeline('s1', [user, message('m2', 'r1', 2, 'assistant', 'ok')], [], [], none, noRatings)
+    expect(turn?.questionId).toBe('m1')
+    expect(turn?.images).toEqual(['att-1', 'att-2'])
+    expect(turn?.imageCount).toBe(2)
+  })
+
+  test('an interrupted history answer is flagged', () => {
+    const partial = { ...message('m2', 'r1', 2, 'assistant', 'partial'), interrupted: true }
+    const [turn] = buildTimeline('s1', [message('m1', 'r1', 1, 'user', 'q'), partial], [], [], none, noRatings)
+    expect(turn?.answer).toBe('partial')
+    expect(turn?.answerInterrupted).toBe(true)
+  })
+
+  test('a live answer of a failed or canceled run is interrupted; a completed one is not', () => {
+    const flags = (status: AssistantRunStatus) =>
+      buildTimeline('s1', [], [], [run('s1', 'r1', status, [text('part')])], none, noRatings)[0]?.answerInterrupted
+    expect(flags('failed')).toBe(true)
+    expect(flags('canceled')).toBe(true)
+    expect(flags('completed')).toBe(false)
+    expect(flags('running')).toBe(false)
+  })
+
+  test('live turns carry the attached image count and the local thumbnails of the matching question', () => {
+    const live = { ...run('s1', 'r1', 'running', []), imageCount: 2 }
+    const sent = { sessionId: 's1', text: 'live question', images: ['data:image/png;base64,AA==', 'data:image/png;base64,BB=='] }
+    const [turn] = buildTimeline('s1', [], [], [live], none, noRatings, sent)
+    expect(turn?.imageCount).toBe(2)
+    expect(turn?.localImages).toEqual(sent.images)
+    // 文本不一致（不是刚发出的那条）时不挂本地图。
+    const [other] = buildTimeline('s1', [], [], [live], none, noRatings, { ...sent, text: 'something else' })
+    expect(other?.localImages).toEqual([])
+  })
+
+  test('a live persisted tool call without arguments is tolerated', () => {
+    const call: AssistantToolCallDto = { callId: 'c9', name: 'net_measure', kind: 'client', status: 'succeeded', arguments: null }
+    const [turn] = buildTimeline('s1', [], [], [run('s1', 'r1', 'completed', [{ type: 'tool', call }, text('ok')])], none, noRatings)
+    expect(toolCount(turn as Turn)).toBe(1)
+    expect(argumentsSummary(call.arguments)).toBeNull()
+  })
+})
+
+describe('tool state: unknown result', () => {
+  test('an approved write that was stopped mid-run has an unknown result', () => {
+    const stopped: AssistantToolCallDto = { ...pendingCall(null), confirmation: 'approved', status: 'failed', interrupted: true }
+    expect(toolState(stopped, false)).toBe('unknown')
+    expect(toolState(stopped, true)).toBe('unknown')
+    expect(toolStatusKey(confirmView(stopped, false, 0), toolState(stopped, false))).toBe('assistantToolResultUnknown')
+  })
+
+  test('status keys: pending / skipped win over the call state', () => {
+    expect(toolStatusKey({ kind: 'pending', remainingMs: 5 }, 'running')).toBe('assistantToolWaiting')
+    expect(toolStatusKey({ kind: 'declined' }, 'running')).toBe('assistantToolSkipped')
+    expect(toolStatusKey({ kind: 'expired' }, 'interrupted')).toBe('assistantToolSkipped')
+    expect(toolStatusKey(null, 'running')).toBe('assistantToolRunning')
+    expect(toolStatusKey({ kind: 'approved' }, 'succeeded')).toBe('assistantToolDone')
+    expect(toolStatusKey(null, 'failed')).toBe('assistantToolFailed')
+    expect(toolStatusKey(null, 'interrupted')).toBe('assistantToolInterrupted')
+  })
+})
+
+describe('error classification and keys', () => {
+  test('confirm errors: an expired window is separate', () => {
+    expect(classifyConfirmError({ reason: 'assistantConfirmExpired' })).toBe('confirmExpired')
+    expect(classifyConfirmError({ reason: 'rateLimited' })).toBe('failed')
+    expect(classifyConfirmError(undefined)).toBe('failed')
+  })
+
+  test('run error reasons map to their own keys; unknown and canceled fall back to error', () => {
+    const reasons: [string, string][] = [
+      ['timeout', 'assistantRunErrTimeout'],
+      ['maxTurns', 'assistantRunErrMaxTurns'],
+      ['noAnswer', 'assistantRunErrNoAnswer'],
+      ['contextOverflow', 'assistantRunErrContextOverflow'],
+      ['imageUnsupported', 'assistantRunErrImageUnsupported'],
+      ['unavailable', 'assistantRunErrUnavailable'],
+      ['streamLost', 'assistantRunErrStreamLost'],
+      ['network', 'assistantRunErrNetwork'],
+      ['error', 'assistantRunErrError'],
+      ['canceled', 'assistantRunErrError'],
+      ['somethingNew', 'assistantRunErrError'],
+    ]
+    for (const [reason, key] of reasons) expect(runErrorKey(reason)).toBe(key)
+    expect(runErrorKey(null)).toBe('assistantRunErrError')
+    expect(runErrorKey(undefined)).toBe('assistantRunErrError')
+  })
+
+  test('quota and rate limit have separate texts', () => {
+    expect(SEND_FAILURE_KEY.quotaExceeded).toBe('assistantErrQuota')
+    expect(SEND_FAILURE_KEY.sessionLimit).toBe('assistantErrSessionLimit')
+    expect(SEND_FAILURE_KEY.rateLimited).toBe('assistantErrRateLimited')
+    expect(ACTION_FAILURE_KEY.confirmExpired).toBe('assistantErrConfirmExpired')
+    expect(ACTION_FAILURE_KEY.failed).toBe('assistantActionFailed')
+  })
+
+  test('preview actions: protocol names map to keys, anything else shows verbatim', () => {
+    expect(previewActionKey('create')).toBe('assistantPreviewActionCreate')
+    expect(previewActionKey('moveToQueue')).toBe('assistantPreviewActionMoveToQueue')
+    expect(previewActionKey('setSeedLimits')).toBe('assistantPreviewActionSetSeedLimits')
+    expect(previewActionKey('bogus')).toBeNull()
+    expect(previewActionKey('toString')).toBeNull()
+    expect(previewActionKey('')).toBeNull()
+  })
+})
+
+describe('titles, resend history and clock skew', () => {
+  test('a title needs 1-80 characters after trimming', () => {
+    expect(validTitle('  hello  ')).toBe('hello')
+    expect(validTitle('   ')).toBeNull()
+    expect(validTitle('界'.repeat(80))).toBe('界'.repeat(80))
+    expect(validTitle('界'.repeat(81))).toBeNull()
+    // 按码点计数，不按 UTF-16 单元。
+    expect(validTitle('😀'.repeat(80))).toBe('😀'.repeat(80))
+  })
+
+  test('a replaced message and everything after it leave the history', () => {
+    const messages = [message('m1', 'r1', 1, 'user', 'a'), message('m2', 'r1', 2, 'assistant', 'b'), message('m3', 'r2', 3, 'user', 'c')]
+    expect(withoutReplaced(messages, 'm3').map((item) => item.id)).toEqual(['m1', 'm2'])
+    expect(withoutReplaced(messages, 'm1')).toEqual([])
+    expect(withoutReplaced(messages, 'missing')).toBe(messages)
+  })
+
+  test('skew is local minus agent; an old agent or an idle projection means none', () => {
+    expect(clockSkewMs(state([], { nowUnixMs: 10_000 }), 12_500)).toBe(2_500)
+    expect(clockSkewMs(state([], { nowUnixMs: 10_000 }), 7_000)).toBe(-3_000)
+    expect(clockSkewMs(state([], { nowUnixMs: 0 }), 12_500)).toBe(0)
+    expect(clockSkewMs(state([]), 12_500)).toBe(0)
+    expect(agentNowMs(12_600, 2_500)).toBe(10_100)
+    // 本机时钟偏快 2.5 秒：agent 时间轴上的截止时间仍按 agent 时钟倒数。
+    const call = pendingCall(20_000)
+    expect(confirmView(call, true, agentNowMs(12_600, 2_500))).toEqual({ kind: 'pending', remainingMs: 9_900 })
+  })
+})
+
+describe('turnTranscript', () => {
+  const t = (key: string) => `[${key}]`
+
+  test('contains the question, the whole process, the answer and the failure notes', () => {
+    const call: AssistantToolCallDto = {
+      ...readOnlyCall(),
+      status: 'succeeded',
+      durationMs: 1_500,
+      arguments: { a: 1 },
+      outputPreview: 'plain ``` result',
+    }
+    const failed = { ...run('s1', 'r1', 'failed', [text('thinking'), { type: 'tool', call }, text('partial')]), errorReason: 'timeout', error: 'boom' }
+    const [turn] = buildTimeline('s1', [], [], [failed], none, noRatings)
+    const out = turnTranscript(turn as Turn, 0, t)
+    const has = (part: string) => out.includes(part)
+    expect(out.startsWith('## [assistantTranscriptUser]\n\nlive question\n\n## [assistantTranscriptAssistant]\n')).toBe(true)
+    expect(has('thinking')).toBe(true)
+    expect(has('### [assistantTranscriptTool] `net_measure` · [assistantToolDone] · [assistantToolLocal] · 1.5 s')).toBe(true)
+    expect(has('```json\n{\n  "a": 1\n}\n```')).toBe(true)
+    // 内容里有 ``` 时围栏加长，不会提前闭合。
+    expect(has('````\nplain ``` result\n````')).toBe(true)
+    expect(has('partial')).toBe(true)
+    expect(has('[assistantAnswerInterrupted]')).toBe(true)
+    expect(has('[assistantRunFailed]')).toBe(true)
+    expect(has('[assistantRunErrTimeout]')).toBe(true)
+    expect(has('boom')).toBe(true)
+  })
+
+  test('a canceled run says it stopped; a clean answer has no notes', () => {
+    const [canceled] = buildTimeline('s1', [], [], [run('s1', 'r1', 'canceled', [])], none, noRatings)
+    expect(turnTranscript(canceled as Turn, 0, t).includes('[assistantStopped]')).toBe(true)
+    const history = [message('m1', 'r1', 1, 'user', 'q'), message('m2', 'r1', 2, 'assistant', 'answer')]
+    const [done] = buildTimeline('s1', history, [], [], none, noRatings)
+    const out = turnTranscript(done as Turn, 0, t)
+    expect(out.includes('answer')).toBe(true)
+    expect(out.includes('[assistantRunFailed]')).toBe(false)
+    expect(out.includes('[assistantAnswerInterrupted]')).toBe(false)
+  })
+})
+
+describe('observing runs and kept images', () => {
+  const observing = (extra: Partial<AssistantRunDto> = {}): AssistantRunDto => ({ ...run('s1', 'r1', 'running', []), observing: true, ...extra })
+
+  test('imageIds and observing flow into the live turn; kept images are counted with new ones', () => {
+    const [turn] = buildTimeline('s1', [], [], [observing({ imageIds: ['a1', 'a2'], imageCount: 1 })], none, noRatings)
+    expect(turn?.live?.observing).toBe(true)
+    expect(turn?.images).toEqual(['a1', 'a2'])
+    expect(turn?.imageCount).toBe(3)
+    const [plain] = buildTimeline('s1', [], [], [run('s1', 'r1', 'running', [])], none, noRatings)
+    expect(plain?.live?.observing).toBe(false)
+    expect(plain?.images).toEqual([])
+  })
+
+  test('a pending confirmation of an observed run is not counted for the badge or the jump hint', () => {
+    const now = 1_000
+    const pending = (): AssistantRunItemDto => ({ type: 'tool', call: pendingCall(now + 5_000) })
+    const snapshot = state([observing({ items: [pending()] }), run('b', 'r2', 'running', [pending()])])
+    expect(pendingConfirmations(snapshot, now)).toBe(1)
+    // 倒计时仍要走表：算上旁观执行。
+    expect(pendingConfirmations(snapshot, now, true)).toBe(2)
+    expect(pendingElsewhere(state([observing({ items: [pending()] })]), null, now)).toBeNull()
+    expect(pendingElsewhere(snapshot, 's1', now)).toBe('b')
+  })
+})
+
+describe('retry plan for a failed turn', () => {
+  const failed = (extra: Partial<AssistantRunDto> = {}): AssistantRunDto => ({ ...run('s1', 'r1', 'failed', []), errorReason: 'timeout', ...extra })
+
+  test('a persisted question is replaced and keeps its images', () => {
+    const history = [message('m1', 'r1', 1, 'user', 'how fast?')]
+    const [turn] = buildTimeline('s1', history, [], [failed()], none, noRatings)
+    expect(retryPlan(turn as Turn, true)).toEqual({ kind: 'replace', questionId: 'm1', text: 'how fast?', keepImages: false })
+    const withImages = [{ ...message('m1', 'r1', 1, 'user', 'see'), images: ['att-1'] }]
+    const [pictured] = buildTimeline('s1', withImages, [], [failed()], none, noRatings)
+    expect(retryPlan(pictured as Turn, true)).toEqual({ kind: 'replace', questionId: 'm1', text: 'see', keepImages: true })
+  })
+
+  test('an unsaved question that was never accepted is resent as typed, with its local images when it had any', () => {
+    const [plain] = buildTimeline('s1', [], [], [failed({ runId: null, question: '  hello  ' })], none, noRatings)
+    expect(plain?.live?.runId).toBeNull()
+    expect(awaitsHistory(plain as Turn)).toBe(false)
+    expect(retryPlan(plain as Turn, true)).toEqual({ kind: 'resend', text: 'hello', images: [] })
+    const sent = { sessionId: 's1', text: 'live question', images: ['data:image/png;base64,AA'] }
+    const [pictured] = buildTimeline('s1', [], [], [failed({ runId: null, imageCount: 1 })], none, noRatings, sent)
+    expect(retryPlan(pictured as Turn, true)).toEqual({ kind: 'resend', text: 'live question', images: ['data:image/png;base64,AA'] })
+  })
+
+  test('an unsaved question whose images are gone cannot be resent', () => {
+    const [turn] = buildTimeline('s1', [], [], [failed({ runId: null, imageCount: 2 })], none, noRatings)
+    expect(retryPlan(turn as Turn, true)).toBeNull()
+  })
+
+  test('an accepted run whose question is not in the history yet is never resent', () => {
+    // 云端先保存用户消息再返回执行流：有执行 ID 说明提问已落库，只是历史还没读到；重发会重复提问并多占一次额度。
+    const [turn] = buildTimeline('s1', [], [], [failed({ question: 'hello' })], none, noRatings)
+    expect(turn?.questionId).toBeNull()
+    expect(awaitsHistory(turn as Turn)).toBe(true)
+    expect(retryPlan(turn as Turn, true)).toBeNull()
+    // 带本地缩略图的刚发出的提问同样不重发。
+    const sent = { sessionId: 's1', text: 'hello', images: ['data:image/png;base64,AA'] }
+    const [pictured] = buildTimeline('s1', [], [], [failed({ question: 'hello', imageCount: 1 })], none, noRatings, sent)
+    expect(retryPlan(pictured as Turn, true)).toBeNull()
+    // 历史读到后才有替换方案。
+    const history = [message('m1', 'r1', 1, 'user', 'hello')]
+    const [loaded] = buildTimeline('s1', history, [], [failed({ question: 'hello' })], none, noRatings)
+    expect(awaitsHistory(loaded as Turn)).toBe(false)
+    expect(retryPlan(loaded as Turn, true)).toEqual({ kind: 'replace', questionId: 'm1', text: 'hello', keepImages: false })
+    // 只有失败的轮次才算在等历史。
+    const [running] = buildTimeline('s1', [], [], [run('s1', 'r1', 'running', [])], none, noRatings)
+    expect(awaitsHistory(running as Turn)).toBe(false)
+  })
+
+  test('only the last failed turn offers a retry', () => {
+    const history = [message('m1', 'r1', 1, 'user', 'q')]
+    const [failedTurn] = buildTimeline('s1', history, [], [failed()], none, noRatings)
+    expect(retryPlan(failedTurn as Turn, false)).toBeNull()
+    const [canceled] = buildTimeline('s1', history, [], [{ ...failed(), status: 'canceled' }], none, noRatings)
+    expect(retryPlan(canceled as Turn, true)).toBeNull()
+    const [clean] = buildTimeline('s1', [...history, message('m2', 'r1', 2, 'assistant', 'ok')], [], [], none, noRatings)
+    expect(retryPlan(clean as Turn, true)).toBeNull()
+  })
+})
+
+describe('resend gating', () => {
+  const open = { kind: 'open', quotaExhausted: false } as const
+  const base = { gate: open, stale: false, sending: false, cooldown: false, hasActiveRun: false, hasSession: true, limitReached: false }
+
+  test('regenerate, edit and retry need an open gate, a session and no blocker', () => {
+    expect(canResend(base)).toBe(true)
+    expect(canResend({ ...base, gate: { kind: 'open', quotaExhausted: true } })).toBe(false)
+    expect(canResend({ ...base, gate: { kind: 'planDisabled' } })).toBe(false)
+    for (const blocker of [{ stale: true }, { sending: true }, { cooldown: true }, { hasActiveRun: true }, { hasSession: false }, { limitReached: true }]) {
+      expect(canResend({ ...base, ...blocker })).toBe(false)
+    }
+  })
+
+  test('a cooldown also blocks a plain send', () => {
+    const check = { gate: open, stale: false, sending: false, hasActiveRun: false, draft: 'hi', maxMessageChars: 10 }
+    expect(canSend(check)).toBe(true)
+    expect(canSend({ ...check, cooldown: true })).toBe(false)
+  })
+})
+
+describe('rating comment', () => {
+  test('1-500 characters after trimming, counted by code points', () => {
+    expect(validRatingComment('  too slow  ')).toBe('too slow')
+    expect(validRatingComment('   ')).toBeNull()
+    expect(validRatingComment('界'.repeat(MAX_RATING_COMMENT_CHARS))).toBe('界'.repeat(MAX_RATING_COMMENT_CHARS))
+    expect(validRatingComment('界'.repeat(MAX_RATING_COMMENT_CHARS + 1))).toBeNull()
+    expect(validRatingComment('😀'.repeat(MAX_RATING_COMMENT_CHARS))).not.toBeNull()
+  })
+})
+
+describe('history search while typing', () => {
+  const sess = (id: string, title: string): AssistantSessionDto => ({
+    id,
+    channel: 'web',
+    kind: 'ask',
+    title,
+    messageCount: 1,
+    createdAt: '',
+    updatedAt: '',
+  })
+  const items = [sess('a', 'Proxy setup'), sess('b', 'Speed limit'), sess('c', '代理设置')]
+
+  test('the local filter matches titles case-insensitively and ignores blank queries', () => {
+    expect(filterSessions(items, 'PROXY').map((item) => item.id)).toEqual(['a'])
+    expect(filterSessions(items, '  设置 ').map((item) => item.id)).toEqual(['c'])
+    expect(filterSessions(items, '   ')).toHaveLength(3)
+    expect(filterSessions(items, 'nothing')).toEqual([])
+  })
+
+  test('the server result is shown whole once the typed query was applied', () => {
+    // 命中可能来自消息内容，标题里没有：已应用的结果不再按标题过滤。
+    expect(visibleSessions(items, 'speed', 'speed ')).toHaveLength(3)
+    expect(visibleSessions(items, '', '')).toHaveLength(3)
+  })
+
+  test('while the typed query is still debouncing the list is filtered by title', () => {
+    expect(visibleSessions(items, '', 'proxy').map((item) => item.id)).toEqual(['a'])
+    expect(visibleSessions(items, 'proxy', 'proxy s').map((item) => item.id)).toEqual(['a'])
+  })
+})
+
+describe('keyboard cursor', () => {
+  test('moves one step without wrapping', () => {
+    expect(stepCursor(null, 3, true)).toBe(0)
+    expect(stepCursor(null, 3, false)).toBe(2)
+    expect(stepCursor(0, 3, true)).toBe(1)
+    expect(stepCursor(2, 3, true)).toBe(2)
+    expect(stepCursor(2, 3, false)).toBe(1)
+    expect(stepCursor(0, 3, false)).toBe(0)
+  })
+
+  test('an empty list has no cursor and a stale one is clamped', () => {
+    expect(stepCursor(null, 0, true)).toBeNull()
+    expect(stepCursor(4, 0, false)).toBeNull()
+    expect(stepCursor(7, 3, false)).toBe(1)
+    expect(stepCursor(7, 3, true)).toBe(2)
   })
 })
